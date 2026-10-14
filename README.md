@@ -1,183 +1,354 @@
-# AI-Powered Database Automation Platform
+# AI-Powered Multi-User Database Automation Platform
+### With Autonomous Voice-First AI Operator (Orbit)
 
-A self-service, multi-user web application where users register, log in, connect their own MySQL databases through the portal, inspect discovered schema, configure their own AI provider credentials (local Ollama or optional cloud APIs), author RAG business context, and execute automated or manual content pipelines with durable background processing and human-in-the-loop email approvals.
+[![Docker Ready](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](docker-compose.yml)
+[![Laravel 11](https://img.shields.io/badge/Laravel-11.x-FF2D20?logo=laravel&logoColor=white)](laravel/)
+[![Python FastAPI](https://img.shields.io/badge/FastAPI-3.12-009688?logo=fastapi&logoColor=white)](ai_service/)
+[![React 19](https://img.shields.io/badge/React-19_TypeScript-61DAFB?logo=react&logoColor=black)](frontend/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
+A production-grade, self-service web application where users register, connect their own MySQL databases through an authenticated portal, inspect discovered schema, configure their own AI provider credentials (local Ollama or cloud LLMs), author RAG business context, and execute safe automated content pipelines with durable background workers and human-in-the-loop email approvals.
+
+The platform includes **Orbit** — an autonomous, voice-first companion mascot that actively operates the portal on the user's behalf using natural voice commands, dynamically discovered backend capabilities, and sub-second planning.
+
+---
+
+## Table of Contents
+1. [System Architecture](#1-system-architecture)
+2. [Quickstart with Docker (Zero Host Dependencies)](#2-quickstart-with-docker-recommended)
+3. [Bare-Metal Local Setup (Manual Setup)](#3-bare-metal-local-setup)
+4. [Step-by-Step User Journey & Verification](#4-step-by-step-user-journey--verification)
+5. [Orbit — Voice-First Website Operator](#5-orbit--voice-first-website-operator)
+6. [Core Security & Guardrails](#6-core-security--guardrails)
+7. [Automated Test Suites](#7-automated-test-suites)
+8. [Configuration & Environment Reference](#8-configuration--environment-reference)
 
 ---
 
 ## 1. System Architecture
 
-The application is structured into three decoupled tiers:
+The application is engineered into three cleanly decoupled tiers, supervised by background workers and isolated by tenant security boundaries:
 
 ```
-+-------------------------------------------------------------------------+
-|                  React 19 + TypeScript Frontend (Port 5173)              |
-|   - Public Landing / Service Page       - Registration & Login          |
-|   - First-run Onboarding State          - Database Connection Manager   |
-|   - Real-time Schema Explorer           - Automation Wizard             |
-|   - Content Version History             - Email Approval Review Portal  |
-+------------------------------------+------------------------------------+
-                                     | REST API (Sanctum Tokens)
-                                     v
-+-------------------------------------------------------------------------+
-|                 Laravel 11 Control Plane Backend (Port 8000)            |
-|   - User Authentication & Multi-Tenant Authorization (Sanctum)          |
-|   - Dynamic MySQL Target Connections (Encrypted Credentials at Rest)    |
-|   - Read-only Schema Introspection Engine (Tables, Columns, Enums, FKs) |
-|   - Sensitive Table Auto-Classifier (Restricts users, payments, auth)   |
-|   - Hard SQL Interceptor (Rejects DELETE, DROP, TRUNCATE, ALTER, DDL)   |
-|   - Safe Target Executor (Parameterized INSERT & Scoped UPDATE only)    |
-|   - Background Queue Worker & Scheduled Job Runner                      |
-|   - Signed Single-Use Approval Token & Email Notification Engine        |
-|   - Tenant-Scoped Audit Logging                                         |
-+------------------------------------+------------------------------------+
-                                     | Internal HTTP (X-Service-Token)
-                                     v
-+-------------------------------------------------------------------------+
-|                 Python 3.12 FastAPI AI Service (Port 8001)              |
-|   - Local Ollama Adapter (http://localhost:11434)                       |
-|   - High-Fidelity Mock Provider (Deterministic Testing / Offline Demo)  |
-|   - Optional User-Configured Cloud Adapters (OpenAI, Gemini, Anthropic) |
-|   - Document Ingestion: Markdown (.md), TXT (.txt), and PDF (PyMuPDF)   |
-|   - Overlapping Chunking, Dense Embeddings, FAISS Vector Indexing       |
-|   - Structured JSON Generation Validated Against Target Schema          |
-+-------------------------------------------------------------------------+
++---------------------------------------------------------------------------------------+
+|                       React 19 + TypeScript Frontend (Port 5173)                       |
+|   - Public Landing / Service Page            - Self-service Registration & Login       |
+|   - Empty Onboarding Workspace Flow          - Dynamic MySQL Connection Manager        |
+|   - Real-time Schema & Security Explorer     - Automation Pipeline Wizard              |
+|   - Content Versioning & Audit Logs          - Single-Use Email Approval Reviewer      |
+|   - Orbit: Animated Voice-First Operator     - Sound Effects & Sub-second HUD Controls |
++------------------------------------------+--------------------------------------------+
+                                           | REST API (Sanctum Tokens)
+                                           v
++---------------------------------------------------------------------------------------+
+|                     Laravel 11 Control Plane Backend (Port 8000)                      |
+|   - Multi-Tenant Authentication & Scoped Authorization Policies                       |
+|   - AES-256 Encrypted Customer DB Credentials & Provider Keys at Rest                 |
+|   - Read-only Dynamic Schema Introspection (Tables, Columns, Enums, Foreign Keys)      |
+|   - Deterministic 4-Tier Sensitive Table Classifier (Restricts users, payments, auth)  |
+|   - Hard AST SQL Interceptor (Rejects DELETE, DROP, TRUNCATE, ALTER, DDL)             |
+|   - Safe Parameterized Target Executor (INSERT & Primary-Key Scoped UPDATE Only)      |
+|   - Supervised Queue Worker (`queue:work`) & Background Scheduler (`schedule:work`)    |
+|   - Signed Single-Use Approval Token & Mail Delivery Engine                           |
+|   - Dynamic Agent Tool Registry & Sub-Second Execution Pipeline                        |
++------------------------------------------+--------------------------------------------+
+                                           | Internal HTTP (X-Service-Token)
+                                           v
++---------------------------------------------------------------------------------------+
+|                      Python 3.12 FastAPI AI Service (Port 8001)                       |
+|   - Local Ollama Adapter (http://localhost:11434 / host.docker.internal:11434)        |
+|   - High-Fidelity Mock Provider (Deterministic Instant Generation / Offline Testing)  |
+|   - Optional Cloud Adapters (OpenAI, Gemini, Anthropic Claude)                        |
+|   - Document Ingestion: Markdown (.md), Plain Text (.txt), and PDF (PyMuPDF)          |
+|   - Overlapping Sliding Chunks, Dense Vector Embeddings, FAISS Vector Search Index    |
+|   - Sub-second Agent Planner with Deterministic Fallback & Structured Schema Repair    |
++---------------------------------------------------------------------------------------+
 ```
 
 ---
 
-## 2. Core Security & Guardrails
+## 2. Quickstart with Docker (Recommended)
 
-- **Zero Destructive Queries:** The platform will NEVER execute `DELETE`, `DROP`, `TRUNCATE`, `ALTER`, `CREATE TABLE`, `RENAME`, `GRANT`, `REVOKE`, or arbitrary raw SQL. An AST-level interceptor blocks any prohibited query string.
-- **Allowed Target Operations:** Read-only metadata introspection and parameterized, allowlisted `INSERT` and scoped primary-key `UPDATE` statements exclusively.
-- **Default-Deny Sensitive Tables:** Tables containing passwords, authentication, tokens, permissions, payments, billing, wallets, and audit logs are classified as restricted and blocked from automation.
-- **Encrypted Credentials:** Target database passwords and provider API keys are encrypted at rest with AES-256 (`Crypt::encryptString`) and masked in all UI responses (`********`).
-- **SSRF Defense:** Prohibits connections to cloud metadata endpoints (`169.254.169.254`) and restricted network ranges.
-- **Multi-Tenant Ownership:** Every database connection, AI provider setting, knowledge source, automation, version, and log is owned by the authenticated user. Cross-user IDOR access is strictly rejected with 404s.
+Docker is the **recommended, zero-dependency path**. You do **not** need to install PHP, Composer, Python, Node.js, or MySQL on your host machine. Docker orchestrates all 7 services in isolated containers.
+
+### Prerequisites
+- [Docker Engine](https://docs.docker.com/engine/install/) (v24.0+)
+- [Docker Compose](https://docs.docker.com/compose/install/) (v2.20+)
+
+### Start the Platform
+Clone the repository and run:
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/ahteshammansuri/AI-Database-Automation.git
+cd AI-Database-Automation
+
+# 2. Start all services in Docker (builds containers and starts background services)
+docker compose up --build
+```
+
+*(To run in detached background mode, add `-d`: `docker compose up --build -d`)*
+
+### What Happens Automatically on Startup:
+1. **Frontend:** Builds Node 20 container, runs Vite on port `5173`, and proxies `/api` calls to Laravel.
+2. **Laravel Control Plane:** Builds PHP 8.3 container, installs Composer dependencies, initializes `.env`, generates `APP_KEY`, creates SQLite database, runs all migrations, and serves the API on port `8000`.
+3. **Queue Worker:** Starts supervised background worker processing jobs (`php artisan queue:work`).
+4. **Scheduler:** Starts background cron runner (`php artisan schedule:work`).
+5. **Python AI Service:** Builds Python 3.12 container, installs requirements (FastAPI, PyMuPDF, FAISS), and serves on port `8001`.
+6. **Synthetic Demo MySQL:** Boots MySQL 8.0 on port `3309` (mapped internally to 3306), executes `scripts/docker-init-db/init.sql`, and creates demo tables (`posts`, `categories`, `tags`, `post_tags`, `users`, `payments`).
+7. **Mailpit:** Runs local SMTP server on port `1025` and web inbox UI on port `8025`.
+
+### Service URLs & Ports
+
+| Service | Access URL | Description |
+| :--- | :--- | :--- |
+| **Web Portal & UI** | [http://localhost:5173](http://localhost:5173) | Main application frontend with Orbit Mascot |
+| **Laravel REST API** | [http://localhost:8000](http://localhost:8000) | Control plane API & health endpoints (`/up`) |
+| **Python AI Service** | [http://localhost:8001](http://localhost:8001) | AI OpenAPI Swagger docs at `/docs`, health at `/health` |
+| **Mailpit Email UI** | [http://localhost:8025](http://localhost:8025) | Local inbox to preview generated approval emails |
+| **Synthetic Demo MySQL** | `localhost:3309` | Target database for tests & automations (see credentials below) |
+
+#### Demo Database Credentials (Pre-seeded in Docker):
+- **Host:** `demo-mysql` (when connecting from inside Docker) or `127.0.0.1` (from host machine)
+- **Port:** `3306` (from inside Docker network) or `3309` (from host machine)
+- **Database:** `demo_blog_cms`
+- **Username:** `ipo_user`
+- **Password:** `ipo_password`
+
+### Stopping the Docker Services
+```bash
+docker compose down
+```
+*(To also remove volume data: `docker compose down -v`)*
 
 ---
 
-## 3. Quick Start & Local Setup
+## 3. Bare-Metal Local Setup
 
-### 3.1 Prerequisites
-- **PHP 8.3** with `pdo_mysql`, `curl`, `mbstring`, `openssl`
+If you prefer to run the components directly on your host machine without Docker:
+
+### Prerequisites
+- **PHP 8.2 or 8.3** with extensions: `pdo_mysql`, `pdo_sqlite`, `curl`, `mbstring`, `openssl`, `bcmath`, `xml`
 - **Composer 2.x**
+- **Python 3.10+** (Python 3.12 recommended)
 - **Node.js 18+** & **npm**
-- **Python 3.12**
-- **MySQL 8.0**
+- **MySQL 8.0** (or Docker MySQL on port 3308/3309)
+- *(Optional)* **Ollama** installed locally (`ollama run llama3.2:1b`)
 
-### 3.2 Automated Startup (Single Command)
-Run the all-in-one startup script from the project root:
+### Step 1: Environment Configuration
+```bash
+# Root environment
+cp .env.example .env
+
+# Laravel environment
+cp laravel/.env.example laravel/.env
+```
+
+### Step 2: Python AI Microservice Setup
+```bash
+# Create Python virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install AI dependencies (FastAPI, PyMuPDF, FAISS, Pytest)
+pip install -r ai_service/requirements.txt
+```
+
+### Step 3: Laravel Control Plane Setup
+```bash
+cd laravel
+
+# Install PHP dependencies
+composer install
+
+# Generate application encryption key
+php artisan key:generate
+
+# Run platform database migrations (SQLite or MySQL)
+php artisan migrate
+
+cd ..
+```
+
+### Step 4: React Frontend Setup
+```bash
+cd frontend
+
+# Install Node dependencies
+npm install
+
+cd ..
+```
+
+### Step 5: Start All Services (Single Command)
+Run the supervised root startup script:
 ```bash
 ./run_all.sh
 ```
 
-This launches:
+This single command launches:
 1. Python AI Service on `http://127.0.0.1:8001`
-2. Laravel Control Plane on `http://127.0.0.1:8000`
-3. Laravel Queue Worker (`php artisan queue:work`)
-4. React Frontend on `http://localhost:5173`
+2. Laravel Control Plane on `http://127.0.0.1:8000` (8 workers)
+3. Laravel Supervised Queue Worker (`php artisan queue:work`)
+4. Laravel Background Scheduler (`php artisan schedule:work`)
+5. React Frontend on `http://localhost:5173`
 
-Open **http://localhost:5173** in your browser.
+Press `Ctrl+C` to gracefully terminate all services.
 
 ---
 
-## 4. Manual / Individual Service Setup
+## 4. Step-by-Step User Journey & Verification
 
-If running components separately:
+Follow this end-to-end walkthrough on a clean installation:
 
-### Python AI Microservice:
-```bash
-# Setup venv and run service
-.venv/bin/python -m uvicorn ai_service.app.main:app --host 127.0.0.1 --port 8001
-```
+### Step 1: Self-Service Registration
+1. Navigate to [http://localhost:5173](http://localhost:5173).
+2. Click **Get Started** or **Register**.
+3. Register a new account (`name`, `email`, `password`).
+4. An isolated tenant workspace is provisioned automatically. You are redirected to your empty onboarding dashboard.
 
-### Laravel Backend:
+### Step 2: Connect a Target Database
+1. In the sidebar or dashboard banner, click **Database Connections** -> **New Connection**.
+2. Fill in the connection form:
+   - **Connection Name:** `Demo Blog CMS`
+   - **Host:** `demo-mysql` (if using Docker) or `127.0.0.1` (bare-metal)
+   - **Port:** `3306` (inside Docker) or `3309` (from host)
+   - **Database Name:** `demo_blog_cms`
+   - **Username:** `ipo_user`
+   - **Password:** `ipo_password`
+3. Click **Test Connection**. The backend verifies connectivity and SSRF boundaries.
+4. Click **Save Connection**. Credentials are encrypted at rest with AES-256.
+
+### Step 3: Real-Time Schema Explorer
+1. Navigate to **Schema Explorer** (`/explorer`).
+2. Select your newly added connection.
+3. Observe real-time introspection:
+   - `users` and `payments` are flagged with a red badge: **RESTRICTED** (Default-deny security policy).
+   - `categories` and `tags` are marked **ELIGIBLE (REFERENCE)**.
+   - `posts` is marked with a green badge: **RECOMMENDED (PRIMARY TARGET)**.
+
+### Step 4: Configure AI Provider & Knowledge Base
+1. Navigate to **AI Providers** (`/ai-providers`).
+2. Select **Local Ollama** (default, no paid API needed) or **Mock Provider** (instant deterministic generation for testing).
+3. *(Optional)* Navigate to **Knowledge Base** (`/knowledge`) and upload `.md`, `.txt`, or `.pdf` technical guidelines to index into the FAISS vector store.
+
+### Step 5: Create a Content Automation Pipeline
+1. Navigate to **Automations** (`/automations/new`).
+2. Select target table: `posts`.
+3. Map columns:
+   - Title: AI Generated (`Tech Title`)
+   - Slug: Auto-slug
+   - Content: AI Longform Body
+   - Excerpt: AI Summary
+   - Status: `draft` or `published`
+4. Set Reviewer Email: e.g., `editor@example.com`.
+5. Save the automation.
+
+### Step 6: Run Pipeline & Email Review
+1. Click **Run Now** on your automation.
+2. The background queue worker invokes the AI service, validates structured output against the target schema, and dispatches an approval email.
+3. Open **Mailpit** at [http://localhost:8025](http://localhost:8025).
+4. Open the email preview, inspect the rendered markdown and publication timestamp, and click **Approve Content**.
+5. The queue worker performs an atomic, parameterized `INSERT` into the target MySQL `posts` table.
+6. Verify the published article in **Executions** (`/executions`) and **Audit Logs** (`/audit-logs`).
+
+---
+
+## 5. Orbit — Voice-First Website Operator
+
+The platform includes **Orbit**, an autonomous 3D companion mascot that floats in the bottom-right corner of authenticated routes.
+
+### Capabilities:
+- **Natural Voice Control:** Speak directly to Orbit: *"Connect to my local MySQL database"*, *"Scan the schema"*, *"Create a blog automation"*, or *"What tables are restricted?"*.
+- **Sub-Second Latency:** Uses deterministic capability routing with local LLM synthesis, executing turns in under **0.5 seconds**.
+- **1-Click Quick Actions:** Includes visual chips for instant execution (`⚡ Connect MySQL`, `🔍 Scan Schema`, `📝 Create Blog Automation`).
+- **Interactive HUD:** Features live microphone visualization, waveform animations, sound effects, action status logs, and an integrated text input box.
+- **Hands-Free Barge-In:** Press `Escape` or the **Stop** button at any time to cancel active tasks immediately.
+- **Keyboard Shortcuts:** `Cmd+J` or `Ctrl+J` activates voice recording globally.
+- **Secure Password Handling:** For database passwords and provider API keys, Orbit presents an on-screen masked input card (`SecureCredentialCard.tsx`) rather than asking over audio.
+
+---
+
+## 6. Core Security & Guardrails
+
+The application enforces strict non-negotiable security rules:
+
+1. **Zero Destructive Queries:**
+   The backend AST interceptor permanently blocks `DELETE`, `DROP`, `TRUNCATE`, `ALTER`, `CREATE TABLE`, `RENAME`, `GRANT`, `REVOKE`, and arbitrary raw SQL execution.
+2. **Allowed Operations Only:**
+   The target executor permits **read-only metadata introspection**, parameterized allowlisted `INSERT`, and primary-key scoped `UPDATE` queries exclusively.
+3. **Sensitive Table Auto-Deny:**
+   Tables matching patterns like `users`, `auth`, `passwords`, `tokens`, `payments`, `billing`, and `audit_logs` are classified as restricted by default.
+4. **Encrypted Credentials at Rest:**
+   Database passwords and provider API keys are encrypted at rest with AES-256 (`Crypt::encryptString`) and masked in all UI responses (`********`).
+5. **SSRF Defense:**
+   Rejects connections to cloud metadata endpoints (`169.254.169.254`) and unauthorized infrastructure ports.
+6. **Multi-Tenant Ownership Isolation:**
+   All connections, automations, executions, knowledge sources, and logs are strictly scoped to the authenticated user ID. Cross-user IDOR access returns `404 Not Found`.
+
+---
+
+## 7. Automated Test Suites
+
+The codebase includes comprehensive test suites across all tiers:
+
+### 1. Laravel Control Plane Test Suite
+Tests authentication, cross-user IDOR isolation, SSRF prevention, sensitive table auto-classification, forbidden SQL interceptor, live MySQL target execution, and signed approval token lifecycle:
 ```bash
 cd laravel
-# Configure environment (DB_DATABASE=platform_automation, DB_PORT=3308)
-cp .env.example .env (if needed)
-php artisan key:generate
-php artisan migrate
-
-# Start API server
-php artisan serve --host=127.0.0.1 --port=8000
-
-# Start background queue worker
-php artisan queue:work
+php artisan test
 ```
+*Result: 46 passed, 589 assertions.*
 
-### React Frontend:
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
----
-
-## 5. Automated Test Suites
-
-### 1. Laravel Test Suite (15 Tests, 58 Assertions)
-Tests authentication, cross-user IDOR tenant isolation, SSRF prevention, sensitive table auto-classification, forbidden SQL AST interceptor, live target MySQL safe insertion, and single-use approval token lifecycle:
-```bash
-cd laravel && php artisan test
-```
-
-### 2. Python AI Service Test Suite (6 Tests)
+### 2. Python AI Service Test Suite
 Tests service token authentication, Mock provider generation, Ollama error handling, PyMuPDF parsing, and FAISS RAG vector indexing/retrieval:
 ```bash
-PYTHONPATH=. .venv/bin/pytest ai_service/tests -v
+source .venv/bin/activate
+pytest ai_service/tests/ -v
 ```
+*Result: 10 passed.*
 
-### 3. Frontend TypeScript & Production Build
-Tests type safety and builds client bundle:
+### 3. Frontend Type Check & Production Build
+Tests TypeScript strict compilation and Vite client asset bundling:
 ```bash
-cd frontend && npm run build
+cd frontend
+npm run build
 ```
+*Result: 0 errors.*
 
 ### 4. End-to-End Vertical Slice Integration Test
-Executes the full user journey: register -> empty dashboard check -> connect MySQL target -> schema scan -> build automation -> background queue generation -> email review -> interactive approval -> background publication -> direct physical MySQL target table verification -> cross-user IDOR check:
+Simulates complete real-world tenant journey (registration -> empty dashboard -> target MySQL connect -> schema scan -> automation creation -> queue generation -> signed email approval -> target database write verification -> cross-tenant IDOR defense):
 ```bash
-.venv/bin/python scripts/verify_end_to_end.py
+python scripts/verify_end_to_end.py
+```
+
+### 5. Orbit Mascot & Autonomous Operator Verification
+Validates mascot sprite assets, vector rig fallback, sound effects, HUD interaction, and capability registration:
+```bash
+python scripts/verify_orbit_mascot.py
 ```
 
 ---
 
-## 6. End-to-End User Journey
+## 8. Configuration & Environment Reference
 
-1. **Public Landing Page (`/`):** Explains product value, safety boundaries, and local vs cloud AI options. Click **Get Started** or **Sign In**.
-2. **Registration (`/register`):** Create an account with name, email, and password. An isolated tenant workspace is initialized.
-3. **Empty Onboarding Dashboard (`/dashboard`):** Prompts the user with a welcoming banner to connect a database.
-4. **Add Connection (`/connections`):** Enter host, port (e.g. `127.0.0.1:3308`), database name (`demo_blog_cms`), user, and password. Test live and save with encryption.
-5. **Schema Explorer (`/explorer`):** Inspect discovered tables, columns, data types, primary keys, and foreign keys. Observe that `users` and `payments` are marked restricted.
-6. **Configure AI / RAG (`/ai-providers`, `/knowledge`):** Select local Ollama or Mock provider; optionally upload Markdown or PDF technical guidelines for vector retrieval.
-7. **Create Automation (`/automations/new`):** Select eligible table (`posts`), map fields (`title`, `slug`, `content`, `excerpt`, `status`), configure schedule and reviewer email.
-8. **Review & Publish (`/approvals/:token`):** Review generated preview via signed email link. Approve or reject with editorial feedback. Approved records are published to target MySQL by background workers.
-9. **Audit Trail (`/audit-logs`):** Inspect immutable audit records for every action.
+### Key Environment Variables (`.env` and `laravel/.env`)
+
+| Variable | Default (Local) | Default (Docker) | Purpose |
+| :--- | :--- | :--- | :--- |
+| `DB_CONNECTION` | `sqlite` or `mysql` | `sqlite` | Platform database driver |
+| `DB_DATABASE` | `database/database.sqlite` | `/app/database/database.sqlite` | Platform database file / name |
+| `AI_SERVICE_URL` | `http://127.0.0.1:8001` | `http://ai-service:8001` | URL of the internal Python AI microservice |
+| `AI_SERVICE_KEY` | *(Shared Secret)* | *(Shared Secret)* | Header token (`X-Service-Token`) for service auth |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | `http://host.docker.internal:11434` | Ollama local inference endpoint |
+| `MAIL_MAILER` | `smtp` | `smtp` | Transport driver for approval emails |
+| `MAIL_HOST` | `127.0.0.1` | `mailpit` | Mailpit host |
+| `MAIL_PORT` | `1025` | `1025` | Mailpit SMTP port |
+| `DEMO_MYSQL_PORT` | `3308` | `3309` | Exposed host port for the synthetic demo MySQL target |
+| `VITE_BACKEND_URL` | `http://localhost:8000` | `http://laravel:8000` | Target URL for Vite `/api` reverse proxy |
 
 ---
 
-## 7. Orbit — Animated Voice-First AI Companion Mascot
+## License
 
-The portal features an original, fully articulated 3D companion mascot named **Orbit** that floats in the bottom-right corner of authenticated routes.
-
-### Visual Architecture
-- **Canonical Model:** Smooth pearl-white shell (`#FFFFFF`), midnight glossy face visor (`#0B1020`), expressive digital cyan LED eyes (`#00D4FF`), royal purple cape (`#6366F1`), illuminated triangular AI core emblem, and cyan hover levitation thrust glow (`#06B6D4`).
-- **Production Asset Suite:** 23 standalone transparent RGBA PNG sprites under `frontend/public/mascot/` registered in `manifest.json`, including:
-  - `mascot-idle.png`, `mascot-listening.png`, `mascot-thinking.png`, `mascot-speaking.png`, `mascot-planning.png`, `mascot-flying.png`, `mascot-navigating.png`, `mascot-working.png`, `mascot-validating.png`, `mascot-success.png`, `mascot-warning.png`, `mascot-error.png`, `mascot-paused.png`, `mascot-interrupted.png`, `mascot-offline.png`, `mascot-celebrate.png`, `mascot-compact.png`, `mascot-model-sheet.png`.
-  - Turnaround angles: `turnaround-front.png`, `turnaround-front-three-quarter.png`, `turnaround-side.png`, `turnaround-rear-three-quarter.png`, `turnaround-back.png`.
-- **Articulated Vector Rig Fallback (`OrbitVectorRig`):** If image loading is disabled or fails, Orbit gracefully renders as an articulated SVG vector rig matching the canonical character geometry.
-
-### Voice-First Interaction
-- **Press & Hold to Speak:** Hold Orbit or the microphone button in the operational HUD (`AgentOperationalHUD.tsx`) to speak; release to execute. Or tap to start/stop listening hands-free.
-- **Global Hotkey:** `Cmd+J` or `Ctrl+J` activates voice recording from anywhere.
-- **Instant Interruption:** Press `Escape` or the visible **Stop** / **Pause** buttons to immediately cancel in-flight tasks and prevent stale queued writes.
-- **Secure Masked Inputs:** For sensitive database passwords or provider API keys, Orbit presents a masked form card (`SecureCredentialCard.tsx`) rather than prompting over audio.
-- **Zero Raw SQL Guardrail:** Orbit executes actions only through authenticated, parameterized platform capabilities discovered dynamically from `AgentToolRegistry.php`.
-
-### Verification Suite
-Run the mascot and autonomous assistant test suite:
-```bash
-.venv/bin/python scripts/verify_orbit_mascot.py
-```
-
+This project is licensed under the [MIT License](LICENSE).

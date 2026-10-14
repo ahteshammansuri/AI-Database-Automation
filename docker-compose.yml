@@ -1,6 +1,165 @@
-version: '3.8'
 
 services:
+  # ----------------------------------------------------------------------------
+  # 1. Frontend: React 19 + TypeScript + Vite (Port 5173)
+  # ----------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: db_automation_frontend
+    restart: unless-stopped
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_BACKEND_URL=http://laravel:8000
+    depends_on:
+      laravel:
+        condition: service_healthy
+    networks:
+      - app-network
+
+  # ----------------------------------------------------------------------------
+  # 2. Control Plane: Laravel 11 Backend (Port 8000)
+  # ----------------------------------------------------------------------------
+  laravel:
+    build:
+      context: ./laravel
+      dockerfile: Dockerfile
+    container_name: db_automation_laravel
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_NAME=AI Database Automation
+      - APP_ENV=local
+      - APP_DEBUG=true
+      - APP_URL=http://localhost:8000
+      - DB_CONNECTION=sqlite
+      - DB_DATABASE=/app/database/database.sqlite
+      - AI_SERVICE_URL=http://ai-service:8001
+      - AI_SERVICE_KEY=platform_secret_internal_key_2026
+      - QUEUE_CONNECTION=database
+      - SESSION_DRIVER=database
+      - CACHE_STORE=file
+      - MAIL_MAILER=smtp
+      - MAIL_HOST=mailpit
+      - MAIL_PORT=1025
+      - MAIL_FROM_ADDRESS=notifications@database-automation.local
+      - MAIL_FROM_NAME=AI Database Automation
+      - PHP_CLI_SERVER_WORKERS=8
+    volumes:
+      - laravel_storage:/app/storage
+      - laravel_db:/app/database
+    depends_on:
+      ai-service:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+      demo-mysql:
+        condition: service_healthy
+    networks:
+      - app-network
+
+  # ----------------------------------------------------------------------------
+  # 3. Laravel Queue Worker (Supervised Background Job Engine)
+  # ----------------------------------------------------------------------------
+  queue-worker:
+    build:
+      context: ./laravel
+      dockerfile: Dockerfile
+    container_name: db_automation_queue
+    restart: unless-stopped
+    command: php artisan queue:work --sleep=2 --tries=3 --timeout=120
+    environment:
+      - APP_NAME=AI Database Automation
+      - APP_ENV=local
+      - APP_DEBUG=true
+      - APP_URL=http://localhost:8000
+      - DB_CONNECTION=sqlite
+      - DB_DATABASE=/app/database/database.sqlite
+      - AI_SERVICE_URL=http://ai-service:8001
+      - AI_SERVICE_KEY=platform_secret_internal_key_2026
+      - QUEUE_CONNECTION=database
+      - SESSION_DRIVER=database
+      - CACHE_STORE=file
+      - MAIL_MAILER=smtp
+      - MAIL_HOST=mailpit
+      - MAIL_PORT=1025
+      - MAIL_FROM_ADDRESS=notifications@database-automation.local
+      - MAIL_FROM_NAME=AI Database Automation
+    volumes:
+      - laravel_storage:/app/storage
+      - laravel_db:/app/database
+    depends_on:
+      laravel:
+        condition: service_healthy
+    networks:
+      - app-network
+
+  # ----------------------------------------------------------------------------
+  # 4. Laravel Scheduler (Cron Engine for Recurring & Scheduled Pipelines)
+  # ----------------------------------------------------------------------------
+  scheduler:
+    build:
+      context: ./laravel
+      dockerfile: Dockerfile
+    container_name: db_automation_scheduler
+    restart: unless-stopped
+    command: php artisan schedule:work
+    environment:
+      - APP_NAME=AI Database Automation
+      - APP_ENV=local
+      - APP_DEBUG=true
+      - APP_URL=http://localhost:8000
+      - DB_CONNECTION=sqlite
+      - DB_DATABASE=/app/database/database.sqlite
+      - AI_SERVICE_URL=http://ai-service:8001
+      - AI_SERVICE_KEY=platform_secret_internal_key_2026
+      - QUEUE_CONNECTION=database
+      - SESSION_DRIVER=database
+      - CACHE_STORE=file
+      - MAIL_MAILER=smtp
+      - MAIL_HOST=mailpit
+      - MAIL_PORT=1025
+      - MAIL_FROM_ADDRESS=notifications@database-automation.local
+      - MAIL_FROM_NAME=AI Database Automation
+    volumes:
+      - laravel_storage:/app/storage
+      - laravel_db:/app/database
+    depends_on:
+      laravel:
+        condition: service_healthy
+    networks:
+      - app-network
+
+  # ----------------------------------------------------------------------------
+  # 5. AI Service: Python 3.12 FastAPI + FAISS + PyMuPDF (Port 8001)
+  # ----------------------------------------------------------------------------
+  ai-service:
+    build:
+      context: ./ai_service
+      dockerfile: Dockerfile
+    container_name: db_automation_ai_service
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      - AI_SERVICE_PORT=8001
+      - AI_SERVICE_HOST=0.0.0.0
+      - AI_SERVICE_KEY=platform_secret_internal_key_2026
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - AI_INDEX_DIR=/app/ai_service/storage/indexes
+    volumes:
+      - ai_service_storage:/app/ai_service/storage
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - app-network
+
+  # ----------------------------------------------------------------------------
+  # 6. Target Database: Synthetic Demo MySQL (Port 3309 -> 3306)
+  # ----------------------------------------------------------------------------
   demo-mysql:
     image: mysql:8.0
     container_name: db_automation_demo_mysql
@@ -11,22 +170,37 @@ services:
       MYSQL_USER: ipo_user
       MYSQL_PASSWORD: ipo_password
     ports:
-      - "3308:3306"
+      - "${DEMO_MYSQL_PORT:-3309}:3306"
     volumes:
       - mysql_demo_data:/var/lib/mysql
+      - ./scripts/docker-init-db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - app-network
 
+  # ----------------------------------------------------------------------------
+  # 7. Mail Server: Mailpit (Port 8025 Web UI / Port 1025 SMTP)
+  # ----------------------------------------------------------------------------
   mailpit:
     image: axllent/mailpit:latest
     container_name: db_automation_mailpit
     restart: unless-stopped
     ports:
-      - "8025:8025" # Web UI
-      - "1025:1025" # SMTP Port
+      - "8025:8025" # Web UI to view emails
+      - "1025:1025" # SMTP Server
+    networks:
+      - app-network
 
 volumes:
   mysql_demo_data:
+  laravel_storage:
+  laravel_db:
+  ai_service_storage:
+
+networks:
+  app-network:
+    driver: bridge
