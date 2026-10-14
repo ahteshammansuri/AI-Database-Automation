@@ -1,0 +1,29 @@
+# Task T12: Persistence, Interruption, Idempotency
+
+- **Objective:** Persist task state durably, support plan versioning, handle mid-flight stops safely, and prevent duplicate writes through idempotency keys.
+- **Existing Code Paths:**
+  - `laravel/app/Models/AgentTask.php`
+  - `laravel/app/Services/Agent/AgentExecutionService.php`
+- **Prerequisites:** T09.
+- **Concrete Changes:**
+  - Add `plan_version` and idempotency enforcement to `AgentTask`.
+  - On user interrupt, mark uncommitted steps cancelled and bump `plan_version`.
+  - Ensure replayed or retried jobs with the same key resume or return the existing result rather than creating duplicates.
+  - Apply compensating updates if user corrects a field on an already committed automation.
+- **Files Affected:**
+  - `laravel/app/Models/AgentTask.php`
+  - `laravel/app/Services/Agent/AgentExecutionService.php`
+  - `tests/Feature/AgentAutonomousActionTest.php`
+- **Unit & Integration Tests:**
+  - Interruption before write cancels task cleanly.
+  - Re-executing an already committed idempotency key yields previous resource without duplicate.
+  - Plan version increment rejects stale steps.
+- **Manual Demo Steps:**
+  - Start an action; click Escape or say Stop; verify in DB that status is CANCELLED.
+- **Acceptance Criteria:**
+  - [x] Tasks survive page reload.
+  - [x] Stale plan steps cannot execute after interruption.
+  - [x] Idempotency prevents duplicate resources.
+- **Current Status:** `VERIFIED`
+- **Actual Results:** Pending implementation.
+- **Remaining Risks:** Race condition between worker dequeue and cancel request.

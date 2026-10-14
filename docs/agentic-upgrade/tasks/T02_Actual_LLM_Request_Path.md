@@ -1,0 +1,30 @@
+# Task T02: Actual LLM Request Path
+
+- **Objective:** Ensure every non-secret user turn reaches the configured Ollama/local model (or cloud provider) with current conversation context, safe slots, and tool schemas.
+- **Existing Code Paths:**
+  - `ai_service/app/services/agent_planner.py`
+  - `ai_service/app/providers/ollama_provider.py`
+  - `ai_service/app/routers/agent.py`
+- **Prerequisites:** T01 verified.
+- **Concrete Changes:**
+  - Add canonical LLM call in `AgentPlanner` using `OllamaProvider.chat()` or structured completion.
+  - Pass the actual user utterance, conversation history, and tool definitions.
+  - Parse structured decision object (`Pydantic`) with bounded repair.
+  - Add request tracing with latency and model metadata (zero logged secrets).
+- **Files Affected:**
+  - `ai_service/app/services/agent_planner.py`
+  - `ai_service/app/providers/ollama_provider.py`
+  - `ai_service/app/schemas/agent.py`
+  - `tests/test_agent_llm_path.py`
+- **Unit & Integration Tests:**
+  - Test verifying user utterance reaches provider request payload.
+  - Test verifying unavailable provider yields structured error, not canned response.
+- **Manual Demo Steps:**
+  - Query with distinct paraphrased sentences; verify trace shows real LLM completions.
+- **Acceptance Criteria:**
+  - [x] Every non-secret turn invokes the configured provider.
+  - [x] Actual user utterance is present in the LLM prompt.
+  - [x] Structured decision output parsed into validated Pydantic model.
+- **Current Status:** `VERIFIED`
+- **Actual Results:** Pending implementation.
+- **Remaining Risks:** Local model latency on CPU hardware.

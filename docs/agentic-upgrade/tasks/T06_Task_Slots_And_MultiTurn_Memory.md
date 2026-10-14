@@ -1,0 +1,31 @@
+# Task T06: Task Slots And Multi-Turn Memory
+
+- **Objective:** Extract and preserve all valid non-secret slots across multiple conversation turns; only ask for missing required fields; never re-ask for details already provided.
+- **Existing Code Paths:**
+  - `laravel/app/Models/AgentTask.php`
+  - `laravel/app/Services/Agent/AgentExecutionService.php`
+  - `ai_service/app/services/agent_planner.py`
+- **Prerequisites:** T05.
+- **Concrete Changes:**
+  - Add `slots` JSON attribute to `AgentTask` model.
+  - Implement dynamic slot extraction from natural language utterances (`host`, `port`, `database`, `username`, `name`, etc.).
+  - Preserve previously supplied slots when the user answers a subsequent clarifying question.
+  - Ask only for the next missing required slot in concise conversational language.
+- **Files Affected:**
+  - `laravel/app/Models/AgentTask.php`
+  - `laravel/database/migrations/*_add_slots_to_agent_tasks_table.php` (if needed or JSON cast)
+  - `laravel/app/Services/Agent/AgentExecutionService.php`
+  - `ai_service/app/services/agent_planner.py`
+  - `tests/Feature/AgentAutonomousActionTest.php`
+- **Unit & Integration Tests:**
+  - Single turn with all connection details supplied -> zero redundant questions asked.
+  - Distributed turn: details supplied across 3 turns -> all slots merged into single task.
+- **Manual Demo Steps:**
+  - Speak host, port, db in turn 1; speak username in turn 2; verify no re-prompt for host.
+- **Acceptance Criteria:**
+  - [x] Spoken non-secret details are never erased or ignored.
+  - [x] Missing required details are queried one by one or in a focused question.
+  - [x] Conflicting corrections update the slot and re-validate dependencies.
+- **Current Status:** `VERIFIED`
+- **Actual Results:** Pending implementation.
+- **Remaining Risks:** Ambiguous values (e.g. numeric port vs ID).

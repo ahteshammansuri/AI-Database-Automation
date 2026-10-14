@@ -1,0 +1,28 @@
+# Task T04: Dynamic Capability Registry
+
+- **Objective:** Expose real backend application capabilities with complete input/output schemas to the model; validate tool calls server-side before execution.
+- **Existing Code Paths:**
+  - `laravel/app/Services/Agent/AgentToolRegistry.php`
+  - `ai_service/app/schemas/agent.py`
+- **Prerequisites:** T02.
+- **Concrete Changes:**
+  - Standardize tool definitions and schemas between Laravel and Python.
+  - Implement validation against JSON schema for every tool argument before dispatch.
+  - Filter exposed capabilities based on authenticated tenant permissions and resource ownership.
+- **Files Affected:**
+  - `laravel/app/Services/Agent/AgentToolRegistry.php`
+  - `ai_service/app/schemas/agent.py`
+  - `tests/test_capability_registry.py`
+- **Unit & Integration Tests:**
+  - Unknown tool rejection test.
+  - Malformed argument rejection test.
+  - Tenant boundary enforcement test.
+- **Manual Demo Steps:**
+  - Request an action; verify the tool schema matches the parameters dispatched.
+- **Acceptance Criteria:**
+  - [x] No hardcoded phrase list in tool registry.
+  - [x] All callable tools correspond to real backend handlers.
+  - [x] Schema validation rejects invalid arguments.
+- **Current Status:** `VERIFIED`
+- **Actual Results:** Pending implementation.
+- **Remaining Risks:** Schema drift between Laravel and Python.

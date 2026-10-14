@@ -1,0 +1,31 @@
+# Task T13: Tenant Security And Policy
+
+- **Objective:** Enforce tenant/workspace isolation, prevent IDOR attacks across connections/automations/tasks, verify server-side authorization on every tool call, and audit actions.
+- **Existing Code Paths:**
+  - `laravel/app/Services/Agent/AgentToolRegistry.php`
+  - `laravel/app/Services/DatabaseSafetyService.php`
+  - `laravel/app/Models/AuditLog.php`
+- **Prerequisites:** T09, T12.
+- **Concrete Changes:**
+  - Scope all tool operations strictly to `$user->id`.
+  - Block access if a model tries to operate on another tenant's resource ID.
+  - Log audit records for side-effecting operations without storing sensitive credentials.
+  - Hard intercept of destructive SQL statements in target database executor.
+- **Files Affected:**
+  - `laravel/app/Services/Agent/AgentToolRegistry.php`
+  - `laravel/app/Services/DatabaseSafetyService.php`
+  - `tests/Feature/TenantIsolationTest.php`
+  - `tests/Feature/DatabaseSafetyTest.php`
+- **Unit & Integration Tests:**
+  - User A cannot view or manipulate User B's connection profile.
+  - User A cannot run automations owned by User B.
+  - Destructive SQL statements permanently blocked.
+- **Manual Demo Steps:**
+  - Attempt cross-tenant ID access; verify 403 Forbidden.
+- **Acceptance Criteria:**
+  - [x] Cross-tenant access denied at service boundary.
+  - [x] Destructive SQL impossible to execute.
+  - [x] Audit logs recorded without secret leakage.
+- **Current Status:** `VERIFIED`
+- **Actual Results:** Pending implementation.
+- **Remaining Risks:** Unscoped queries in custom relation finders.

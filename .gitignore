@@ -1,0 +1,132 @@
+# ==============================================================================
+# AI-Powered Multi-User Database Automation Platform
+# Unified .gitignore for Laravel, Python FastAPI, and React/Vite TypeScript
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Environment & Credentials (NEVER COMMIT SECRETS)
+# ------------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+laravel/.env
+laravel/.env.*
+!laravel/.env.example
+*.env.local
+*.env.*.local
+*.pem
+*.key
+*.cert
+*.crt
+oauth-*.key
+/auth.json
+
+# ------------------------------------------------------------------------------
+# 2. Python & FastAPI (ai_service / backend)
+# ------------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.coverage.*
+
+# ------------------------------------------------------------------------------
+# 3. PHP & Laravel Control Plane
+# ------------------------------------------------------------------------------
+laravel/vendor/
+vendor/
+laravel/.phpunit.cache
+laravel/.phpunit.result.cache
+laravel/public/storage
+laravel/public/build
+laravel/public/hot
+laravel/bootstrap/cache/*.php
+!laravel/bootstrap/cache/.gitkeep
+laravel/storage/*.key
+laravel/storage/pail
+laravel/storage/logs/*.log
+laravel/storage/framework/cache/data/*
+!laravel/storage/framework/cache/data/.gitkeep
+laravel/storage/framework/views/*
+!laravel/storage/framework/views/.gitkeep
+laravel/storage/framework/sessions/*
+!laravel/storage/framework/sessions/.gitkeep
+laravel/storage/framework/testing/*
+!laravel/storage/framework/testing/.gitkeep
+laravel/storage/app/public/*
+!laravel/storage/app/public/.gitkeep
+laravel/storage/app/private/*
+!laravel/storage/app/private/.gitkeep
+.phpactor.json
+Homestead.json
+Homestead.yaml
+
+# ------------------------------------------------------------------------------
+# 4. Node.js & React Frontend
+# ------------------------------------------------------------------------------
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ------------------------------------------------------------------------------
+# 5. Local Databases & Storage Artifacts
+# ------------------------------------------------------------------------------
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+platform_data.db
+storage/uploads/*
+!storage/uploads/.gitkeep
+storage/faiss_index/*
+!storage/faiss_index/.gitkeep
+storage/logs/*.log
+storage/scratch/
+
+# ------------------------------------------------------------------------------
+# 6. IDE, Editors, and OS Artifacts
+# ------------------------------------------------------------------------------
+.vscode/
+.idea/
+.fleet/
+.nova/
+.zed/
+*.swp
+*.swo
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+.DS_Store
+Thumbs.db
+.gemini/

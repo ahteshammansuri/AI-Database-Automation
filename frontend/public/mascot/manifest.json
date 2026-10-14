@@ -1,0 +1,70 @@
+{
+  "character": {
+    "name": "Orbit",
+    "role": "Autonomous Voice AI Assistant",
+    "version": "2.2.0"
+  },
+  "angles": [
+    "angle-front.png",
+    "angle-front-three-quarter.png",
+    "angle-side.png",
+    "angle-rear-three-quarter.png",
+    "angle-back.png",
+    "angle-left.png"
+  ],
+  "turnarounds": [
+    "turnaround-front.png",
+    "turnaround-front-three-quarter.png",
+    "turnaround-side.png",
+    "turnaround-rear-three-quarter.png",
+    "turnaround-back.png",
+    "turnaround-left.png"
+  ],
+  "behaviors": {
+    "idle": "mascot-idle.png",
+    "listening": "mascot-listening.png",
+    "thinking": "mascot-thinking.png",
+    "understanding": "mascot-understanding.png",
+    "planning": "mascot-planning.png",
+    "flying": "mascot-flying.png",
+    "navigating": "mascot-navigating.png",
+    "clicking": "mascot-clicking.png",
+    "typing": "mascot-typing.png",
+    "processing": "mascot-processing.png",
+    "working": "mascot-working.png",
+    "executing": "mascot-executing.png",
+    "validating": "mascot-validating.png",
+    "success": "mascot-success.png",
+    "complete": "mascot-complete.png",
+    "completed": "mascot-completed.png",
+    "celebrate": "mascot-celebrate.png",
+    "error": "mascot-error.png",
+    "warning": "mascot-warning.png",
+    "interrupted": "mascot-interrupted.png",
+    "paused": "mascot-paused.png",
+    "offline": "mascot-offline.png",
+    "speaking": "mascot-speaking.png"
+  },
+  "sounds": {
+    "engine": "Web Audio API Procedural Synthesizer",
+    "profiles": [
+      "listening",
+      "thinking",
+      "thought_process",
+      "understanding",
+      "planning",
+      "flying",
+      "navigating",
+      "clicking",
+      "typing",
+      "processing",
+      "validating",
+      "success",
+      "celebration",
+      "warning",
+      "error",
+      "interrupted",
+      "offline"
+    ]
+  }
+}

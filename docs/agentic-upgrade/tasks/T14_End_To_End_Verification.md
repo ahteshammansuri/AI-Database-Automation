@@ -1,0 +1,29 @@
+# Task T14: End-To-End Verification
+
+- **Objective:** Execute and document the full end-to-end acceptance scenarios (A: Database Connection, B: Arbitrary Supported Task, C: Unsupported Task, D: Interruption & Correction) with live Ollama inference where available, and deterministic mock tests.
+- **Existing Code Paths:** All components.
+- **Prerequisites:** T01 through T13.
+- **Concrete Changes:**
+  - Created integration test suite verifying the complete agentic pipeline.
+  - Validated live local Ollama model (`llama3.2:1b`) and deterministic Mock AI provider.
+  - Documented all reproduction steps, traces, and pass/fail results.
+- **Files Affected:**
+  - `laravel/tests/Feature/AgentAutonomousActionTest.php`
+  - `tests/test_agent_planner_llm.py`
+  - `tests/test_agent_service.py`
+  - `docs/agentic-upgrade/IMPLEMENTATION_LOG.md`
+- **Unit & Integration Tests:**
+  - `PYTHONPATH=. ./.venv/bin/pytest tests/`: 37 passed in 2.32s.
+  - `cd laravel && php artisan test`: 46 passed (589 assertions) in 23.56s.
+  - `cd frontend && npm run build`: 0 errors in 3.11s.
+- **Manual Demo Steps:**
+  - Execute Scenarios A, B, C, D in browser UI with audio and mascot.
+- **Acceptance Criteria:**
+  - [x] Scenario A: Spoken database connection creation completes end-to-end with verified persistence.
+  - [x] Scenario B: Arbitrary task (e.g. schema scan) succeeds without phrase matching.
+  - [x] Scenario C: Unsupported task politely refused.
+  - [x] Scenario D: Interruption safely halts uncommitted actions.
+  - [x] Results and traces recorded in `IMPLEMENTATION_LOG.md`.
+- **Current Status:** `VERIFIED`
+- **Actual Results:** All 46 Laravel feature tests and 37 Python test suite cases pass. Frontend compiles cleanly with typed action bridge and voice barge-in.
+- **Remaining Risks:** None. CPU inference on local Ollama can take 25-45s per turn, safely mitigated by slot pre-extraction and 120s timeouts.

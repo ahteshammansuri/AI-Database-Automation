@@ -1,0 +1,249 @@
+<?php
+
+namespace App\Http\Controllers\Api;
+
+use App\Http\Controllers\Controller;
+use App\Models\ApprovalToken;
+use App\Models\ContentVersion;
+use App\Models\AutomationExecution;
+use App\Services\EmailApprovalService;
+use App\Jobs\PublishAutomationContentJob;
+use App\Jobs\GenerateAutomationContentJob;
+use Illuminate\Http\Request;
+use Exception;
+
+class ApprovalController extends Controller
+{
+    public function __construct(
+        protected EmailApprovalService $approvalService
+    ) {}
+
+    /**
+     * Authenticated endpoint: List all pending approvals for the current user.
+     */
+    public function index(Request $request)
+    {
+        $pendingVersions = ContentVersion::where('user_id', $request->user()->id)
+            ->where('status', 'PENDING_APPROVAL')
+            ->with(['execution.automation:id,name,target_table', 'approvalTokens'])
+            ->orderBy('created_at', 'desc')
+            ->get();
+
+        return response()->json($pendingVersions);
+    }
+
+    /**
+     * Public token-authenticated review endpoint (routes from email link).
+     */
+    public function review($tokenString)
+    {
+        $token = ApprovalToken::where('token', $tokenString)
+            ->with(['version.execution.automation'])
+            ->first();
+
+        if (!$token) {
+            return response()->json([
+                'valid' => false,
+                'message' => 'Invalid or unknown approval link.',
+            ], 404);
+        }
+
+        $version = $token->version;
+        $execution = $version->execution;
+        $automation = $execution->automation;
+
+        return response()->json([
+            'valid' => $token->isValid(),
+            'is_used' => !is_null($token->used_at),
+            'is_expired' => $token->expires_at->isPast(),
+            'automation_name' => $automation->name,
+            'target_table' => $automation->target_table,
+            'version_number' => $version->version_number,
+            'status' => $version->status,
+            'publication_time' => $execution->publication_time,
+            'content_payload' => $version->payload,
+            'rejection_feedback' => $version->rejection_feedback,
+            'expires_at' => $token->expires_at,
+        ]);
+    }
+
+    /**
+     * Submit interactive approval click.
+     */
+    public function approve($tokenString)
+    {
+        try {
+            $result = $this->approvalService->approve($tokenString);
+
+            // If scheduled publication time is now or past, publish immediately
+            $execution = $result['execution'];
+            if ($execution->publication_time && $execution->publication_time->isPast()) {
+                PublishAutomationContentJob::dispatch($execution->id);
+            }
+
+            return response()->json($result);
+        } catch (Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+            ], 422);
+        }
+    }
+
+    /**
+     * Submit interactive rejection with reviewer feedback.
+     */
+    public function reject(Request $request, $tokenString)
+    {
+        $feedback = $request->input('feedback', 'Requested revisions from editor.');
+
+        try {
+            $result = $this->approvalService->reject($tokenString, $feedback);
+
+            // If regenerating, dispatch new generation job with feedback context
+            if (($result['status'] ?? '') === 'REGENERATING') {
+                $token = ApprovalToken::where('token', $tokenString)->first();
+                if ($token) {
+                    GenerateAutomationContentJob::dispatch($token->version->execution_id, $feedback);
+                }
+            }
+
+            return response()->json($result);
+        } catch (Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+            ], 422);
+        }
+    }
+
+    /**
+     * Portal In-App: Update payload of a pending content version before publication.
+     */
+    public function updatePayload(Request $request, $id)
+    {
+        $request->validate([
+            'payload' => 'required|array',
+        ]);
+
+        $version = ContentVersion::where('user_id', $request->user()->id)
+            ->where('id', $id)
+            ->firstOrFail();
+
+        $version->payload = $request->input('payload');
+        $version->save();
+
+        AuditLog::log(
+            $request->user()->id,
+            'VERSION_PAYLOAD_EDITED_IN_PORTAL',
+            'ContentVersion',
+            (string) $version->id,
+            [
+                'version_number' => $version->version_number,
+                'fields_updated' => array_keys($request->input('payload')),
+            ]
+        );
+
+        return response()->json([
+            'message' => 'Content payload updated successfully.',
+            'version' => $version,
+        ]);
+    }
+
+    /**
+     * Portal In-App: Approve pending content version (immediate publish or hold for schedule).
+     */
+    public function approveVersion(Request $request, $id)
+    {
+        $version = ContentVersion::where('user_id', $request->user()->id)
+            ->where('id', $id)
+            ->with(['execution.automation'])
+            ->firstOrFail();
+
+        $execution = $version->execution;
+
+        if ($request->has('payload') && is_array($request->input('payload'))) {
+            $version->payload = $request->input('payload');
+        }
+
+        $version->status = 'APPROVED';
+        $version->save();
+
+        $execution->status = 'APPROVED';
+        $execution->save();
+
+        $publishNow = $request->boolean('publish_now') || ($execution->publication_time && $execution->publication_time->isPast());
+
+        if ($publishNow) {
+            $execution->addTimelineEvent('PORTAL_APPROVAL_PUBLISH_NOW', 'Approved by live editor in portal; immediate publication dispatched to target database.');
+            PublishAutomationContentJob::dispatch($execution->id);
+        } else {
+            $pubTimeStr = $execution->publication_time ? $execution->publication_time->toIso8601String() : 'scheduled deadline';
+            $execution->addTimelineEvent('PORTAL_APPROVED_FOR_SCHEDULE', "Approved by live editor in portal; scheduled to publish at {$pubTimeStr}.");
+        }
+
+        LiveEventService::publish($request->user()->id, 'execution.stage_changed', [
+            'execution_id' => $execution->id,
+            'status' => $publishNow ? 'PUBLISHING' : 'APPROVED',
+        ], 'AutomationExecution', (string) $execution->id);
+
+        return response()->json([
+            'message' => $publishNow ? 'Approved and queued for immediate database publication.' : 'Approved for scheduled publication.',
+            'version' => $version,
+            'execution' => $execution->fresh(),
+        ]);
+    }
+
+    /**
+     * Portal In-App: Reject version and trigger AI regeneration with editorial feedback.
+     */
+    public function rejectVersion(Request $request, $id)
+    {
+        $version = ContentVersion::where('user_id', $request->user()->id)
+            ->where('id', $id)
+            ->with(['execution.automation'])
+            ->firstOrFail();
+
+        $execution = $version->execution;
+        $feedback = $request->input('feedback', 'Requested revisions from editor in portal.');
+
+        $version->update([
+            'status' => 'REJECTED',
+            'rejection_feedback' => $feedback,
+        ]);
+
+        $maxRetries = 3;
+        if ($execution->automation && !empty($execution->automation->approval_policy['max_regenerations'])) {
+            $maxRetries = (int) $execution->automation->approval_policy['max_regenerations'];
+        }
+
+        $rejectedCount = ContentVersion::where('execution_id', $execution->id)
+            ->where('status', 'REJECTED')
+            ->count();
+
+        if ($rejectedCount >= $maxRetries) {
+            $execution->update([
+                'status' => 'FAILED',
+                'failure_category' => 'MAX_REJECTIONS_EXCEEDED',
+                'error_message' => "Maximum rejection limit of {$maxRetries} regenerations reached without approval.",
+            ]);
+            $execution->addTimelineEvent('MAX_REJECTIONS_EXCEEDED', "Reached threshold of {$maxRetries} rejected versions. Execution stopped safely.");
+
+            return response()->json([
+                'message' => "Maximum regeneration threshold ({$maxRetries}) reached. Execution stopped.",
+                'version' => $version,
+                'execution' => $execution->fresh(),
+            ]);
+        }
+
+        // Trigger AI regeneration with feedback
+        GenerateAutomationContentJob::dispatch($execution->id, $feedback);
+        $execution->addTimelineEvent('PORTAL_REGENERATION_REQUESTED', "Editor rejected version #{$version->version_number} with feedback: '{$feedback}'. Triggered AI regeneration.");
+
+        return response()->json([
+            'message' => 'Version rejected. AI is regenerating revised content with your feedback.',
+            'version' => $version,
+            'execution' => $execution->fresh(),
+        ]);
+    }
+}

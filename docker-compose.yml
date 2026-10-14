@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  demo-mysql:
+    image: mysql:8.0
+    container_name: db_automation_demo_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ipo_root_password
+      MYSQL_DATABASE: demo_blog_cms
+      MYSQL_USER: ipo_user
+      MYSQL_PASSWORD: ipo_password
+    ports:
+      - "3308:3306"
+    volumes:
+      - mysql_demo_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: db_automation_mailpit
+    restart: unless-stopped
+    ports:
+      - "8025:8025" # Web UI
+      - "1025:1025" # SMTP Port
+
+volumes:
+  mysql_demo_data:
