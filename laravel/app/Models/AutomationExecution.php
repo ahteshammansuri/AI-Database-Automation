@@ -56,6 +56,15 @@ class AutomationExecution extends Model
         return $this->timeline_events ?? [];
     }
 
+    protected static function booted(): void
+    {
+        static::creating(function (AutomationExecution $execution) {
+            if (empty($execution->idempotency_key)) {
+                $execution->idempotency_key = (string) \Illuminate\Support\Str::uuid();
+            }
+        });
+    }
+
     protected function casts(): array
     {
         return [

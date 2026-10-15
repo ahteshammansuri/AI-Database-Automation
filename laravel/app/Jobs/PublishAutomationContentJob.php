@@ -40,7 +40,55 @@ class PublishAutomationContentJob implements ShouldQueue
         }
 
         $automation = $execution->automation;
+        if (!$automation || !$automation->is_active) {
+            $execution->update([
+                'status' => 'CANCELLED',
+                'failure_category' => 'AUTOMATION_INACTIVE',
+                'error_message' => 'Automation has been deactivated prior to publication.',
+                'lease_expires_at' => null,
+            ]);
+            $execution->addTimelineEvent('PUBLISH_ABORTED', 'Automation was deactivated by user before publication.');
+            LiveEventService::publish($execution->user_id, 'execution.failed', [
+                'execution_id' => $execution->id,
+                'status' => 'CANCELLED',
+                'reason' => 'Automation deactivated',
+            ], 'AutomationExecution', (string) $execution->id);
+            return;
+        }
+
         $connection = $automation->connection;
+        if (!$connection || !$connection->is_active) {
+            $execution->update([
+                'status' => 'FAILED',
+                'failure_category' => 'CONNECTION_INACTIVE',
+                'error_message' => 'Target database connection is disabled or missing.',
+                'lease_expires_at' => null,
+            ]);
+            $execution->addTimelineEvent('PUBLISH_FAILED', 'Target database connection is disabled or missing.');
+            LiveEventService::publish($execution->user_id, 'execution.failed', [
+                'execution_id' => $execution->id,
+                'status' => 'FAILED',
+                'reason' => 'Connection inactive',
+            ], 'AutomationExecution', (string) $execution->id);
+            return;
+        }
+
+        // Strict tenant isolation verification
+        if ($execution->user_id !== $automation->user_id || $automation->user_id !== $connection->user_id) {
+            $execution->update([
+                'status' => 'FAILED',
+                'failure_category' => 'TENANT_MISMATCH',
+                'error_message' => 'Security check failed: Tenant ownership mismatch detected between execution, automation, and connection.',
+                'lease_expires_at' => null,
+            ]);
+            $execution->addTimelineEvent('SECURITY_VIOLATION', 'Tenant ownership mismatch detected.');
+            LiveEventService::publish($execution->user_id, 'execution.failed', [
+                'execution_id' => $execution->id,
+                'status' => 'FAILED',
+                'reason' => 'Tenant mismatch',
+            ], 'AutomationExecution', (string) $execution->id);
+            return;
+        }
 
         // Retrieve latest approved content version
         $version = ContentVersion::where('execution_id', $execution->id)
@@ -49,18 +97,93 @@ class PublishAutomationContentJob implements ShouldQueue
             ->first();
 
         if (!$version) {
-            $execution->update([
-                'status' => 'FAILED',
-                'failure_category' => 'NO_APPROVED_VERSION',
-                'error_message' => 'No approved content version available to publish.',
-            ]);
-            $execution->addTimelineEvent('PUBLISH_ABORTED', 'No approved content version was available at deadline.');
-            LiveEventService::publish($execution->user_id, 'execution.failed', [
-                'execution_id' => $execution->id,
-                'status' => 'FAILED',
-                'reason' => 'No approved version',
-            ], 'AutomationExecution', (string) $execution->id);
-            return;
+            $policy = $automation->safe_deadline_policy ?? 'notify_and_wait';
+
+            if ($policy === 'publish_last_valid') {
+                $candidate = ContentVersion::where('execution_id', $execution->id)
+                    ->where('status', '!=', 'REJECTED')
+                    ->latest('version_number')
+                    ->first();
+
+                if ($candidate && !empty($candidate->payload)) {
+                    $candidate->update(['status' => 'APPROVED']);
+                    $execution->addTimelineEvent(
+                        'AUTO_APPROVED_DEADLINE',
+                        "Auto-approved Version #{$candidate->version_number} at publication deadline under 'publish_last_valid' policy."
+                    );
+                    AuditLog::log(
+                        $execution->user_id,
+                        'CONTENT_AUTO_APPROVED_DEADLINE',
+                        'ContentVersion',
+                        (string) $candidate->id,
+                        [
+                            'execution_id' => $execution->id,
+                            'version_number' => $candidate->version_number,
+                            'policy' => 'publish_last_valid',
+                        ]
+                    );
+                    $version = $candidate;
+                } else {
+                    $execution->update([
+                        'status' => 'FAILED',
+                        'failure_category' => 'NO_VALID_VERSION_TO_PUBLISH',
+                        'error_message' => 'No valid unrejected content version available to publish at deadline.',
+                        'lease_expires_at' => null,
+                    ]);
+                    $execution->addTimelineEvent('PUBLISH_ABORTED', 'No valid unrejected content version was available at deadline under publish_last_valid policy.');
+                    LiveEventService::publish($execution->user_id, 'execution.failed', [
+                        'execution_id' => $execution->id,
+                        'status' => 'FAILED',
+                        'reason' => 'No valid unrejected version',
+                    ], 'AutomationExecution', (string) $execution->id);
+                    return;
+                }
+            } elseif ($policy === 'skip') {
+                $execution->update([
+                    'status' => 'SKIPPED',
+                    'failure_category' => 'DEADLINE_SKIPPED',
+                    'error_message' => 'Publication deadline passed without approval. Execution skipped per automation safe deadline policy.',
+                    'lease_expires_at' => null,
+                ]);
+                $execution->addTimelineEvent('PUBLISH_SKIPPED', 'Publication deadline passed without approval. Execution skipped per automation safe deadline policy.');
+                AuditLog::log(
+                    $execution->user_id,
+                    'EXECUTION_SKIPPED_AT_DEADLINE',
+                    'AutomationExecution',
+                    (string) $execution->id,
+                    [
+                        'automation_id' => $automation->id,
+                        'policy' => 'skip',
+                    ]
+                );
+                LiveEventService::publish($execution->user_id, 'execution.skipped', [
+                    'execution_id' => $execution->id,
+                    'status' => 'SKIPPED',
+                    'reason' => 'Deadline passed without approval (skip policy)',
+                ], 'AutomationExecution', (string) $execution->id);
+                return;
+            } else {
+                // Default: notify_and_wait
+                $execution->update(['lease_expires_at' => null]);
+                $execution->addTimelineEvent('DEADLINE_REACHED_WAITING', "Publication deadline reached without user approval. Automation policy is set to 'notify_and_wait'; publication will pause until explicit approval.");
+                AuditLog::log(
+                    $execution->user_id,
+                    'PUBLICATION_DEADLINE_WAITING',
+                    'AutomationExecution',
+                    (string) $execution->id,
+                    [
+                        'automation_id' => $automation->id,
+                        'policy' => 'notify_and_wait',
+                    ]
+                );
+                LiveEventService::publish($execution->user_id, 'execution.deadline_reached', [
+                    'execution_id' => $execution->id,
+                    'status' => $execution->status,
+                    'policy' => 'notify_and_wait',
+                    'message' => 'Publication deadline reached without approval. Awaiting manual review.',
+                ], 'AutomationExecution', (string) $execution->id);
+                return;
+            }
         }
 
         $execution->update([

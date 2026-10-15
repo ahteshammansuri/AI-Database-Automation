@@ -26,6 +26,7 @@ export const FloatingMascot: React.FC = () => {
     toggleOpen,
     characterState,
     setCharacterState,
+    messages,
     activeTask,
     timelineEvents,
     activeAnchor,
@@ -68,7 +69,11 @@ export const FloatingMascot: React.FC = () => {
       if (listening) {
         setCharacterState("listening");
       } else {
-        setCharacterState(activeTask ? "executing" : "idle");
+        if (isLoading) {
+          setCharacterState("thinking");
+        } else {
+          setCharacterState(activeTask ? "executing" : "idle");
+        }
       }
     },
     voiceResponsesEnabled,
@@ -130,7 +135,7 @@ export const FloatingMascot: React.FC = () => {
 
   // Press-and-Hold vs Tap hook
   const { isHolding, bind: mascotPressBind } = usePressAndHold({
-    startOnDown: false,
+    startOnDown: true,
     onHoldStart: () => {
       if (!isListening) {
         startListening();
@@ -138,15 +143,15 @@ export const FloatingMascot: React.FC = () => {
     },
     onHoldEnd: () => {
       stopListening();
+      setCharacterState("thinking");
     },
     onTap: () => {
       if (!isOpen) {
         setIsOpen(true);
-      } else {
-        toggleListening();
       }
+      toggleListening();
     },
-    holdThresholdMs: 400,
+    holdThresholdMs: 220,
   });
 
   // Effective character state & angle:
@@ -156,16 +161,18 @@ export const FloatingMascot: React.FC = () => {
     return ANGLES_SEQUENCE[currentAngleIndex];
   })();
 
-  const effectiveState = ((): any => {
-    if (isListening) return "listening";
-    if (isSpeaking) return "speaking";
-    if (!coords.isDocked) return "moving";
-    return characterState;
-  })();
-
   const isWorking =
     activeTask &&
     ["RUNNING", "COMMITTING", "VALIDATING", "READY"].includes(activeTask.status);
+
+  const effectiveState = ((): any => {
+    if (isListening) return "listening";
+    if (isLoading) return "thinking";
+    if (isSpeaking) return "speaking";
+    if (!coords.isDocked) return "moving";
+    if (isWorking) return "working";
+    return characterState || "idle";
+  })();
 
   return (
     <>
@@ -248,6 +255,8 @@ export const FloatingMascot: React.FC = () => {
             className={`-mt-1 flex items-center space-x-1.5 px-3 py-1 rounded-full text-[11px] font-semibold border backdrop-blur-xl shadow-lg transition-all duration-300 ${
               isHolding || isListening
                 ? "bg-cyan-500 text-slate-950 border-white shadow-cyan-500/40 animate-pulse ring-2 ring-cyan-400"
+                : effectiveState === "thinking" || effectiveState === "understanding" || isLoading
+                ? "bg-violet-600/40 text-violet-200 border-violet-400/50 shadow-violet-500/30 animate-pulse ring-2 ring-violet-400/30"
                 : effectiveState === "error" || effectiveState === "failed"
                 ? "bg-rose-500/25 text-rose-300 border-rose-500/40 shadow-rose-500/20"
                 : effectiveState === "warning" || effectiveState === "oops"
@@ -265,6 +274,11 @@ export const FloatingMascot: React.FC = () => {
               <>
                 <MicOff className="w-3.5 h-3.5 animate-pulse" />
                 <span>Listening...</span>
+              </>
+            ) : effectiveState === "thinking" || effectiveState === "understanding" || isLoading ? (
+              <>
+                <Sparkles className="w-3.5 h-3.5 text-violet-300 animate-spin" />
+                <span>Orbit Thinking...</span>
               </>
             ) : effectiveState === "error" || effectiveState === "failed" ? (
               <>
@@ -305,6 +319,7 @@ export const FloatingMascot: React.FC = () => {
       <AgentOperationalHUD
         isOpen={isOpen}
         onClose={() => setIsOpen(false)}
+        messages={messages}
         characterState={effectiveState}
         activeTask={activeTask}
         timelineEvents={timelineEvents}

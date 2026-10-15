@@ -13,6 +13,15 @@ use App\Http\Controllers\Api\ApprovalController;
 use App\Http\Controllers\Api\AuditLogController;
 use App\Http\Controllers\Api\LiveEventController;
 use App\Http\Controllers\Api\AgentController;
+use App\Http\Controllers\Api\ModelRoleController;
+use App\Http\Controllers\FeatureFlagController;
+use App\Http\Controllers\SimulationController;
+use App\Http\Controllers\SchemaDriftController;
+use App\Http\Controllers\CompensationController;
+use App\Http\Controllers\QualityScoreController;
+use App\Http\Controllers\TemplateController;
+use App\Http\Controllers\DatabaseInsightsController;
+use App\Http\Controllers\CalendarController;
 
 // Public Health Check
 Route::get('/health', fn () => response()->json(['status' => 'healthy', 'service' => 'laravel-control-plane']));
@@ -61,6 +70,11 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/ai-providers', [AiProviderController::class, 'store']);
     Route::get('/ai-providers/health', [AiProviderController::class, 'health']);
 
+    // Model Roles (Planning, Generation, Classification, Summarization)
+    Route::get('/model-roles', [ModelRoleController::class, 'index']);
+    Route::put('/model-roles', [ModelRoleController::class, 'update']);
+    Route::post('/model-roles/probe', [ModelRoleController::class, 'probe']);
+
     // Knowledge Base & RAG
     Route::get('/knowledge', [KnowledgeController::class, 'index']);
     Route::post('/knowledge', [KnowledgeController::class, 'upload']);
@@ -79,6 +93,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::put('/automations/{id}', [AutomationController::class, 'update']);
     Route::delete('/automations/{id}', [AutomationController::class, 'destroy']);
     Route::post('/automations/{id}/trigger', [AutomationController::class, 'trigger']);
+    Route::get('/automations/{id}/field-mappings', [AutomationController::class, 'getFieldMappings']);
+    Route::put('/automations/{id}/field-mappings', [AutomationController::class, 'updateFieldMappings']);
 
     // Executions
     Route::get('/executions', [ExecutionController::class, 'index']);
@@ -112,4 +128,16 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/agent/preferences', [AgentController::class, 'getPreferences']);
     Route::put('/agent/preferences', [AgentController::class, 'updatePreferences']);
     Route::get('/agent/tools', [AgentController::class, 'tools']);
+
+    // Phase 6: Feature Flags & Advanced Platform Capabilities
+    Route::get('/features', [FeatureFlagController::class, 'index']);
+    Route::post('/automations/{id}/dry-run', [SimulationController::class, 'dryRun']);
+    Route::post('/connections/{id}/detect-drift', [SchemaDriftController::class, 'detectDrift']);
+    Route::post('/executions/{id}/undo', [CompensationController::class, 'undo']);
+    Route::post('/content/evaluate-quality', [QualityScoreController::class, 'evaluate']);
+    Route::get('/templates', [TemplateController::class, 'index']);
+    Route::post('/automations/from-template', [TemplateController::class, 'createFromTemplate']);
+    Route::get('/connections/{id}/insights', [DatabaseInsightsController::class, 'insights']);
+    Route::get('/calendar/events', [CalendarController::class, 'events']);
+    Route::post('/calendar/reschedule/{automationId}', [CalendarController::class, 'reschedule']);
 });

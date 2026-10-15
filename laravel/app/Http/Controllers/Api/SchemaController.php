@@ -20,6 +20,40 @@ class SchemaController extends Controller
             ->where('id', $connectionId)
             ->firstOrFail();
 
+        // Serve cached snapshot instantly if not explicitly requesting fresh scan
+        if (!$request->boolean('refresh')) {
+            $latestSnapshot = \App\Models\SchemaSnapshot::where('connection_id', $connection->id)
+                ->orderByDesc('id')
+                ->first();
+
+            if ($latestSnapshot && !empty($latestSnapshot->schema_payload)) {
+                $payload = $latestSnapshot->schema_payload;
+
+                // Overlay latest user annotations in-memory
+                $annotations = SchemaTableAnnotation::where('connection_id', $connection->id)
+                    ->where('user_id', $connection->user_id)
+                    ->get()
+                    ->keyBy('table_name');
+
+                if (!empty($payload['tables']) && is_array($payload['tables'])) {
+                    foreach ($payload['tables'] as &$table) {
+                        $tableName = $table['name'] ?? ($table['table_name'] ?? '');
+                        if ($tableName && $annotations->has($tableName)) {
+                            $ann = $annotations->get($tableName);
+                            $table['ai_suggestion'] = array_merge($table['ai_suggestion'] ?? [], [
+                                'purpose' => $ann->ai_purpose ?: ($table['ai_suggestion']['purpose'] ?? null),
+                                'concept' => $ann->ai_business_concept ?: ($table['ai_suggestion']['concept'] ?? null),
+                                'user_notes' => $ann->user_override_notes,
+                                'is_user_verified' => (bool) $ann->is_user_verified,
+                            ]);
+                        }
+                    }
+                }
+
+                return response()->json($payload);
+            }
+        }
+
         $schema = $this->introspectionService->introspectSchema($connection);
 
         return response()->json($schema);

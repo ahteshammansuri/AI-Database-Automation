@@ -1,3 +1,5 @@
+import { redactSecretsFromUtterance } from "./secretRedactor";
+
 const BASE_URL = "/api";
 
 interface CacheEntry {
@@ -157,6 +159,20 @@ export const api = {
   testAIProvider: (providerId: string) => request<any>(`/ai-providers/health?provider=${encodeURIComponent(providerId)}`),
   checkAIProviderHealth: (provider: string, model?: string) =>
     request<any>(`/ai-providers/health?provider=${encodeURIComponent(provider)}${model ? `&model=${encodeURIComponent(model)}` : ""}`),
+  
+  // Role-Based AI Model Assignments
+  listModelRoles: () => request<{ success: boolean; roles: any[] }>("/model-roles"),
+  updateModelRole: (data: {
+    role: string;
+    provider: string;
+    model_name: string;
+    temperature?: number;
+    max_tokens?: number;
+    is_active?: boolean;
+  }) => request<any>("/model-roles", { method: "PUT", body: JSON.stringify(data) }),
+  probeModelRole: (data: { provider: string; model_name?: string }) =>
+    request<any>("/model-roles/probe", { method: "POST", body: JSON.stringify(data) }),
+
   previewAIGeneration: (data: any) =>
     request<any>("/automations/preview-ai", { method: "POST", body: JSON.stringify(data) }),
   fieldAssist: (data: {
@@ -275,15 +291,22 @@ export const api = {
       body: JSON.stringify({ title: title || "New Consultation" }),
     }),
   getAgentConversation: (id: number) => request<any>(`/agent/conversations/${id}`),
-  postAgentMessage: (id: number, content: string, isVoice = false, secureInputData?: any) =>
-    request<any>(`/agent/conversations/${id}/messages`, {
+  postAgentMessage: (id: number, content: string, isVoice = false, secureInputData?: any, pageContext?: any) => {
+    const { redactedText, hasRedaction, extractedSecrets } = redactSecretsFromUtterance(content);
+    const mergedSecure = {
+      ...(hasRedaction ? extractedSecrets : {}),
+      ...(secureInputData || {}),
+    };
+    return request<any>(`/agent/conversations/${id}/messages`, {
       method: "POST",
       body: JSON.stringify({
-        content,
+        content: redactedText,
         is_voice: isVoice,
-        secure_input_data: secureInputData,
+        secure_input_data: Object.keys(mergedSecure).length > 0 ? mergedSecure : undefined,
+        page_context: pageContext,
       }),
-    }),
+    });
+  },
   interruptAgentTask: (taskId: number, action: "STOP" | "PAUSE" = "STOP") =>
     request<any>(`/agent/tasks/${taskId}/interrupt`, {
       method: "POST",

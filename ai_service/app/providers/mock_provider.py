@@ -30,18 +30,23 @@ class MockAIProvider(BaseAIProvider):
         system_prompt: str,
         target_table: str,
         required_fields: List[str],
-        rejection_feedback: Optional[str] = None
+        rejection_feedback: Optional[str] = None,
+        schema_constraints: Optional[Dict[str, Any]] = None,
+        relation_catalog: Optional[Dict[str, Any]] = None,
+        recent_titles: Optional[List[str]] = None,
+        **kwargs: Any
     ) -> Dict[str, Any]:
         # 1. Extract RAG context passages if present
         rag_passages = []
-        rag_match = re.search(r"--- RETRIEVED KNOWLEDGE CONTEXT ---\s*(.*?)\s*----------------------------------", prompt, re.DOTALL)
+        rag_match = re.search(r"--- RETRIEVED KNOWLEDGE CONTEXT.*?---\s*(.*?)\s*----------------------------------", prompt, re.DOTALL)
         if rag_match:
             rag_text = rag_match.group(1).strip()
-            # Extract bullet points or headers
-            rag_passages = [line.strip() for line in rag_text.split("\n") if line.strip() and not line.strip().startswith("---")]
+            # Strip UNTRUSTED_CONTENT tags and extract lines
+            clean_rag = re.sub(r"</?UNTRUSTED_CONTENT>", "", rag_text)
+            rag_passages = [line.strip() for line in clean_rag.split("\n") if line.strip() and not line.strip().startswith("---") and not line.strip().startswith("CRITICAL SECURITY")]
 
         # 2. Extract core topic from prompt
-        cleaned_prompt = re.sub(r"--- RETRIEVED KNOWLEDGE CONTEXT ---.*?----------------------------------", "", prompt, flags=re.DOTALL).strip()
+        cleaned_prompt = re.sub(r"--- RETRIEVED KNOWLEDGE CONTEXT.*?----------------------------------", "", prompt, flags=re.DOTALL).strip()
         cleaned_prompt = re.sub(r"^Task:\s*", "", cleaned_prompt, flags=re.IGNORECASE).strip()
 
         topic_match = re.search(r"topic:\s*([^\n\.]+)", cleaned_prompt, re.IGNORECASE)
@@ -125,6 +130,11 @@ Achieving consistency with {topic_display} requires thoughtful structure and a c
 By adhering to these actionable insights, you create a sustainable and highly effective workflow tailored to your individual goals.
 """
 
+        # Novelty check: avoid repeating recent titles
+        if recent_titles and any(title.lower() == t.lower() for t in recent_titles):
+            title = f"Deep Dive: Modern Perspectives on {topic_display}"
+            slug = re.sub(r"[-\s]+", "-", re.sub(r"[^\w\s-]", "", title.lower()).strip())
+
         result: Dict[str, Any] = {}
         for field in required_fields:
             lower_field = field.lower()
@@ -137,7 +147,7 @@ By adhering to these actionable insights, you create a sustainable and highly ef
             elif lower_field in ["content", "body", "description"]:
                 result[field] = content_body
             elif lower_field == "status":
-                result[field] = "1"
+                result[field] = "published" if schema_constraints and "published" in schema_constraints.get(field, {}).get("enum_values", []) else "1"
             elif lower_field in ["seo_title", "meta_title"]:
                 result[field] = title[:60]
             elif lower_field in ["meta_description"]:
@@ -151,13 +161,26 @@ By adhering to these actionable insights, you create a sustainable and highly ef
             elif re.search(r"(meta_img|thumbnail|cover|photo|image|avatar)", lower_field):
                 result[field] = meta_img
             elif lower_field.endswith("_id") or lower_field == "id" or lower_field in ["category_id", "author_id", "user_id"]:
-                result[field] = 1
+                if relation_catalog and field in relation_catalog and relation_catalog[field].get("values"):
+                    result[field] = relation_catalog[field]["values"][0]
+                else:
+                    result[field] = 1
             elif lower_field in ["views", "count", "sort_order", "priority", "is_featured", "is_active"]:
                 result[field] = 1
             elif "date" in lower_field or "at" in lower_field:
                 result[field] = time.strftime("%Y-%m-%d %H:%M:%S")
             else:
                 result[field] = f"Insights on {topic_display}"
+
+            # Post-process with schema constraints (max length, enum values, types)
+            if schema_constraints and field in schema_constraints:
+                c = schema_constraints[field]
+                enums = c.get("enum_values") or []
+                max_len = c.get("max_length")
+                if enums and str(result[field]) not in [str(e) for e in enums]:
+                    result[field] = enums[0]
+                if max_len and isinstance(result[field], str) and len(result[field]) > max_len:
+                    result[field] = result[field][:max_len]
 
         return result
 
@@ -185,6 +208,31 @@ By adhering to these actionable insights, you create a sustainable and highly ef
                 "task_type": "POLICY_REJECTED",
                 "outcome": "DISALLOWED_BY_POLICY",
                 "explanation": "Destructive SQL operations (DELETE, DROP, TRUNCATE, ALTER) and raw SQL execution are strictly prohibited on customer databases by platform safety guardrails.",
+                "steps": [],
+                "extracted_slots": {}
+            }
+
+        # 1b. GREETINGS & CONVERSATIONAL QUESTIONS
+        if re.search(r"^(hi|hello|hey|how\s+are\s+you|greetings|good\s+(morning|afternoon|evening)|what\s+can\s+you\s+do|who\s+are\s+you)\b", lower):
+            return {
+                "task_type": "GREETING",
+                "outcome": "CONVERSATIONAL_RESPONSE",
+                "explanation": "Hello! I'm Orbit, your autonomous AI database assistant. I can help you connect MySQL databases, inspect schemas, create automated workflows, and navigate the platform. What would you like to work on?",
+                "steps": [],
+                "extracted_slots": {}
+            }
+
+        # 1c. PROJECT / PRODUCT INQUIRIES
+        if any(k in lower for k in ["what is this project", "about this project", "project about", "what does this app do", "what is dataauto", "how does this work", "how do automations work", "what is this platform", "explain the platform", "what databases", "tell me about this project"]):
+            explanation = (
+                "DataAuto is an AI-Powered Multi-User Database Automation Platform! "
+                "It allows you to connect your MySQL databases, discover tables and schema, and run scheduled AI content workflows with email reviews and approvals. "
+                "I'm Orbit, your autonomous AI companion, and I can navigate and operate the portal on your behalf."
+            )
+            return {
+                "task_type": "PRODUCT_EXPLANATION",
+                "outcome": "CONVERSATIONAL_RESPONSE",
+                "explanation": explanation,
                 "steps": [],
                 "extracted_slots": {}
             }
@@ -248,9 +296,13 @@ By adhering to these actionable insights, you create a sustainable and highly ef
         # Merge extracted slots with accumulated
         merged_slots = {**accumulated, **extracted_slots}
 
-        # 4. Connection Intents
+        # 4. Connection Status & Listing Intents (Status check takes precedence over add connection)
+        is_status_or_list_intent = any(k in lower for k in [
+            "list", "show", "what databases", "view connections", "status", "health",
+            "check database", "check connection", "connection status", "db status", "any database"
+        ]) and not any(k in lower for k in ["add ", "create ", "new ", "save "])
+
         is_conn_intent = any(k in lower for k in ["connect", "database", "mysql", "db profile", "link db", "hook up"])
-        is_list_intent = any(k in lower for k in ["list", "show", "what databases", "view connections"])
         is_schema_intent = any(k in lower for k in ["scan", "schema", "tables", "columns", "inspect schema"])
 
         if is_schema_intent and not is_conn_intent:
@@ -271,12 +323,19 @@ By adhering to these actionable insights, you create a sustainable and highly ef
                 ]
             }
 
-        if is_list_intent and not any(k in lower for k in ["add", "new", "create"]):
+        if is_status_or_list_intent:
+            conns = context.get("connections", [])
+            if len(conns) == 0:
+                explanation = "You don't have any database connections configured yet. Let's set one up! I can open the connection setup form for you right now."
+            else:
+                conn_names = ", ".join([f"'{c.get('name', 'Database')}' ({c.get('host', '127.0.0.1')})" for c in conns])
+                explanation = f"You have {len(conns)} configured database connection(s): {conn_names}."
+
             return {
                 "task_type": "LIST_CONNECTIONS",
                 "outcome": "SUPPORTED_AND_SPECIFIED",
                 "extracted_slots": merged_slots,
-                "explanation": "Retrieving your configured database connections.",
+                "explanation": explanation,
                 "steps": [
                     {
                         "tool": "list_database_connections",
@@ -469,4 +528,93 @@ By adhering to these actionable insights, you create a sustainable and highly ef
         elif final_status == "FAILED":
             return "I encountered an issue verifying the connection. Please check your credentials and try again."
         return f"Operation completed with status {final_status}."
+
+    def evaluate_correction(
+        self,
+        correction_text: str,
+        active_task_status: str,
+        current_step: Optional[str] = None,
+        active_plan: Optional[List[Dict[str, Any]]] = None,
+        target_resource_type: Optional[str] = None,
+        target_resource_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Deterministic correction evaluator for testing and offline demos."""
+        text = correction_text.strip()
+        lower = text.lower()
+
+        # 1. Parameter correction: category
+        cleaned_text = re.sub(r"\b(?:don't|do not|stop)\s+(?:use|using)\s+[A-Za-z0-9_-]+[,\.]?\s*", "", text, flags=re.IGNORECASE)
+        cat_match = re.search(r"(?:use (?:category )?|make it (?:category )?|change (?:category )?to |set category to |category\s+)(['\"]?[A-Za-z0-9\s_-]+?['\"]?)(?:\s+category|\s+instead|\.|$)", cleaned_text, re.IGNORECASE)
+        if "review" in lower or cat_match or ("category" in lower and any(w in lower for w in ["instead", "use", "to", "make"])):
+            if "review" in lower:
+                new_cat = "Reviews"
+            elif cat_match:
+                raw_val = cat_match.group(1).strip().strip("'\"")
+                raw_val = re.sub(r"^(?:category\s+|the\s+)", "", raw_val, flags=re.IGNORECASE).strip()
+                raw_val = re.sub(r"(?:\s+category)$", "", raw_val, flags=re.IGNORECASE).strip()
+                new_cat = " ".join(w.capitalize() for w in raw_val.split()) if raw_val else "General"
+            else:
+                new_cat = "General"
+
+            is_committed = active_task_status in ["SUCCEEDED", "COMMITTED"]
+            return {
+                "action": "CHANGE_PARAMETER",
+                "revised_parameter": "category_name",
+                "new_value": new_cat,
+                "compensating_needed": is_committed,
+                "explanation": f"User changed category to '{new_cat}'." + (" Requires compensating update to committed record." if is_committed else "")
+            }
+
+        # 2. Pure Stop / Cancel command
+        if any(lower.startswith(w) for w in ["stop", "cancel", "halt", "abort", "terminate"]) or "stop that" in lower:
+            return {
+                "action": "STOP",
+                "explanation": "Immediate cooperative stop requested by user."
+            }
+
+        # 3. Pause command
+        if any(lower.startswith(w) for w in ["pause", "hold on", "wait a minute", "freeze"]) or "pause task" in lower:
+            return {
+                "action": "PAUSE",
+                "explanation": "Pause task at current safe boundary."
+            }
+
+        # 4. Resume command
+        if any(lower.startswith(w) for w in ["resume", "continue", "unpause", "proceed"]):
+            return {
+                "action": "RESUME",
+                "explanation": "Resuming task execution."
+            }
+
+        # 5. Topic revision
+        topic_match = re.search(r"(?:topic to|change topic to|write about|make it about)\s+['\"]?([^'\"\.\n]+)['\"]?", text, re.IGNORECASE)
+        if topic_match:
+            new_topic = topic_match.group(1).strip()
+            return {
+                "action": "CHANGE_PARAMETER",
+                "revised_parameter": "topic_prompt",
+                "new_value": new_topic,
+                "compensating_needed": active_task_status in ["SUCCEEDED", "COMMITTED"],
+                "explanation": f"User updated topic to '{new_topic}'."
+            }
+
+        # 6. Schedule revision
+        if any(w in lower for w in ["weekly", "daily", "one-time", "once a week"]):
+            freq = "WEEKLY" if "weekly" in lower or "once a week" in lower else ("DAILY" if "daily" in lower else "ONE_TIME")
+            return {
+                "action": "CHANGE_PARAMETER",
+                "revised_parameter": "schedule_type",
+                "new_value": freq,
+                "compensating_needed": active_task_status in ["SUCCEEDED", "COMMITTED"],
+                "explanation": f"User updated schedule frequency to '{freq}'."
+            }
+
+        return {
+            "action": "CHANGE_PARAMETER",
+            "revised_parameter": "goal",
+            "new_value": text,
+            "compensating_needed": False,
+            "explanation": f"General instruction revision: \"{text}\""
+        }
+
 

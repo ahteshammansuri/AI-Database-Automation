@@ -326,4 +326,112 @@ class AgentAutonomousActionTest extends TestCase
         $lastMsg = $res2->json('message.content');
         $this->assertNotEmpty($lastMsg);
     }
+
+    public function test_page_context_preservation_in_agent_message()
+    {
+        $convo = AgentConversation::create([
+            'user_id' => $this->user1->id,
+            'title' => 'Page Context Session',
+        ]);
+
+        $pageContext = [
+            'currentPath' => '/explorer',
+            'pageTitle' => 'Schema Explorer',
+            'activeEntity' => ['type' => 'table', 'id' => 'posts', 'name' => 'posts'],
+            'mountedForms' => [],
+            'activeModal' => null,
+            'timestamp' => now()->toISOString(),
+        ];
+
+        $res = $this->actingAs($this->user1)
+            ->postJson("/api/agent/conversations/{$convo->id}/messages", [
+                'content' => 'I need help automating this table',
+                'page_context' => $pageContext,
+            ]);
+
+        $res->assertStatus(200);
+        $task = AgentTask::find($res->json('task.id'));
+        $this->assertNotNull($task);
+        $this->assertNotNull($task->slots['page_context'] ?? null);
+        $this->assertEquals('/explorer', $task->slots['page_context']['currentPath']);
+        $this->assertEquals('posts', $task->slots['page_context']['activeEntity']['id']);
+    }
+
+    public function test_observe_act_loop_authentication_failure_recovery()
+    {
+        UserAgentPreference::create([
+            'user_id' => $this->user1->id,
+            'autonomy_level' => 'AUTOMATIC_WITHIN_PERMISSIONS',
+            'voice_enabled' => true,
+        ]);
+
+        $convo = AgentConversation::create([
+            'user_id' => $this->user1->id,
+            'title' => 'Auth Recovery Test',
+        ]);
+
+        // Turn 1: Initiate connection task
+        $this->actingAs($this->user1)
+            ->postJson("/api/agent/conversations/{$convo->id}/messages", [
+                'content' => 'Add database connection',
+            ]);
+
+        // Turn 2: Attempt connection with deliberate invalid password
+        $res = $this->actingAs($this->user1)
+            ->postJson("/api/agent/conversations/{$convo->id}/messages", [
+                'content' => 'Here are my database details',
+                'secure_input_data' => [
+                    'name' => 'Bad Password DB',
+                    'host' => '127.0.0.1',
+                    'port' => 3308,
+                    'database' => 'demo_blog_cms',
+                    'username' => 'root',
+                    'password' => 'wrong_password_xyz_999',
+                    'ssl_mode' => 'prefer',
+                ],
+            ]);
+
+        $res->assertStatus(200);
+        // Observe-act loop intercepts authentication failure and asks for input instead of crashing
+        $this->assertEquals('WAITING_FOR_INPUT', $res->json('task.status'));
+        $this->assertEquals('database_credentials', $res->json('message.secure_input_type'));
+        $this->assertStringContainsString('authentication failed', strtolower($res->json('message.content')));
+    }
+
+    public function test_bounded_loop_detection_at_twelve_iterations()
+    {
+        $convo = AgentConversation::create([
+            'user_id' => $this->user1->id,
+            'title' => 'Loop Limit Session',
+        ]);
+
+        // Construct a synthetic plan with 14 steps
+        $steps = [];
+        for ($i = 0; $i < 14; $i++) {
+            $steps[] = [
+                'tool' => 'get_provider_health',
+                'label' => "Health Check Step #{$i}",
+                'args' => ['provider' => 'mock'],
+            ];
+        }
+
+        $task = AgentTask::create([
+            'user_id' => $this->user1->id,
+            'conversation_id' => $convo->id,
+            'task_type' => 'GENERAL',
+            'goal' => 'Stress test loop limiter',
+            'status' => 'READY',
+            'autonomy_level' => 'AUTOMATIC_WITHIN_PERMISSIONS',
+            'active_plan' => $steps,
+            'current_step_index' => 0,
+        ]);
+
+        $executionService = app(\App\Services\Agent\AgentExecutionService::class);
+        $result = $executionService->executeTaskPlan($this->user1, $convo, $task);
+
+        // Bounded loop must fail safely when hitting 12th iteration
+        $this->assertEquals('FAILED', $result['task']->status);
+        $this->assertStringContainsString('12', $result['task']->error_message);
+    }
 }
+

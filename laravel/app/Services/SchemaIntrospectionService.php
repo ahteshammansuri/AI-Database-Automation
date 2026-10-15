@@ -5,14 +5,26 @@ namespace App\Services;
 use App\Models\DbConnection;
 use App\Models\SchemaSnapshot;
 use App\Models\SchemaTableAnnotation;
+use Illuminate\Support\Facades\Log;
 use PDO;
 use Exception;
 
 class SchemaIntrospectionService
 {
     public function __construct(
-        protected DatabaseSafetyService $safetyService
-    ) {}
+        protected DatabaseSafetyService $safetyService,
+        protected ?AiServiceClient $aiClient = null
+    ) {
+        $this->aiClient = $aiClient ?? app(AiServiceClient::class);
+    }
+
+    /**
+     * Alias for introspectSchema without forced snapshot persistence.
+     */
+    public function introspect(DbConnection $connection, bool $persistSnapshot = false): array
+    {
+        return $this->introspectSchema($connection, $persistSnapshot);
+    }
 
     /**
      * Introspect MySQL database schema in read-only mode, classify table eligibility,
@@ -155,11 +167,9 @@ class SchemaIntrospectionService
             // 2. Snapshot persistence & diff detection
             $diff = null;
             if ($persistSnapshot) {
-                $latestSnapshotId = SchemaSnapshot::where('connection_id', $connection->id)
+                $latestSnapshot = SchemaSnapshot::where('connection_id', $connection->id)
                     ->orderByDesc('id')
-                    ->value('id');
-
-                $latestSnapshot = $latestSnapshotId ? SchemaSnapshot::find($latestSnapshotId) : null;
+                    ->first();
 
                 $newVersion = $latestSnapshot ? ($latestSnapshot->version + 1) : 1;
 
@@ -169,16 +179,38 @@ class SchemaIntrospectionService
 
                 $totalCols = array_sum(array_map(fn($t) => count($t['columns']), $tables));
 
-                SchemaSnapshot::create([
-                    'user_id' => $connection->user_id,
-                    'connection_id' => $connection->id,
-                    'version' => $newVersion,
-                    'schema_payload' => $currentSchema,
-                    'table_count' => count($tables),
-                    'column_count' => $totalCols,
-                ]);
+                $shouldCreateSnapshot = ($latestSnapshot === null) || ($diff && !empty($diff['has_changes']));
 
-                $currentSchema['snapshot_version'] = $newVersion;
+                if ($shouldCreateSnapshot) {
+                    SchemaSnapshot::create([
+                        'user_id' => $connection->user_id,
+                        'connection_id' => $connection->id,
+                        'version' => $newVersion,
+                        'schema_payload' => $currentSchema,
+                        'table_count' => count($tables),
+                        'column_count' => $totalCols,
+                    ]);
+
+                    $currentSchema['snapshot_version'] = $newVersion;
+
+                    // 3. Index structured Table Profiles into Python RAG for user-scoped semantic retrieval
+                    if ($latestSnapshot && !empty($diff['has_changes'])) {
+                        // Only re-index added or modified tables to avoid Ollama CPU saturation
+                        $tablesToIndex = array_filter($tables, function ($t) use ($diff) {
+                            $name = $t['name'] ?? '';
+                            $isAdded = in_array($name, $diff['added_tables'] ?? []);
+                            $isModified = in_array($name, array_column($diff['modified_tables'] ?? [], 'table'));
+                            return $isAdded || $isModified;
+                        });
+                        $this->indexTableProfilesIntoRag($connection, array_values($tablesToIndex));
+                    } else {
+                        // First snapshot for connection: index all tables once
+                        $this->indexTableProfilesIntoRag($connection, $tables);
+                    }
+                } else {
+                    $currentSchema['snapshot_version'] = $latestSnapshot->version;
+                }
+
                 $currentSchema['schema_diff'] = $diff;
             }
 
@@ -186,6 +218,98 @@ class SchemaIntrospectionService
         } finally {
             $pdo = null; // Explicitly release PDO connection
         }
+    }
+
+    /**
+     * Generate structured Markdown Table Profile for a table.
+     */
+    public function generateTableProfileMarkdown(DbConnection $connection, array $table): string
+    {
+        $name = $table['name'] ?? 'unknown';
+        $tier = $table['tier'] ?? 'UNKNOWN';
+        $eligible = !empty($table['eligible']) ? 'Yes' : 'No';
+        $approxRows = $table['approx_rows'] ?? 0;
+        $notes = $table['user_notes'] ?? 'None';
+
+        $pks = [];
+        $fks = [];
+        $colLines = [];
+
+        foreach ($table['columns'] ?? [] as $col) {
+            $cName = $col['name'] ?? '';
+            $cType = $col['type'] ?? $col['data_type'] ?? 'varchar';
+            $nullable = !empty($col['nullable']) ? 'nullable' : 'NOT NULL';
+            $maxLen = !empty($col['max_length']) ? "max={$col['max_length']}" : null;
+            $enums = !empty($col['enum_values']) ? 'enum=[' . implode(', ', $col['enum_values']) . ']' : null;
+            $attrs = array_filter([$nullable, $maxLen, $enums]);
+            $attrStr = $attrs ? ' (' . implode(', ', $attrs) . ')' : '';
+
+            $colLines[] = "- `{$cName}`: `{$cType}`{$attrStr}";
+
+            if (!empty($col['is_pk'])) {
+                $pks[] = $cName;
+            }
+            if (!empty($col['fk_table'])) {
+                $fks[] = "`{$cName}` → `{$col['fk_table']}`";
+            }
+        }
+
+        $pkStr = $pks ? implode(', ', $pks) : 'None';
+        $fkStr = $fks ? implode('; ', $fks) : 'None';
+        $colsFormatted = implode("\n", $colLines);
+
+        $guidance = match ($tier) {
+            'RECOMMENDED' => 'This is an approved editorial/content table. Safe for parameterized automated operations.',
+            'RESTRICTED'  => 'RESTRICTED TABLE: Authentication, credentials, payments, or audit logs. Automated writes are strictly prohibited by platform security invariants.',
+            default       => 'Auxiliary or reference table. Requires review and explicit field mapping before automation.',
+        };
+
+        return <<<MD
+# Table Profile: {$name}
+- **Connection**: #{$connection->id} ({$connection->name})
+- **Database**: `{$connection->database_name}`
+- **Eligibility Tier**: {$tier} (Automation Eligible: {$eligible})
+- **Approximate Rows**: {$approxRows}
+- **Primary Key**: {$pkStr}
+- **Foreign Keys**: {$fkStr}
+- **Workspace Notes**: {$notes}
+
+## Columns & Constraints
+{$colsFormatted}
+
+## Operational Guidance
+{$guidance}
+MD;
+    }
+
+    /**
+     * Index Table Profiles into the Python AI RAG service for semantic retrieval.
+     */
+    public function indexTableProfilesIntoRag(DbConnection $connection, array $tables): int
+    {
+        $indexed = 0;
+        foreach ($tables as $index => $table) {
+            $tableName = $table['name'] ?? '';
+            try {
+                if (!$tableName) continue;
+
+                $profile = $this->generateTableProfileMarkdown($connection, $table);
+                // Unique document ID derived from connection and index
+                $docId = (int) (100000 + ($connection->id * 100) + ($index % 100));
+
+                $this->aiClient->indexDocument(
+                    userId: $connection->user_id,
+                    docId: $docId,
+                    title: "Table Profile: {$tableName}",
+                    textContent: $profile,
+                    fileType: 'md'
+                );
+                $indexed++;
+            } catch (\Throwable $e) {
+                Log::debug("[SchemaIntrospection] Failed to index Table Profile for {$tableName} into RAG: " . $e->getMessage());
+            }
+        }
+        return $indexed;
     }
 
     /**

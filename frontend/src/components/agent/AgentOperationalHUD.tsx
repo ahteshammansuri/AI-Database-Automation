@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Mic,
@@ -22,14 +22,14 @@ import {
   RotateCcw,
 } from "lucide-react";
 import { OrbitMascotCharacter, CharacterState, CharacterAngle } from "./OrbitMascotCharacter";
-import { SecureCredentialCard } from "./SecureCredentialCard";
-import { AgentTask, AgentTimelineEvent } from "../../context/AssistantContext";
+import { AgentTask, AgentTimelineEvent, AgentMessage } from "../../context/AssistantContext";
 import { usePressAndHold } from "../../hooks/usePressAndHold";
 import soundManager from "../../services/soundEffects";
 
 export interface AgentOperationalHUDProps {
   isOpen: boolean;
   onClose: () => void;
+  messages?: AgentMessage[];
   characterState: CharacterState;
   activeTask: AgentTask | null;
   timelineEvents: AgentTimelineEvent[];
@@ -228,6 +228,7 @@ const ALL_BEHAVIORS: BehaviorSpec[] = [
 export const AgentOperationalHUD: React.FC<AgentOperationalHUDProps> = ({
   isOpen,
   onClose,
+  messages = [],
   characterState,
   activeTask,
   timelineEvents,
@@ -259,9 +260,15 @@ export const AgentOperationalHUD: React.FC<AgentOperationalHUDProps> = ({
   const [isAudioMuted, setIsAudioMuted] = useState<boolean>(soundManager.isMuted());
   const [accessibleText, setAccessibleText] = useState("");
 
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, isLoading, transcript, interimTranscript]);
+
   // Press-and-Hold vs Tap hook for HUD voice button
   const { isHolding, bind: voiceButtonBind } = usePressAndHold({
-    startOnDown: false,
+    startOnDown: true,
     onHoldStart: () => {
       if (!isListening) {
         onStartListening();
@@ -273,7 +280,7 @@ export const AgentOperationalHUD: React.FC<AgentOperationalHUDProps> = ({
     onTap: () => {
       onToggleListening();
     },
-    holdThresholdMs: 350,
+    holdThresholdMs: 220,
   });
 
   const isTaskRunning =
@@ -550,8 +557,8 @@ export const AgentOperationalHUD: React.FC<AgentOperationalHUDProps> = ({
 
           {/* Companion Body */}
           <div className="p-4 space-y-3.5">
-            {/* 1. Spoken Transcript & Status Visualizer */}
-            <div className="bg-slate-950/80 rounded-2xl p-3.5 border border-slate-800/90 shadow-inner space-y-2.5">
+            {/* 1. Spoken Transcript & Interactive Conversation Feed */}
+            <div className="bg-slate-950/80 rounded-2xl p-3 border border-slate-800/90 shadow-inner space-y-2.5">
               {/* Active Audio Waveform when speaking or holding */}
               {isHolding ? (
                 <div className="flex items-center space-x-2 text-cyan-400 bg-cyan-950/40 border border-cyan-800/40 rounded-xl px-3 py-2">
@@ -575,47 +582,125 @@ export const AgentOperationalHUD: React.FC<AgentOperationalHUDProps> = ({
                 </div>
               ) : null}
 
-              {/* Formulating / Loading Status */}
-              {isLoading && (
-                <div className="flex items-center space-x-2 text-indigo-300 bg-indigo-950/40 border border-indigo-800/40 rounded-xl px-3 py-2">
-                  <Loader2 className="w-4 h-4 animate-spin text-indigo-400 shrink-0" />
-                  <span className="text-[11px] font-medium">
-                    Orbit is formulating execution plan & checking permissions...
-                  </span>
-                </div>
-              )}
-
-              {/* User Voice Transcript */}
-              {(transcript || interimTranscript) && (
-                <div className="text-xs text-slate-300 bg-slate-900/60 px-2.5 py-1.5 rounded-xl border border-slate-800 flex items-start space-x-2">
-                  <Mic className="w-3 h-3 text-cyan-400 mt-0.5 shrink-0" />
-                  <p className="italic">
+              {/* Live Voice Hearing Transcript (While speaking or right after button release) */}
+              {(interimTranscript || (isListening && transcript)) && (
+                <div className="text-xs text-cyan-200 bg-cyan-950/40 px-3 py-2 rounded-xl border border-cyan-800/60 flex items-start space-x-2 animate-pulse">
+                  <Mic className="w-3.5 h-3.5 text-cyan-400 mt-0.5 shrink-0" />
+                  <p className="italic font-mono text-[11px]">
                     "{interimTranscript || transcript}"
                   </p>
                 </div>
               )}
 
-              {/* Spoken Response Caption */}
-              {lastSpokenText ? (
-                <div className="text-xs text-slate-100 flex items-start space-x-2">
-                  <Volume2 className={`w-3.5 h-3.5 mt-0.5 shrink-0 ${isSpeaking ? "text-emerald-400 animate-pulse" : "text-slate-400"}`} />
-                  <div className="leading-relaxed font-normal">
-                    {lastSpokenText}
+              {/* Scrollable Conversation Thread */}
+              <div className="max-h-56 overflow-y-auto space-y-2.5 pr-1 text-xs">
+                {messages.length === 0 ? (
+                  <div className="py-2 px-1 text-center space-y-2">
+                    <div className="flex items-center justify-center space-x-2 text-slate-300">
+                      <OrbitMascotCharacter state="idle" size="xs" />
+                      <span className="font-semibold text-xs text-cyan-300">Orbit Voice-First Assistant</span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 leading-relaxed">
+                      Hold the mic button or speak naturally. Say "Hi", ask Orbit to scan schemas, check database health, or create automations.
+                    </p>
+                    {/* Quick Starter Chips */}
+                    <div className="flex flex-wrap gap-1.5 justify-center pt-1">
+                      {[
+                        { label: "💬 Say Hello", prompt: "Hello Orbit!" },
+                        { label: "🔍 Scan Database", prompt: "Scan the database schema and show me tables" },
+                        { label: "🔌 Check Connections", prompt: "Check database connection status" },
+                        { label: "🤖 Run Automation", prompt: "What automations are ready to run?" },
+                      ].map((chip) => (
+                        <button
+                          key={chip.label}
+                          type="button"
+                          onClick={() => onSendInstruction?.(chip.prompt)}
+                          className="text-[10px] px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 hover:text-cyan-300 hover:border-cyan-500/40 transition-colors cursor-pointer"
+                        >
+                          {chip.label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              ) : !isListening && !transcript && !isLoading ? (
-                <p className="text-[11px] text-slate-400 italic">
-                  Press & hold Orbit or the mic below to speak. Orbit will navigate and operate the portal autonomously.
-                </p>
-              ) : null}
+                ) : (
+                  messages.map((msg, i) => {
+                    const isUser = msg.role === "user";
+                    return (
+                      <div
+                        key={msg.id || i}
+                        className={`flex flex-col ${isUser ? "items-end" : "items-start"} space-y-1`}
+                      >
+                        <div
+                          className={`max-w-[88%] rounded-2xl px-3.5 py-2 leading-relaxed shadow-sm ${
+                            isUser
+                              ? "bg-gradient-to-r from-cyan-900/60 to-indigo-900/60 border border-cyan-700/50 text-slate-100 rounded-tr-xs"
+                              : "bg-slate-900/90 border border-slate-800 text-slate-200 rounded-tl-xs"
+                          }`}
+                        >
+                          <div className="flex items-center space-x-1.5 mb-1 text-[10px] font-medium">
+                            {isUser ? (
+                              <>
+                                {msg.is_voice && <Mic className="w-2.5 h-2.5 text-cyan-400" />}
+                                <span className="text-cyan-300">You {msg.is_voice ? "(Voice)" : ""}</span>
+                              </>
+                            ) : (
+                              <div className="flex items-center space-x-1 text-indigo-300">
+                                <Sparkles className="w-2.5 h-2.5 text-indigo-400" />
+                                <span className="font-semibold text-indigo-300">Orbit</span>
+                              </div>
+                            )}
+                          </div>
+                          <div className="text-xs break-words whitespace-pre-wrap font-normal">
+                            {msg.content}
+                          </div>
 
-              {/* Voice Error notice if microphone denied or unavailable */}
-              {voiceError && (
-                <div className="text-[11px] text-amber-300 bg-amber-500/10 px-2.5 py-1.5 rounded-xl border border-amber-500/20 flex items-center space-x-1.5">
-                  <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                  <span>{voiceError}</span>
-                </div>
-              )}
+                          {/* Executed Tools Badge */}
+                          {msg.tool_calls && msg.tool_calls.length > 0 && (
+                            <div className="mt-1.5 pt-1 border-t border-slate-800/80 flex flex-wrap gap-1">
+                              {msg.tool_calls.map((tc: any, tIdx: number) => (
+                                <span
+                                  key={tIdx}
+                                  className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-emerald-950/60 text-emerald-300 border border-emerald-800/50"
+                                >
+                                  ⚡ {tc.tool || tc.name || "Tool"} executed
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+
+                {/* Orbit Thinking Card while formulating response */}
+                {isLoading && (
+                  <div className="flex items-start space-x-2 pt-1 animate-fadeIn">
+                    <div className="shrink-0 pt-0.5">
+                      <OrbitMascotCharacter state="thinking" size="xs" />
+                    </div>
+                    <div className="bg-indigo-950/50 border border-indigo-700/40 rounded-2xl rounded-tl-xs px-3.5 py-2.5 text-indigo-200 space-y-1.5 shadow-md">
+                      <div className="flex items-center space-x-2 text-[11px] font-semibold text-indigo-300">
+                        <span className="w-2 h-2 rounded-full bg-violet-400 animate-ping" />
+                        <span>Orbit is thinking & analyzing context...</span>
+                      </div>
+                      <p className="text-[10px] text-indigo-300/80 italic">
+                        Formulating autonomous plan, checking permissions & target schema...
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Voice Error notice if microphone denied or unavailable */}
+                {voiceError && (
+                  <div className="text-[11px] text-amber-300 bg-amber-500/10 px-2.5 py-1.5 rounded-xl border border-amber-500/20 flex items-center space-x-1.5">
+                    <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    <span>{voiceError}</span>
+                  </div>
+                )}
+
+                <div ref={messagesEndRef} />
+              </div>
             </div>
 
             {/* 2. Active Operation Status Card */}
@@ -664,16 +749,7 @@ export const AgentOperationalHUD: React.FC<AgentOperationalHUDProps> = ({
               </div>
             )}
 
-            {/* 3. Secure Credential Masked Form */}
-            {isWaitingInput && (
-              <SecureCredentialCard
-                onSubmit={onSubmitSecureInput}
-                onCancel={() => onInterrupt("STOP")}
-                isLoading={isLoading}
-              />
-            )}
-
-            {/* 4. Action Confirmation Card (If Consequential) */}
+            {/* 3. Action Confirmation Card (If Consequential) */}
             {needsConfirmation && (
               <div className="bg-amber-950/30 border border-amber-800/40 rounded-2xl p-3 space-y-2">
                 <div className="flex items-center space-x-2 text-amber-300 text-xs font-medium">
@@ -700,52 +776,6 @@ export const AgentOperationalHUD: React.FC<AgentOperationalHUDProps> = ({
                 </div>
               </div>
             )}
-
-            {/* 5. Master Voice & Interruption Control Bar */}
-            {/* 5. Quick Action Chips for Fast Voice or 1-Click Operations */}
-            <div className="pt-1 space-y-1.5">
-              <div className="flex items-center justify-between text-[10px] text-slate-400 font-medium">
-                <span className="flex items-center space-x-1">
-                  <Sparkles className="w-3 h-3 text-cyan-400" />
-                  <span>Quick Actions (Click to Run):</span>
-                </span>
-                <span className="text-[9px] text-slate-500 font-mono">1-Click Portal Execution</span>
-              </div>
-              <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-[11px] no-scrollbar">
-                <button
-                  type="button"
-                  disabled={isLoading}
-                  onClick={() => onSendInstruction?.("Connect to MySQL on host 127.0.0.1 port 3306 database test user root")}
-                  className="whitespace-nowrap px-2.5 py-1 rounded-xl bg-slate-900 border border-cyan-500/30 hover:border-cyan-400 text-cyan-300 transition-colors flex items-center space-x-1 hover:bg-slate-800 disabled:opacity-50"
-                >
-                  <span>⚡ Connect MySQL (127.0.0.1:3306)</span>
-                </button>
-                <button
-                  type="button"
-                  disabled={isLoading}
-                  onClick={() => onSendInstruction?.("Scan database schema and tables")}
-                  className="whitespace-nowrap px-2.5 py-1 rounded-xl bg-slate-900 border border-slate-700 hover:border-slate-500 text-slate-300 transition-colors flex items-center space-x-1 hover:bg-slate-800 disabled:opacity-50"
-                >
-                  <span>🔍 Scan Schema</span>
-                </button>
-                <button
-                  type="button"
-                  disabled={isLoading}
-                  onClick={() => onSendInstruction?.("Create daily blog automation draft")}
-                  className="whitespace-nowrap px-2.5 py-1 rounded-xl bg-slate-900 border border-slate-700 hover:border-slate-500 text-slate-300 transition-colors flex items-center space-x-1 hover:bg-slate-800 disabled:opacity-50"
-                >
-                  <span>📝 Create Blog Automation</span>
-                </button>
-                <button
-                  type="button"
-                  disabled={isLoading}
-                  onClick={() => onSendInstruction?.("List all database connections")}
-                  className="whitespace-nowrap px-2.5 py-1 rounded-xl bg-slate-900 border border-slate-700 hover:border-slate-500 text-slate-300 transition-colors flex items-center space-x-1 hover:bg-slate-800 disabled:opacity-50"
-                >
-                  <span>📋 List Connections</span>
-                </button>
-              </div>
-            </div>
 
             {/* 6. Master Voice & Interruption Control Bar */}
             <div className="pt-1 flex items-center gap-2">

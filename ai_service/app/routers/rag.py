@@ -7,9 +7,13 @@ from ai_service.app.schemas.rag import (
     DocumentIndexResponse,
     QueryRequest,
     QueryResponse,
-    RetrievedChunk
+    RetrievedChunk,
+    FieldClassifyRequest,
+    FieldClassifyResponse,
+    FieldClassificationResult,
 )
 from ai_service.app.rag.service import rag_service
+from ai_service.app.services.field_classifier import field_classifier
 
 router = APIRouter(prefix="/v1/rag", tags=["RAG"])
 
@@ -27,7 +31,6 @@ def extract_text_from_file(req: ExtractTextRequest):
         return {"success": True, "text": text, "format": fmt, "length": len(text)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Extraction failed: {str(e)}")
-
 
 
 @router.post("/index", response_model=DocumentIndexResponse)
@@ -75,3 +78,21 @@ async def delete_document_index(user_id: int, document_id: int):
         return {"success": True, "message": f"Document {document_id} vectors removed"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Deletion failed: {str(e)}")
+
+
+@router.post("/classify-fields", response_model=FieldClassifyResponse)
+def classify_fields(req: FieldClassifyRequest):
+    """
+    Classify schema columns into semantic roles for automation field mapping.
+
+    Accepts column descriptors from live MySQL schema introspection and returns
+    role classifications with confidence scores and evidence strings.
+    Low-confidence results (< 0.70) are flagged for user confirmation in the wizard.
+    """
+    try:
+        column_dicts = [col.model_dump() for col in req.columns]
+        classifications = field_classifier.classify_from_dicts(column_dicts)
+        results = [FieldClassificationResult(**c) for c in classifications]
+        return FieldClassifyResponse(success=True, classifications=results)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Field classification failed: {str(e)}")

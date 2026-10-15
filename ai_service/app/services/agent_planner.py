@@ -176,6 +176,34 @@ class AgentPlanner:
     # -------------------------------------------------------------------------
     @classmethod
     def evaluate_correction(cls, req: EvaluateCorrectionRequest) -> EvaluateCorrectionResponse:
+        # 1. Attempt dynamic model evaluation via configured provider
+        provider_name = (req.provider or "ollama").lower()
+        try:
+            provider = AIProviderFactory.get_provider(provider_name, req.model)
+            raw = provider.evaluate_correction(
+                correction_text=req.correction_text,
+                active_task_status=req.active_task_status,
+                current_step=req.current_step,
+                active_plan=req.active_plan,
+                target_resource_type=req.target_resource_type,
+                target_resource_id=req.target_resource_id,
+            )
+            if isinstance(raw, dict) and "action" in raw:
+                return EvaluateCorrectionResponse(
+                    action=raw.get("action", "CHANGE_PARAMETER"),
+                    revised_parameter=raw.get("revised_parameter"),
+                    new_value=raw.get("new_value"),
+                    compensating_needed=bool(raw.get("compensating_needed", False)),
+                    explanation=raw.get("explanation", "")
+                )
+        except Exception:
+            pass
+
+        # 2. Deterministic regex fallback
+        return cls._deterministic_fallback_correction(req)
+
+    @classmethod
+    def _deterministic_fallback_correction(cls, req: EvaluateCorrectionRequest) -> EvaluateCorrectionResponse:
         text = req.correction_text.strip()
         lower = text.lower()
 
@@ -255,6 +283,7 @@ class AgentPlanner:
             compensating_needed=False,
             explanation=f"General instruction revision: \"{text}\""
         )
+
 
     # -------------------------------------------------------------------------
     # Parameter Extraction Helpers

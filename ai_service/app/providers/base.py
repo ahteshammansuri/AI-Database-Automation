@@ -22,7 +22,11 @@ class BaseAIProvider(ABC):
         system_prompt: str,
         target_table: str,
         required_fields: List[str],
-        rejection_feedback: Optional[str] = None
+        rejection_feedback: Optional[str] = None,
+        schema_constraints: Optional[Dict[str, Any]] = None,
+        relation_catalog: Optional[Dict[str, Any]] = None,
+        recent_titles: Optional[List[str]] = None,
+        **kwargs: Any
     ) -> Dict[str, Any]:
         """
         Generate structured dictionary payload conforming to target schema fields.
@@ -53,3 +57,18 @@ class BaseAIProvider(ABC):
         Generate a concise, truthful spoken response based on verified service outcomes.
         """
         raise NotImplementedError("Provider does not support synthesize_agent_response")
+
+    def evaluate_correction(
+        self,
+        correction_text: str,
+        active_task_status: str,
+        current_step: Optional[str] = None,
+        active_plan: Optional[List[Dict[str, Any]]] = None,
+        target_resource_type: Optional[str] = None,
+        target_resource_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Evaluate user correction or mid-turn interruption and return structured action.
+        """
+        raise NotImplementedError("Provider does not support evaluate_correction")
+

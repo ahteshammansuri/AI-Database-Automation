@@ -17,6 +17,9 @@ import {
 } from "lucide-react";
 import { api } from "../services/api";
 import { AIProviderInfo } from "../types";
+import { ModelRolesSection } from "../components/agent/ModelRolesSection";
+import { actionBridge } from "../services/actionBridge";
+import { pageStateService } from "../services/pageStateService";
 
 export const AIProvidersPage: React.FC = () => {
   const [providers, setProviders] = useState<AIProviderInfo[]>([]);
@@ -46,7 +49,19 @@ export const AIProvidersPage: React.FC = () => {
   };
 
   useEffect(() => {
+    pageStateService.setRoute("/ai-providers", "AI Providers & Model Roles");
     loadProviders();
+
+    const unsubs = [
+      actionBridge.on("providers.test_ollama", async () => {
+        await handleTestProvider("ollama");
+        return { status: "ok" };
+      }),
+    ];
+
+    return () => {
+      unsubs.forEach((u) => u());
+    };
   }, []);
 
   const handleTestProvider = async (providerId: string, modelName?: string) => {
@@ -284,6 +299,9 @@ export const AIProvidersPage: React.FC = () => {
           );
         })}
       </motion.div>
+
+      {/* Role-Based AI Model Delegation */}
+      <ModelRolesSection />
 
       {/* Security notice */}
       <div className="bg-indigo-50/50 border border-indigo-100 rounded-2xl p-6 space-y-2">

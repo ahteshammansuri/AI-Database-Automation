@@ -22,6 +22,8 @@ import { api } from "../services/api";
 import { KnowledgeDocument } from "../types";
 import { StatusPill } from "../components/common/StatusPill";
 import { useToast } from "../context/ToastContext";
+import { actionBridge } from "../services/actionBridge";
+import { pageStateService } from "../services/pageStateService";
 
 export const KnowledgeBasePage: React.FC = () => {
   const { toast, showAlert } = useToast();
@@ -54,7 +56,20 @@ export const KnowledgeBasePage: React.FC = () => {
   };
 
   useEffect(() => {
+    pageStateService.setRoute("/knowledge", "Knowledge Base");
     loadDocs();
+
+    const unsubs = [
+      actionBridge.on("knowledge.open_upload", (payload: any) => {
+        if (payload?.title) setUploadTitle(payload.title);
+        fileInputRef.current?.click();
+        return { status: "ok" };
+      }),
+    ];
+
+    return () => {
+      unsubs.forEach((u) => u());
+    };
   }, []);
 
   const handleDragOver = (e: React.DragEvent) => {

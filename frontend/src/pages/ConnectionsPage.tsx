@@ -30,6 +30,7 @@ import { useLiveEvents } from "../context/LiveEventsContext";
 import { useToast } from "../context/ToastContext";
 import { useAssistant } from "../context/AssistantContext";
 import { actionBridge } from "../services/actionBridge";
+import { pageStateService } from "../services/pageStateService";
 
 interface SupportedEngine {
   id: string;
@@ -257,6 +258,7 @@ export const ConnectionsPage: React.FC = () => {
 
   // Wire typed ActionBridge for autonomous website operations
   useEffect(() => {
+    pageStateService.setRoute("/connections", "Database Connections");
     const unsubs = [
       actionBridge.on("connections.open_create_form", (payload) => {
         setShowModal(true);
@@ -318,6 +320,19 @@ export const ConnectionsPage: React.FC = () => {
       unsubs.forEach((unsub) => unsub());
     };
   }, [handleTestAdHoc, handleSaveConnection]);
+
+  useEffect(() => {
+    pageStateService.setActiveModal(showModal ? "connection_modal" : null);
+    if (showModal) {
+      pageStateService.registerForm("connection_modal", "Database Connection Form");
+      pageStateService.updateFormField("connection_modal", "name", form.name);
+      pageStateService.updateFormField("connection_modal", "host", form.host);
+      pageStateService.updateFormField("connection_modal", "port", form.port);
+      pageStateService.updateFormField("connection_modal", "database_name", form.database_name);
+      pageStateService.updateFormField("connection_modal", "username", form.username);
+      pageStateService.updateFormField("connection_modal", "password", form.password, { isSecret: true });
+    }
+  }, [showModal, form]);
 
   const resetForm = () => {
     setForm({

@@ -125,17 +125,32 @@ class OllamaProvider(BaseAIProvider):
         system_prompt: str,
         target_table: str,
         required_fields: List[str],
-        rejection_feedback: Optional[str] = None
+        rejection_feedback: Optional[str] = None,
+        schema_constraints: Optional[Dict[str, Any]] = None,
+        relation_catalog: Optional[Dict[str, Any]] = None,
+        recent_titles: Optional[List[str]] = None,
+        **kwargs: Any
     ) -> Dict[str, Any]:
         schema_hints = []
         for f in required_fields:
             lf = f.lower()
-            if "title" in lf:
-                schema_hints.append(f'"{f}": "Engaging, catchy title matching topic"')
+            c = (schema_constraints or {}).get(f, {})
+            max_len = c.get("max_length")
+            enums = c.get("enum_values") or []
+
+            if enums:
+                schema_hints.append(f'"{f}": "one of: {enums}"')
+            elif relation_catalog and f in relation_catalog and relation_catalog[f].get("values"):
+                vals = relation_catalog[f]["values"][:8]
+                schema_hints.append(f'"{f}": "reference name from: {vals}"')
+            elif "title" in lf:
+                len_note = f" (max {max_len} chars)" if max_len else ""
+                schema_hints.append(f'"{f}": "Engaging, catchy title matching topic{len_note}"')
             elif lf == "slug":
                 schema_hints.append(f'"{f}": "url-friendly-slug-matching-title"')
             elif lf in ["excerpt", "short_description", "summary"]:
-                schema_hints.append(f'"{f}": "1-2 sentence engaging summary"')
+                len_note = f" (max {max_len} chars)" if max_len else " (1-2 sentences)"
+                schema_hints.append(f'"{f}": "{len_note}"')
             elif lf in ["content", "description", "body"]:
                 schema_hints.append(f'"{f}": "Full comprehensive rich markdown article drawing from the retrieved knowledge"')
             elif "keyword" in lf or "tags" in lf:
@@ -158,6 +173,9 @@ class OllamaProvider(BaseAIProvider):
         )
         if rejection_feedback:
             full_system += f"\nIMPORTANT - Previous version was rejected with feedback: '{rejection_feedback}'. Address this feedback completely in your new generation."
+        if recent_titles:
+            recent_str = ", ".join([f"'{t}'" for t in recent_titles[:10]])
+            full_system += f"\nAVOID DUPLICATION - Do NOT repeat or closely imitate these recently published titles: [{recent_str}]."
 
         payload = {
             "model": self.model,
@@ -236,6 +254,18 @@ class OllamaProvider(BaseAIProvider):
                     elif lf.endswith("_id") or lf in ["category_id", "author_id", "user_id"]:
                         parsed[field] = 1
 
+            # Schema constraint post-validation & coercion
+            if schema_constraints:
+                for field, val in list(parsed.items()):
+                    if field in schema_constraints:
+                        c = schema_constraints[field]
+                        enums = c.get("enum_values") or []
+                        max_len = c.get("max_length")
+                        if enums and str(val) not in [str(e) for e in enums]:
+                            parsed[field] = enums[0]
+                        if max_len and isinstance(parsed[field], str) and len(parsed[field]) > max_len:
+                            parsed[field] = parsed[field][:max_len]
+
             return parsed
 
     def plan_agent_turn(
@@ -247,70 +277,109 @@ class OllamaProvider(BaseAIProvider):
     ) -> Dict[str, Any]:
         """
         Invokes local Ollama LLM to reason about the user turn, extract slots, and select tools.
-        Enforces JSON output adhering to AgentPlanResponse schema.
+        Dynamically handles greetings, RAG-grounded product queries, general chat, and autonomous actions.
         """
-        tools_summary = []
-        for t in available_tools:
-            name = t.get("name")
-            desc = t.get("description", "")
-            params = t.get("parameters", {}).get("properties", {})
-            param_str = ", ".join([f"{k} ({v.get('type', 'any')})" for k, v in params.items()])
-            tools_summary.append(f"- {name}: {desc} (Params: {param_str})")
-        tools_text = "\n".join(tools_summary) if tools_summary else (
-            "- test_database_connection: Test connection parameters (Params: host, port, database, username, password)\n"
-            "- save_database_connection: Save validated MySQL connection profile (Params: host, port, database, username, password, name)\n"
-            "- scan_database_schema: Discover database tables and schema (Params: connection_id)\n"
-            "- list_database_connections: List all connected databases\n"
-            "- create_automation_draft: Create an automation draft (Params: name, connection_id, target_table, topic_prompt, schedule_type)\n"
-            "- run_automation_now: Trigger immediate execution of an automation (Params: automation_id)\n"
-            "- manual_publish_content: Directly publish manual content (Params: connection_id, target_table, title, content)"
-        )
+        lower_goal = goal.strip().lower()
 
-        rag_texts = []
-        for c in rag_chunks:
-            rag_texts.append(f"[{c.get('chunk_id', 'doc')}]: {c.get('text', '')[:300]}")
-        rag_str = "\n".join(rag_texts) if rag_texts else "Standard database automation platform knowledge."
+        # 1. Prohibited destructive SQL check (Zero Tolerance Guardrail)
+        if re.search(r"\b(drop|truncate|alter|delete\s+from|raw\s+sql|exec\s+raw)\b", lower_goal):
+            return {
+                "task_type": "POLICY_REJECTED",
+                "outcome": "DISALLOWED_BY_POLICY",
+                "extracted_slots": {},
+                "explanation": "Destructive SQL operations (DROP, TRUNCATE, DELETE, ALTER, and arbitrary SQL execution) are strictly prohibited on customer target databases by platform security guardrails.",
+                "steps": []
+            }
 
+        # 2. Status / List Connections intent check (takes precedence over add-connection keywords)
+        is_status_query = bool(re.search(r"\b(status|health|check.*conn|conn.*status|list|show|view|existing)\b", lower_goal)) and not any(k in lower_goal for k in ["add ", "create ", "new ", "save "])
+        existing_connections = context.get("connections", [])
+        if is_status_query and any(k in lower_goal for k in ["connect", "database", "db", "status"]):
+            conn_count = len(existing_connections)
+            if conn_count == 0:
+                explanation = "You don't have any database connections configured in your workspace yet. Let's set one up! I can open the connection setup form for you right now."
+            else:
+                conn_names = ", ".join([f"'{c.get('name', 'Database')}' ({c.get('host', '127.0.0.1')}:{c.get('database_name', '')})" for c in existing_connections])
+                explanation = f"You have {conn_count} configured database connection(s): {conn_names}. All connection profiles are stored securely."
+
+            return {
+                "task_type": "LIST_CONNECTIONS",
+                "outcome": "SUPPORTED_AND_SPECIFIED",
+                "extracted_slots": {},
+                "explanation": explanation,
+                "steps": [
+                    {
+                        "tool": "list_database_connections",
+                        "label": "Listing Database Connections",
+                        "args": {},
+                        "risk_level": "LOW",
+                        "requires_confirmation": False
+                    }
+                ]
+            }
+
+        # 3. Product / Project Inquiries ("What is this project about?", "How does automation work?", etc.) -> RAG + Ollama
+        is_project_query = any(k in lower_goal for k in [
+            "what is this project", "about this project", "project about", "what does this app do",
+            "what is dataauto", "how does this work", "how do automations work", "what is this platform",
+            "explain the platform", "what databases", "tell me about this project", "what can this project do"
+        ])
+        if is_project_query:
+            rag_context_text = ""
+            if rag_chunks:
+                rag_context_text = "\n".join([f"- {c.get('text', '')[:250]}" for c in rag_chunks])
+            else:
+                rag_context_text = (
+                    "DataAuto is an AI-Powered Multi-User Database Automation Platform. "
+                    "It connects to MySQL databases, inspects schema, generates and schedules automated content/data publishing "
+                    "with email approvals, and features Orbit, an autonomous AI companion that operates the portal on the user's behalf."
+                )
+
+            # Query Ollama dynamically with RAG context
+            try:
+                dynamic_resp = self._call_ollama_chat(
+                    prompt=f"Context from documentation:\n{rag_context_text}\n\nUser Question: \"{goal}\"\nAnswer the question concisely in 2-3 friendly sentences as Orbit:",
+                    system="You are Orbit, the autonomous AI database automation assistant. Explain the platform accurately and warmly based on the documentation context. Speak in 2-3 sentences max."
+                )
+            except Exception:
+                dynamic_resp = (
+                    "This project is DataAuto, an AI-Powered Database Automation Platform! "
+                    "It lets you connect your MySQL databases, discover tables and schema, and run scheduled AI content workflows with human approvals. "
+                    "I'm Orbit, your autonomous AI assistant here to help navigate and run everything for you."
+                )
+
+            citations = [{"chunk_id": c.get("chunk_id", "doc"), "text": c.get("text", "")[:120]} for c in (rag_chunks or [])]
+            return {
+                "task_type": "PRODUCT_EXPLANATION",
+                "outcome": "CONVERSATIONAL_RESPONSE",
+                "extracted_slots": {},
+                "explanation": dynamic_resp,
+                "rag_citations": citations,
+                "steps": []
+            }
+
+        # 4. Conversational Greetings & Identity ("Hello", "Hey", "Who are you?", "How are you?") -> Dynamic Ollama
+        is_greeting_or_identity = bool(re.search(r"^(hi|hello|hey|good\s+(morning|afternoon|evening)|howdy|greetings|how\s+are\s+you|who\s+are\s+you|what\s+is\s+your\s+name|what\s+can\s+you\s+do)\b", lower_goal))
+        if is_greeting_or_identity:
+            try:
+                dynamic_resp = self._call_ollama_chat(
+                    prompt=f"User says: \"{goal}\". Greet them or answer who you are and what you do, and offer to help with database connections or automations in 1-2 friendly sentences.",
+                    system="You are Orbit, a friendly autonomous AI mascot and database assistant. Speak warmly, naturally, and concisely in 1-2 sentences. Never output JSON."
+                )
+            except Exception:
+                dynamic_resp = "Hello! I'm Orbit, your autonomous AI database assistant. I can help you connect MySQL databases, inspect schemas, create automated workflows, and navigate the platform. What would you like to work on?"
+
+            return {
+                "task_type": "GREETING",
+                "outcome": "CONVERSATIONAL_RESPONSE",
+                "extracted_slots": {},
+                "explanation": dynamic_resp,
+                "steps": []
+            }
+
+        # 5. Extract connection slots from utterance
         accumulated = context.get("accumulated_slots", {})
-
-        system_prompt = (
-            "You are an intelligent, capability-aware AI agent planner for an AI-Powered Database Automation Portal.\n"
-            "Analyze the user's natural language goal, evaluate live context, extract non-secret parameters, and determine the next action.\n\n"
-            "RULES:\n"
-            "1. DISALLOWED_BY_POLICY: If user requests destructive SQL (DELETE, DROP, TRUNCATE, ALTER, arbitrary raw SQL console), return outcome 'DISALLOWED_BY_POLICY'.\n"
-            "2. UNSUPPORTED: If user requests an action completely outside the product (e.g. flight booking, order food, crypto trading), return outcome 'UNSUPPORTED'.\n"
-            "3. MISSING_INFORMATION: If required details are missing, return outcome 'MISSING_INFORMATION', list missing field names in 'missing_fields', and ask ONE concise, friendly question in 'question'.\n"
-            "   - Database connection required fields: host, port (default 3306), database, username, password. (Password is sensitive; if missing, ask for password with secure_input_type: 'database_credentials').\n"
-            "   - DO NOT re-ask for details already provided in the user goal or accumulated_slots!\n"
-            "4. SUPPORTED_AND_SPECIFIED: If all required details are present or defaults apply, return outcome 'SUPPORTED_AND_SPECIFIED' with ordered 'steps'.\n"
-            "   - For a database connection, steps should be: 1) test_database_connection, 2) save_database_connection, 3) scan_database_schema.\n"
-            "5. OUTPUT FORMAT: Respond ONLY with a valid JSON object matching this schema:\n"
-            "{\n"
-            '  "task_type": "ADD_CONNECTION" | "SCAN_SCHEMA" | "CREATE_AUTOMATION" | "LIST_CONNECTIONS" | "UNSUPPORTED_TASK" | "POLICY_REJECTED",\n'
-            '  "outcome": "SUPPORTED_AND_SPECIFIED" | "MISSING_INFORMATION" | "AMBIGUOUS" | "CURRENTLY_UNAVAILABLE" | "UNSUPPORTED" | "DISALLOWED_BY_POLICY",\n'
-            '  "extracted_slots": {"host": "...", "port": 3306, "database": "...", "username": "...", "name": "..."},\n'
-            '  "missing_fields": ["password"],\n'
-            '  "question": "What is the password for your database user?",\n'
-            '  "secure_input_type": "database_credentials",\n'
-            '  "explanation": "Brief explanation of plan",\n'
-            '  "steps": [\n'
-            '    {"tool": "test_database_connection", "label": "Testing Connection", "args": {...}, "risk_level": "LOW", "requires_confirmation": false}\n'
-            '  ]\n'
-            "}"
-        )
-
-        user_content = (
-            f"User Goal: \"{goal}\"\n\n"
-            f"Accumulated Slots Already Known: {json.dumps(accumulated)}\n\n"
-            f"Retrieved Product Knowledge (RAG):\n{rag_str}\n\n"
-            f"Available Registered Tools:\n{tools_text}\n\n"
-            f"Existing Connections Count: {len(context.get('connections', []))}\n"
-            f"Existing Automations Count: {len(context.get('automations', []))}"
-        )
-
-        # Pre-extract slots with regex as a safety net
         pre_extracted: Dict[str, Any] = {}
-        lower_goal = goal.lower()
         host_m = re.search(r"\bhost\s*(?:is|=|:)?\s*([a-zA-Z0-9\.\-_]+)", lower_goal)
         if host_m:
             pre_extracted["host"] = host_m.group(1).strip()
@@ -339,36 +408,215 @@ class OllamaProvider(BaseAIProvider):
 
         combined_slots = {**accumulated, **pre_extracted}
 
+        # 6. Actionable Database Connection Intent ("I want to connect this database", "Connect to MySQL", etc.)
+        is_connect_action = any(k in lower_goal for k in ["connect", "add connection", "new database", "link database", "hook up mysql", "connect this database"])
+        if is_connect_action:
+            host_val = combined_slots.get("host", "127.0.0.1")
+            port_val = combined_slots.get("port", 3306)
+            db_val = combined_slots.get("database", "")
+            user_val = combined_slots.get("username", "root")
+            password_val = combined_slots.get("password", "")
+            name_val = combined_slots.get("name", db_val or "MySQL Target")
+
+            missing = []
+            if not db_val:
+                missing.append("database")
+            if not password_val and not combined_slots.get("password_hash"):
+                missing.append("password")
+            if not user_val:
+                missing.append("username")
+
+            steps = [
+                {
+                    "tool": "test_database_connection",
+                    "label": f"Testing Connection to MySQL on {host_val}:{port_val}",
+                    "args": {
+                        "host": host_val,
+                        "port": port_val,
+                        "database": db_val,
+                        "username": user_val,
+                        "password": password_val or ""
+                    },
+                    "risk_level": "LOW",
+                    "requires_confirmation": False
+                },
+                {
+                    "tool": "save_database_connection",
+                    "label": f"Saving Connection Profile '{name_val}'",
+                    "args": {
+                        "name": name_val,
+                        "host": host_val,
+                        "port": port_val,
+                        "database": db_val,
+                        "username": user_val,
+                        "password": password_val or "",
+                        "ssl_mode": "prefer"
+                    },
+                    "risk_level": "HIGH",
+                    "requires_confirmation": False
+                },
+                {
+                    "tool": "scan_database_schema",
+                    "label": "Discovering Database Schema & Tables",
+                    "args": {"connection_id": 0},
+                    "risk_level": "LOW",
+                    "requires_confirmation": False
+                }
+            ]
+
+            if missing:
+                first_missing = missing[0]
+                if first_missing == "password":
+                    question = f"What is the credentials password for database user '{user_val or 'root'}'?"
+                elif first_missing == "database":
+                    question = "Please enter your connection credentials: what is the name of the MySQL database you'd like to connect?"
+                elif first_missing == "username":
+                    question = "Please provide your database credentials username to connect to the database:"
+                else:
+                    question = f"Please enter your database credentials: {first_missing} for this connection:"
+
+                return {
+                    "task_type": "ADD_CONNECTION",
+                    "outcome": "MISSING_INFORMATION",
+                    "requires_input": True,
+                    "secure_input_type": "database_credentials",
+                    "question": question,
+                    "missing_fields": missing,
+                    "extracted_slots": combined_slots,
+                    "explanation": f"Missing required connection parameter: {first_missing}.",
+                    "steps": steps
+                }
+
+            return {
+                "task_type": "ADD_CONNECTION",
+                "outcome": "SUPPORTED_AND_SPECIFIED",
+                "extracted_slots": combined_slots,
+                "explanation": f"Ready to verify and connect to MySQL database '{db_val}' on {host_val}:{port_val}.",
+                "steps": steps
+            }
+
+        # 7. Schema Scan Intent
+        if any(k in lower_goal for k in ["scan", "schema", "tables", "columns", "inspect schema"]):
+            conn_id = combined_slots.get("connection_id") or (existing_connections[0]["id"] if existing_connections else 1)
+            return {
+                "task_type": "SCAN_SCHEMA",
+                "outcome": "SUPPORTED_AND_SPECIFIED",
+                "extracted_slots": combined_slots,
+                "explanation": f"Navigating to Schema Explorer to inspect tables and structure for connection #{conn_id}.",
+                "steps": [
+                    {
+                        "tool": "scan_database_schema",
+                        "label": f"Scanning Database Schema for Connection #{conn_id}",
+                        "args": {"connection_id": conn_id},
+                        "risk_level": "LOW",
+                        "requires_confirmation": False
+                    }
+                ]
+            }
+
+        # 8. Automation & Content Scheduling Intents
+        if any(k in lower_goal for k in ["automation", "automat", "blog", "schedule", "publish daily", "article", "post daily", "post weekly"]):
+            conn_id = combined_slots.get("connection_id")
+            if not conn_id:
+                conn_id = existing_connections[0]["id"] if existing_connections else 1
+
+            topic = "electric cars" if ("electric car" in lower_goal or "car" in lower_goal) else (combined_slots.get("topic") or "General Insights")
+            cat_match = re.search(r"category\s+([A-Za-z0-9_-]+)", goal, re.IGNORECASE)
+            cat = cat_match.group(1).strip() if cat_match else (combined_slots.get("category") or "Cars")
+
+            page_ctx = combined_slots.get("page_context") or {}
+            target_table = "posts"
+            if isinstance(page_ctx, dict) and page_ctx.get("activeEntity", {}).get("name"):
+                target_table = page_ctx["activeEntity"]["name"]
+            elif isinstance(page_ctx, dict) and page_ctx.get("activeEntity", {}).get("id"):
+                target_table = str(page_ctx["activeEntity"]["id"])
+
+            return {
+                "task_type": "CREATE_AUTOMATION",
+                "outcome": "SUPPORTED_AND_SPECIFIED",
+                "extracted_slots": {**combined_slots, "category": cat, "topic": topic, "target_table": target_table},
+                "explanation": f"Creating automation for topic '{topic}' in category '{cat}' targeting table '{target_table}'.",
+                "steps": [
+                    {
+                        "tool": "create_automation_draft",
+                        "label": f"Creating Automation for '{topic}'",
+                        "args": {
+                            "name": f"{topic.title()} Automation",
+                            "connection_id": conn_id,
+                            "target_table": target_table,
+                            "topic_prompt": topic,
+                            "category_name": cat,
+                            "schedule_type": "DAILY",
+                            "generation_time": "08:00",
+                            "publication_time": "09:00",
+                            "require_approval": True
+                        },
+                        "risk_level": "MEDIUM",
+                        "requires_confirmation": True
+                    }
+                ]
+            }
+
+        # 9. General Open-Ended Chat via Ollama (For anything else: questions, chit-chat, etc.)
+        try:
+            dynamic_resp = self._call_ollama_chat(
+                prompt=f"User says: \"{goal}\". Reply helpfully, warmly, and concisely as Orbit (1-3 sentences).",
+                system="You are Orbit, an autonomous AI companion mascot for the database automation platform. Answer helpfully and naturally. Speak in 1-3 sentences max. Never output raw code or JSON."
+            )
+            return {
+                "task_type": "GENERAL_CHAT",
+                "outcome": "CONVERSATIONAL_RESPONSE",
+                "extracted_slots": combined_slots,
+                "explanation": dynamic_resp,
+                "steps": []
+            }
+        except Exception:
+            pass
+
+        # Fallback to structured tool planning if requested
+        return {
+            "task_type": "GENERAL_QUERY",
+            "outcome": "SUPPORTED_AND_SPECIFIED",
+            "extracted_slots": combined_slots,
+            "explanation": "Checking workspace status and active workflows.",
+            "steps": [
+                {
+                    "tool": "get_dashboard_summary",
+                    "label": "Retrieving Platform State",
+                    "args": {},
+                    "risk_level": "LOW",
+                    "requires_confirmation": False
+                }
+            ]
+        }
+
+    def _call_ollama_chat(self, prompt: str, system: str, max_tokens: int = 70) -> str:
+        """
+        Fast direct conversational inference with Ollama.
+        Keeps system and prompt compact for fast CPU responses.
+        """
         payload = {
             "model": self.model,
-            "prompt": user_content,
-            "system": system_prompt,
-            "format": "json",
+            "prompt": prompt,
+            "system": system,
             "stream": False,
             "options": {
-                "temperature": 0.1,
-                "num_predict": 100,
+                "temperature": 0.35,
+                "num_predict": max_tokens,
                 "num_thread": 4,
                 "keep_alive": "30m"
             }
         }
-
-        with httpx.Client(timeout=6.0) as client:
+        with httpx.Client(timeout=90.0) as client:
             res = client.post(f"{self.base_url}/api/generate", json=payload)
-            if res.status_code != 200:
-                raise RuntimeError(f"Ollama agent planning failed with status {res.status_code}: {res.text}")
-
-            raw = res.json().get("response", "{}")
-            cleaned = self._clean_json_output(raw)
-            try:
-                parsed = json.loads(cleaned)
-            except Exception as e:
-                raise ValueError(f"Ollama plan output did not parse as JSON: {e}\nRaw: {raw[:300]}")
-
-            # Merge pre-extracted slots with model extracted slots
-            model_slots = parsed.get("extracted_slots", {})
-            parsed["extracted_slots"] = {**combined_slots, **model_slots}
-            return parsed
+            if res.status_code == 200:
+                text = res.json().get("response", "").strip()
+                if text:
+                    # Strip any accidental wrapping quotes
+                    if text.startswith('"') and text.endswith('"'):
+                        text = text[1:-1].strip()
+                    return text
+            raise RuntimeError(f"Ollama returned HTTP {res.status_code}")
 
     def synthesize_agent_response(
         self,
@@ -428,12 +676,73 @@ class OllamaProvider(BaseAIProvider):
         except Exception:
             pass
 
-        # Fallback to truthful template if model call times out
         if final_status in ["SUCCEEDED", "COMMITTED"]:
             return f"I have successfully completed your request and verified the results in your portal."
         elif final_status == "FAILED":
             return f"I encountered an issue executing your request. Please check the activity timeline for details."
         return f"Operation processed with status {final_status}."
+
+    def evaluate_correction(
+        self,
+        correction_text: str,
+        active_task_status: str,
+        current_step: Optional[str] = None,
+        active_plan: Optional[List[Dict[str, Any]]] = None,
+        target_resource_type: Optional[str] = None,
+        target_resource_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Invokes local Ollama model to evaluate mid-turn user interruptions or parameter corrections.
+        """
+        system_prompt = (
+            "You are an expert AI agent state analyzer. A user is intervening during an autonomous database automation task.\n"
+            "Analyze the user's correction utterance and determine the exact required action:\n"
+            "- 'STOP': User explicitly wants to stop, cancel, halt, or abort execution.\n"
+            "- 'PAUSE': User asks to wait, hold on, or pause.\n"
+            "- 'RESUME': User asks to continue or proceed.\n"
+            "- 'CHANGE_PARAMETER': User wants to change a specific parameter (e.g. category, topic, frequency, host, port).\n"
+            "- 'REPLAN': User wants to redo or significantly change the workflow.\n\n"
+            "Respond ONLY with a JSON object:\n"
+            "{\n"
+            '  "action": "STOP" | "PAUSE" | "RESUME" | "CHANGE_PARAMETER" | "REPLAN",\n'
+            '  "revised_parameter": "category_name" | "topic_prompt" | "schedule_type" | null,\n'
+            '  "new_value": "parsed_new_value_or_null",\n'
+            '  "compensating_needed": true | false,\n'
+            '  "explanation": "brief natural explanation"\n'
+            "}"
+        )
+
+        user_prompt = (
+            f"Active Task Status: {active_task_status}\n"
+            f"Current Executing Step: {current_step or 'None'}\n"
+            f"User Correction Utterance: \"{correction_text}\""
+        )
+
+        payload = {
+            "model": self.model,
+            "prompt": f"{system_prompt}\n\nTask:\n{user_prompt}",
+            "stream": False,
+            "format": "json",
+            "options": {
+                "temperature": 0.1,
+                "top_p": 0.9,
+            }
+        }
+
+        try:
+            with httpx.Client(timeout=4.0) as client:
+                res = client.post(f"{self.base_url}/api/generate", json=payload)
+                if res.status_code == 200:
+                    raw_text = res.json().get("response", "").strip()
+                    cleaned = self._clean_json_output(raw_text)
+                    data = json.loads(cleaned)
+                    if isinstance(data, dict) and "action" in data:
+                        return data
+        except Exception:
+            pass
+
+        raise NotImplementedError("Ollama model unavailable for evaluate_correction")
+
 
     @staticmethod
     def _clean_json_output(raw_text: str) -> str:

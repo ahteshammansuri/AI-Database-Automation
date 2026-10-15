@@ -93,6 +93,7 @@ class AgentController extends Controller
             'content' => 'required|string',
             'is_voice' => 'nullable|boolean',
             'secure_input_data' => 'nullable|array',
+            'page_context' => 'nullable|array',
         ]);
 
         $result = $this->executionService->handleUserMessage(
@@ -100,7 +101,8 @@ class AgentController extends Controller
             $conversation,
             $validated['content'],
             (bool) ($validated['is_voice'] ?? false),
-            $validated['secure_input_data'] ?? null
+            $validated['secure_input_data'] ?? null,
+            $validated['page_context'] ?? null
         );
 
         $conversation->touch();

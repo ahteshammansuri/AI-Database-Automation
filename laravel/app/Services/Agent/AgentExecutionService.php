@@ -28,7 +28,8 @@ class AgentExecutionService
         AgentConversation $conversation,
         string $content,
         bool $isVoice = false,
-        ?array $secureInputData = null
+        ?array $secureInputData = null,
+        ?array $pageContext = null
     ): array {
         // 1. Record incoming user message
         $userMsg = AgentMessage::create([
@@ -60,11 +61,12 @@ class AgentExecutionService
         }
 
         // 4. Semantic Intent Understanding & Planning
-        $plan = $this->resolveIntentAndPlan($user, $content, $conversation, $activeTask);
+        $plan = $this->resolveIntentAndPlan($user, $content, $conversation, $activeTask, $pageContext);
 
         // 5. Check outcome classifications
         $outcome = $plan['outcome'] ?? 'SUPPORTED_AND_SPECIFIED';
 
+        // 5a. Disallowed by safety or policy
         // 5a. Disallowed by safety or policy
         if ($outcome === 'DISALLOWED_BY_POLICY') {
             $msgContent = $plan['explanation'] ?? "This operation is prohibited by platform safety guardrails.";
@@ -77,7 +79,7 @@ class AgentExecutionService
 
             return [
                 'conversation' => $conversation->fresh(['messages']),
-                'task' => null,
+                'task' => $activeTask ? $activeTask->fresh(['timelineEvents']) : null,
                 'message' => $assistantMsg,
             ];
         }
@@ -94,14 +96,34 @@ class AgentExecutionService
 
             return [
                 'conversation' => $conversation->fresh(['messages']),
-                'task' => null,
+                'task' => $activeTask ? $activeTask->fresh(['timelineEvents']) : null,
                 'message' => $assistantMsg,
             ];
         }
 
-        // 5c. Missing information or conversational clarification required
+        // 5c. Conversational response (e.g. greeting, RAG project explanation, or direct conversational answer)
+        if ($outcome === 'CONVERSATIONAL_RESPONSE' || $outcome === 'GREETING' || $outcome === 'PRODUCT_EXPLANATION' || $outcome === 'GENERAL_CHAT') {
+            $msgContent = $plan['explanation'] ?? "Hello! I am Orbit, your database automation assistant. How can I assist you today?";
+            $assistantMsg = AgentMessage::create([
+                'conversation_id' => $conversation->id,
+                'role' => 'assistant',
+                'content' => $msgContent,
+                'created_at' => now(),
+            ]);
+
+            return [
+                'conversation' => $conversation->fresh(['messages']),
+                'task' => $activeTask ? $activeTask->fresh(['timelineEvents']) : null,
+                'message' => $assistantMsg,
+            ];
+        }
+
+        // 5d. Missing information or conversational clarification required
         $extractedSlots = $plan['extracted_slots'] ?? [];
         $accumulatedSlots = $activeTask ? array_merge($activeTask->slots ?? [], $extractedSlots) : $extractedSlots;
+        if ($pageContext) {
+            $accumulatedSlots['page_context'] = $pageContext;
+        }
 
         if (!empty($plan['requires_input']) || $outcome === 'MISSING_INFORMATION' || $outcome === 'AMBIGUOUS' || ($outcome === 'CURRENTLY_UNAVAILABLE' && !empty($plan['requires_input']))) {
             if ($activeTask && in_array($activeTask->status, ['WAITING_FOR_INPUT', 'READY', 'DRAFT'])) {
@@ -313,10 +335,60 @@ class AgentExecutionService
                 $this->broadcastActionRequested($user->id, 'automations.create_draft', $args);
             }
 
+            // Enforce bounded loop detection: maximum 12 tool iterations per user turn
+            if ($i >= 12) {
+                $task->update([
+                    'status' => 'FAILED',
+                    'error_message' => 'Iteration limit reached: Maximum 12 tool operations allowed per task turn.',
+                ]);
+                $this->recordTimelineEvent($task, $stepLabel, 'failed', 'Loop limit exceeded (12 iterations max).');
+                $this->broadcastTaskUpdate($task);
+
+                $limitMsg = AgentMessage::create([
+                    'conversation_id' => $conversation->id,
+                    'role' => 'assistant',
+                    'content' => "Task stopped safely: exceeded maximum boundary of 12 tool iterations per turn.",
+                    'tool_results' => $executedResults,
+                    'created_at' => now(),
+                ]);
+
+                return [
+                    'conversation' => $conversation->fresh(['messages']),
+                    'task' => $task->fresh(['timelineEvents']),
+                    'message' => $limitMsg,
+                ];
+            }
+
             $result = AgentToolRegistry::executeTool($user, $toolName, $args);
             $executedResults[] = ['step' => $stepLabel, 'result' => $result];
 
             if (!($result['success'] ?? false)) {
+                // Observe-Act Recovery: Check if this is an authentication/credential error that user can correct
+                $errStr = strtolower($result['error'] ?? '');
+                if ($toolName === 'test_database_connection' && (str_contains($errStr, 'access denied') || str_contains($errStr, 'password') || str_contains($errStr, 'authentication'))) {
+                    $task->update([
+                        'status' => 'WAITING_FOR_INPUT',
+                        'current_step_index' => $i,
+                    ]);
+
+                    $this->recordTimelineEvent($task, $stepLabel, 'waiting', "Database authentication failed: " . ($result['error'] ?? 'Access denied.') . ". Requesting updated credentials.");
+                    $this->broadcastTaskUpdate($task);
+
+                    $promptMsg = AgentMessage::create([
+                        'conversation_id' => $conversation->id,
+                        'role' => 'assistant',
+                        'content' => "Database authentication failed: " . ($result['error'] ?? 'Access denied') . ". Would you like to provide the updated password or credentials?",
+                        'secure_input_type' => 'database_credentials',
+                        'created_at' => now(),
+                    ]);
+
+                    return [
+                        'conversation' => $conversation->fresh(['messages']),
+                        'task' => $task->fresh(['timelineEvents']),
+                        'message' => $promptMsg,
+                    ];
+                }
+
                 $task->update([
                     'status' => 'FAILED',
                     'error_message' => $result['error'] ?? 'Step execution failed.',
@@ -366,8 +438,10 @@ class AgentExecutionService
             }
 
             // Track target resource if created and propagate to subsequent steps
+            $slots = $task->slots ?: [];
             if (!empty($result['connection_id'])) {
-                $task->update(['target_resource_type' => 'DbConnection', 'target_resource_id' => $result['connection_id']]);
+                $slots['connection_id'] = $result['connection_id'];
+                $task->update(['target_resource_type' => 'DbConnection', 'target_resource_id' => $result['connection_id'], 'slots' => $slots]);
                 for ($j = $i + 1; $j < $totalSteps; $j++) {
                     if (isset($plan[$j]['args']['connection_id']) && (empty($plan[$j]['args']['connection_id']) || $plan[$j]['args']['connection_id'] === 0)) {
                         $plan[$j]['args']['connection_id'] = $result['connection_id'];
@@ -375,9 +449,11 @@ class AgentExecutionService
                 }
                 $task->update(['active_plan' => $plan]);
             } elseif (!empty($result['automation_id'])) {
-                $task->update(['target_resource_type' => 'Automation', 'target_resource_id' => $result['automation_id']]);
+                $slots['automation_id'] = $result['automation_id'];
+                $task->update(['target_resource_type' => 'Automation', 'target_resource_id' => $result['automation_id'], 'slots' => $slots]);
             } elseif (!empty($result['execution_id'])) {
-                $task->update(['target_resource_type' => 'AutomationExecution', 'target_resource_id' => $result['execution_id']]);
+                $slots['execution_id'] = $result['execution_id'];
+                $task->update(['target_resource_type' => 'AutomationExecution', 'target_resource_id' => $result['execution_id'], 'slots' => $slots]);
             }
 
             $successMsg = $result['message'] ?? "Completed: {$stepLabel}";
@@ -623,7 +699,7 @@ class AgentExecutionService
     // Planning & Intent Resolution Engine
     // =========================================================================
 
-    protected function resolveIntentAndPlan(User $user, string $goal, AgentConversation $conversation, ?AgentTask $activeTask = null): array
+    protected function resolveIntentAndPlan(User $user, string $goal, AgentConversation $conversation, ?AgentTask $activeTask = null, ?array $pageContext = null): array
     {
         // 1. Gather rich workspace context
         $connections = DbConnection::where('user_id', $user->id)->get(['id', 'name', 'database_name', 'host'])->toArray();
@@ -635,10 +711,13 @@ class AgentExecutionService
 
         // 2. Call Python AI microservice agent planner
         $activeProvider = AiProvider::where('user_id', $user->id)->where('is_active', true)->first();
-        $provider = $activeProvider ? $activeProvider->provider_type : env('AI_PROVIDER', 'mock');
-        $model = $activeProvider ? $activeProvider->model_name : env('AI_MODEL', null);
+        $provider = $activeProvider ? $activeProvider->provider_type : env('AI_PROVIDER', 'ollama');
+        $model = $activeProvider ? $activeProvider->model_name : env('AI_MODEL', 'llama3.2:1b');
         $apiKey = $activeProvider ? $activeProvider->encrypted_api_key : null;
         $accumulatedSlots = $activeTask ? ($activeTask->slots ?? []) : [];
+        if ($pageContext) {
+            $accumulatedSlots['page_context'] = $pageContext;
+        }
         $availableTools = AgentToolRegistry::getToolDefinitions();
 
         try {
@@ -675,7 +754,28 @@ class AgentExecutionService
      */
     protected function fallbackOpenEndedPlanner(User $user, string $goal, array $connections): array
     {
-        $lower = strtolower($goal);
+        $lower = strtolower(trim($goal));
+
+        // Friendly conversational greetings
+        if (preg_match('/^(hi|hello|hey|good\s+(morning|afternoon|evening)|howdy|greetings|how\s+are\s+you|who\s+are\s+you|what\s+can\s+you\s+do)\b/i', $lower)) {
+            $name = $user->name ? explode(' ', $user->name)[0] : 'there';
+            return [
+                'task_type' => 'GREETING',
+                'outcome' => 'CONVERSATIONAL_RESPONSE',
+                'explanation' => "Hello {$name}! I'm Orbit, your autonomous AI database automation assistant. I'm doing great, thank you! I can help you connect MySQL databases, inspect schemas, create automated publishing workflows, query your knowledge base, and operate the portal. What would you like to work on today?",
+                'steps' => [],
+            ];
+        }
+
+        // Product / Project inquiries
+        if (preg_match('/\b(what\s+is\s+this\s+project|about\s+this\s+project|project\s+about|what\s+does\s+this\s+app\s+do|what\s+is\s+dataauto|how\s+does\s+this\s+work|how\s+do\s+automations\s+work|what\s+is\s+this\s+platform|explain\s+the\s+platform|what\s+databases|tell\s+me\s+about\s+this\s+project)\b/i', $lower)) {
+            return [
+                'task_type' => 'PRODUCT_EXPLANATION',
+                'outcome' => 'CONVERSATIONAL_RESPONSE',
+                'explanation' => "DataAuto is an AI-Powered Multi-User Database Automation Platform! It lets you connect your own MySQL databases, discover tables and schema, and run scheduled AI content workflows with human approvals. I'm Orbit, your autonomous AI assistant here to help navigate and execute everything for you.",
+                'steps' => [],
+            ];
+        }
 
         // Disallowed destructive SQL
         if (preg_match('/\b(drop|truncate|alter|delete\s+from|raw\s+sql)\b/', $lower)) {
@@ -686,6 +786,27 @@ class AgentExecutionService
             ];
         }
 
+        // Connection status check (takes precedence before add-connection)
+        $isStatusOrList = preg_match('/\b(status|health|check.*conn|conn.*status|list|show|view|existing)\b/i', $lower) && !preg_match('/\b(add|new|create|save)\b/i', $lower);
+        if ($isStatusOrList && (str_contains($lower, 'connect') || str_contains($lower, 'database') || str_contains($lower, 'mysql') || str_contains($lower, 'status'))) {
+            $connCount = count($connections);
+            if ($connCount === 0) {
+                $explanation = "You don't have any database connections configured yet. Let's set one up! I can open the connection setup form for you right now.";
+            } else {
+                $names = implode(', ', array_map(fn($c) => "'{$c['name']}' ({$c['host']}:{$c['database_name']})", $connections));
+                $explanation = "You have {$connCount} configured database connection(s): {$names}. All credentials are securely encrypted.";
+            }
+
+            return [
+                'task_type' => 'LIST_CONNECTIONS',
+                'outcome' => 'SUPPORTED_AND_SPECIFIED',
+                'explanation' => $explanation,
+                'steps' => [
+                    ['tool' => 'list_database_connections', 'label' => 'Listing Database Connections', 'args' => []],
+                ],
+            ];
+        }
+
         // Schema scan (takes precedence over connection keywords)
         if (str_contains($lower, 'scan') || str_contains($lower, 'schema') || str_contains($lower, 'tables') || str_contains($lower, 'columns')) {
             if (empty($connections)) {
@@ -693,8 +814,8 @@ class AgentExecutionService
                     'task_type' => 'ADD_CONNECTION',
                     'outcome' => 'CURRENTLY_UNAVAILABLE',
                     'requires_input' => true,
-                    'secure_input_type' => 'database_credentials',
-                    'question' => "You don't have any database connections yet. Please connect your database first so I can inspect the schema.",
+                    'secure_input_type' => null,
+                    'question' => "You don't have any database connections yet. I've navigated to Database Connections and opened the setup form on your screen so you can connect your database.",
                 ];
             }
 
@@ -708,7 +829,7 @@ class AgentExecutionService
             ];
         }
 
-        // Connection operations
+        // Connection operations (Add/Save/Test connection)
         if (str_contains($lower, 'connect') || str_contains($lower, 'database') || str_contains($lower, 'mysql')) {
             if (str_contains($lower, 'list') || str_contains($lower, 'show') || str_contains($lower, 'what')) {
                 return [
@@ -762,9 +883,20 @@ class AgentExecutionService
                 'outcome' => 'MISSING_INFORMATION',
                 'requires_input' => true,
                 'secure_input_type' => 'database_credentials',
-                'question' => "I can connect your MySQL database. Please enter your connection credentials below. Passwords are encrypted at rest and never shared with the AI model.",
+                'question' => "Please enter your database connection credentials (host, port, database name, username, and password) to connect to your MySQL database:",
                 'extracted_slots' => $extractedSlots,
                 'steps' => [
+                    [
+                        'tool' => 'test_database_connection',
+                        'label' => 'Testing Connection to MySQL',
+                        'args' => [
+                            'host' => $extractedSlots['host'] ?? '127.0.0.1',
+                            'port' => $extractedSlots['port'] ?? 3306,
+                            'database' => $extractedSlots['database'] ?? '',
+                            'username' => $extractedSlots['username'] ?? '',
+                            'password' => '',
+                        ],
+                    ],
                     [
                         'tool' => 'save_database_connection',
                         'label' => 'Verifying and Saving Connection Profile',
@@ -788,7 +920,7 @@ class AgentExecutionService
         }
 
         // Automation creation
-        if (str_contains($lower, 'automation') || str_contains($lower, 'blog') || str_contains($lower, 'article') || str_contains($lower, 'publish') || str_contains($lower, 'schedule')) {
+        if (str_contains($lower, 'automat') || str_contains($lower, 'blog') || str_contains($lower, 'article') || str_contains($lower, 'publish') || str_contains($lower, 'schedule')) {
             if (empty($connections)) {
                 return [
                     'task_type' => 'ADD_CONNECTION',
@@ -1010,7 +1142,7 @@ class AgentExecutionService
             }
         }
 
-        $lines = ["Task completed successfully: **{$task->goal}**\n"];
+        $lines = ["I understand your goal: **{$task->goal}**. I have executed the following actions on your portal:\n"];
         foreach ($results as $res) {
             $msg = $res['result']['message'] ?? $res['step'];
             $lines[] = "- {$msg}";

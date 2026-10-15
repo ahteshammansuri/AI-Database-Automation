@@ -36,6 +36,34 @@ class SafeDatabaseExecutor
             throw new Exception("Payload for table '{$tableName}' cannot be empty.");
         }
 
+        $idempotencyKey = $relationOptions['idempotency_key'] ?? $payload['_idempotency_key'] ?? null;
+        unset($payload['_idempotency_key']);
+
+        if ($idempotencyKey && \Illuminate\Support\Facades\Schema::hasTable('idempotency_keys')) {
+            $existing = \App\Models\IdempotencyKey::where('idempotency_key', $idempotencyKey)
+                ->where('status', 'COMMITTED')
+                ->first();
+            if ($existing) {
+                return [
+                    'success' => true,
+                    'operation' => 'INSERT',
+                    'table' => $tableName,
+                    'record_id' => $existing->target_record_id,
+                    'columns_written' => [],
+                    'relation_resolutions' => [],
+                    'idempotent_replayed' => true,
+                ];
+            }
+
+            \App\Models\IdempotencyKey::updateOrCreate(
+                ['idempotency_key' => $idempotencyKey],
+                [
+                    'user_id' => $connection->user_id,
+                    'status' => 'IN_PROGRESS',
+                ]
+            );
+        }
+
         $pdo = null;
         try {
             $pdo = $connection->createTargetPdo();
@@ -115,6 +143,13 @@ class SafeDatabaseExecutor
 
             $pdo->commit();
 
+            if (!empty($idempotencyKey) && \Illuminate\Support\Facades\Schema::hasTable('idempotency_keys')) {
+                \App\Models\IdempotencyKey::where('idempotency_key', $idempotencyKey)->update([
+                    'target_record_id' => (string) $insertedId,
+                    'status' => 'COMMITTED',
+                ]);
+            }
+
             return [
                 'success' => true,
                 'operation' => 'INSERT',
@@ -126,6 +161,11 @@ class SafeDatabaseExecutor
         } catch (Exception $e) {
             if ($pdo && $pdo->inTransaction()) {
                 $pdo->rollBack();
+            }
+            if (!empty($idempotencyKey) && \Illuminate\Support\Facades\Schema::hasTable('idempotency_keys')) {
+                \App\Models\IdempotencyKey::where('idempotency_key', $idempotencyKey)->update([
+                    'status' => 'FAILED',
+                ]);
             }
             throw new Exception("Target database write failed: " . $e->getMessage());
         } finally {
@@ -658,6 +698,56 @@ class SafeDatabaseExecutor
                 $pdo->rollBack();
             }
             throw new Exception("Target database update failed: " . $e->getMessage());
+        } finally {
+            $pdo = null;
+        }
+    }
+
+    /**
+     * Safely delete a specifically verified record created by an automated execution for safe compensation / undo.
+     * Strictly bounded to a single integer primary key on an allowlisted table.
+     */
+    public function executeDeleteForCompensation(
+        DbConnection $connection,
+        string $tableName,
+        int|string $recordId
+    ): array {
+        $this->safetyService->validateConnectionTarget($connection->host, $connection->port);
+
+        if ($this->safetyService->isTableSensitive($tableName)) {
+            throw new Exception("Security violation: Table '{$tableName}' is classified as restricted and cannot undergo compensation.");
+        }
+
+        if (empty($recordId) || !is_numeric($recordId) || ((int) $recordId) <= 0) {
+            throw new Exception("Invalid record ID for compensation: Must be a positive integer.");
+        }
+
+        $pdo = null;
+        try {
+            $pdo = $connection->createTargetPdo();
+            $pdo->beginTransaction();
+
+            // Strict single-row delete by primary key
+            $sql = "DELETE FROM `{$tableName}` WHERE `id` = :id LIMIT 1";
+            $stmt = $pdo->prepare($sql);
+            $stmt->bindValue(':id', (int) $recordId, PDO::PARAM_INT);
+            $stmt->execute();
+            $rowsAffected = $stmt->rowCount();
+
+            $pdo->commit();
+
+            return [
+                'success' => true,
+                'operation' => 'COMPENSATION_DELETE',
+                'table' => $tableName,
+                'record_id' => (int) $recordId,
+                'rows_affected' => $rowsAffected,
+            ];
+        } catch (Exception $e) {
+            if ($pdo && $pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            throw new Exception("Target database compensation failed: " . $e->getMessage());
         } finally {
             $pdo = null;
         }

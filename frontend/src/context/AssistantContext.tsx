@@ -4,6 +4,10 @@ import { useLiveEvents } from "./LiveEventsContext";
 import { useToast } from "./ToastContext";
 import { CharacterState } from "../components/agent/AuraCoreCharacter";
 import { actionBridge } from "../services/actionBridge";
+import { redactSecretsFromUtterance } from "../services/secretRedactor";
+import { ttsAdapter } from "../services/ttsAdapter";
+import { pageStateService } from "../services/pageStateService";
+import soundManager from "../services/soundEffects";
 
 export interface AgentTimelineEvent {
   id: number;
@@ -175,7 +179,7 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   // Derive Character State from activeTask & loading state across the 17-state machine
   useEffect(() => {
     if (isLoading) {
-      setCharacterState("understanding");
+      setCharacterState("thinking");
       return;
     }
 
@@ -280,6 +284,7 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       actionBridge.dispatch("navigation.navigate", { route: "/connections" });
       setActiveRoute("/connections");
       setActiveAnchor("connection-form-anchor");
+      actionBridge.dispatch("connections.open_create_form", {});
       return;
     }
 
@@ -359,12 +364,33 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       return;
     }
 
+    // Apply client-side secret redaction: strip raw passwords from conversational content
+    const { redactedText, hasRedaction, extractedSecrets } = redactSecretsFromUtterance(content);
+    const finalContent = redactedText;
+    const mergedSecureInput = {
+      ...(hasRedaction ? extractedSecrets : {}),
+      ...(secureInputData || {}),
+    };
+    const finalSecureData = Object.keys(mergedSecureInput).length > 0 ? mergedSecureInput : undefined;
+
+    // Optimistically add user message so user immediately sees what they said in chat
+    const optimisticUserMsg: AgentMessage = {
+      id: Date.now(),
+      role: "user",
+      content: finalContent,
+      is_voice: isVoice,
+      created_at: new Date().toISOString(),
+    };
+    setMessages((prev) => [...prev, optimisticUserMsg]);
+
     setIsLoading(true);
-    setCharacterState("understanding");
+    setCharacterState("thinking");
     setIsOpen(true);
+    soundManager.playSoundForBehavior("thinking");
 
     try {
-      const res: any = await api.postAgentMessage(convId, content, isVoice, secureInputData);
+      const pageContext = pageStateService.getSnapshot();
+      const res: any = await api.postAgentMessage(convId, finalContent, isVoice, finalSecureData, pageContext);
 
       if (res.conversation?.messages) {
         setMessages(res.conversation.messages);
@@ -373,6 +399,7 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           setLastSpokenSpeech(lastMsg.content);
         }
       } else if (res.message) {
+        setMessages((prev) => [...prev, res.message]);
         setLastSpokenSpeech(res.message.content || "");
       }
 
@@ -396,12 +423,21 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         } else if (res.task.task_type === "CREATE_AUTOMATION") {
           actionBridge.dispatch("navigation.navigate", { route: "/automations/new" });
         }
+        setCharacterState(res.task.status === "SUCCEEDED" ? "success" : "executing");
       } else {
         mapIntentToNavigation(null, content);
+        setCharacterState("idle");
       }
     } catch (err: any) {
       toast.error("Agent Error", err.message || "Failed to communicate with assistant.");
       setCharacterState("error");
+      const errorMsg: AgentMessage = {
+        id: Date.now() + 1,
+        role: "assistant",
+        content: `⚠️ Sorry, I encountered an issue: ${err.message || "Could not reach agent service"}. Please try again or type directly in the box below.`,
+        created_at: new Date().toISOString(),
+      };
+      setMessages((prev) => [...prev, errorMsg]);
     } finally {
       setIsLoading(false);
     }
@@ -426,8 +462,13 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       return;
     }
 
-    toast.info("Voice Instruction", `"${clean}"`);
-    await sendMessage(clean, true);
+    const { redactedText, hasRedaction, extractedSecrets } = redactSecretsFromUtterance(clean);
+    if (hasRedaction) {
+      toast.info("Secure Redaction", "Credential detected and routed securely via isolated encrypted channel.");
+    } else {
+      toast.info("Voice Instruction", `"${clean}"`);
+    }
+    await sendMessage(redactedText, true, hasRedaction ? extractedSecrets : undefined);
   };
 
   // Submit in-context secure credentials
@@ -444,6 +485,7 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   // Instant Interrupt (Stop / Pause)
   const interruptTask = async (action: "STOP" | "PAUSE" = "STOP") => {
+    ttsAdapter.stop();
     if (!activeTask) return;
     try {
       const res: any = await api.interruptAgentTask(activeTask.id, action);

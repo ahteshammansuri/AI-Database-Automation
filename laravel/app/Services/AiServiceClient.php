@@ -24,7 +24,7 @@ class AiServiceClient
         ])->timeout(300);
     }
 
-    protected function agentClient(int $timeout = 10)
+    protected function agentClient(int $timeout = 60)
     {
         return Http::withHeaders([
             'X-Service-Token' => $this->serviceToken,
@@ -47,6 +47,9 @@ class AiServiceClient
             'required_fields' => $params['required_fields'] ?? ['title', 'slug', 'content', 'excerpt'],
             'context_passages' => $params['context_passages'] ?? [],
             'rejection_feedback' => $params['rejection_feedback'] ?? null,
+            'schema_constraints' => $params['schema_constraints'] ?? null,
+            'relation_catalog' => $params['relation_catalog'] ?? null,
+            'recent_titles' => $params['recent_titles'] ?? null,
         ]);
 
         if (!$res->successful()) {
@@ -59,6 +62,24 @@ class AiServiceClient
         }
 
         return $data;
+    }
+
+    /**
+     * Check candidate title novelty against recent titles using semantic embeddings.
+     */
+    public function checkNovelty(string $candidateTitle, array $recentTitles, float $threshold = 0.92): array
+    {
+        $res = $this->client()->post("{$this->baseUrl}/v1/ai/check-novelty", [
+            'candidate_title' => $candidateTitle,
+            'recent_titles' => $recentTitles,
+            'threshold' => $threshold,
+        ]);
+
+        if (!$res->successful()) {
+            throw new Exception("AI service novelty check error ({$res->status()}): " . $res->body());
+        }
+
+        return $res->json();
     }
 
     /**
@@ -96,23 +117,37 @@ class AiServiceClient
      */
     public function checkHealth(string $provider = 'ollama', ?string $model = null, ?string $apiKey = null): array
     {
-        $res = $this->client()->post("{$this->baseUrl}/v1/ai/health", [
-            'provider' => $provider,
-            'model' => $model,
-            'api_key' => $apiKey,
-        ]);
-
-        if (!$res->successful()) {
-            return [
+        try {
+            $res = $this->client()->post("{$this->baseUrl}/v1/ai/health", [
                 'provider' => $provider,
-                'available' => false,
-                'latency_ms' => 0.0,
-                'models' => [],
-                'message' => "AI service unreachable at {$this->baseUrl}",
+                'model' => $model,
+                'api_key' => $apiKey,
+            ]);
+
+            if ($res->successful()) {
+                return $res->json();
+            }
+        } catch (\Throwable $e) {
+            // Local fallback handling below
+        }
+
+        if ($provider === 'mock') {
+            return [
+                'provider' => 'mock',
+                'available' => true,
+                'latency_ms' => 1.2,
+                'models' => ['mock-llama3-synthetic', 'mock-mistral-synthetic'],
+                'message' => 'Local mock generator ready (Offline testing & demo mode).',
             ];
         }
 
-        return $res->json();
+        return [
+            'provider' => $provider,
+            'available' => false,
+            'latency_ms' => 0.0,
+            'models' => [],
+            'message' => "AI service unreachable at {$this->baseUrl}",
+        ];
     }
 
     /**
@@ -200,7 +235,7 @@ class AiServiceClient
         ?string $apiKey = null
     ): ?array {
         try {
-            $res = $this->agentClient(10)->post("{$this->baseUrl}/v1/ai/agent/plan", [
+            $res = $this->agentClient(60)->post("{$this->baseUrl}/v1/ai/agent/plan", [
                 'goal_prompt' => $goalPrompt,
                 'has_connections' => !empty($connections),
                 'connections' => $connections,
@@ -222,9 +257,11 @@ class AiServiceClient
                 if (is_array($data) && isset($data['outcome'])) {
                     return $data;
                 }
+            } else {
+                \Illuminate\Support\Facades\Log::warning("AiServiceClient planAgentTask HTTP {$res->status()}: " . $res->body());
             }
         } catch (\Throwable $e) {
-            // Falls back to Laravel deterministic planner
+            \Illuminate\Support\Facades\Log::warning("AiServiceClient planAgentTask exception: " . $e->getMessage());
         }
 
         return null;
@@ -243,7 +280,7 @@ class AiServiceClient
         ?string $apiKey = null
     ): array {
         try {
-            $res = $this->agentClient(6)->post("{$this->baseUrl}/v1/ai/agent/synthesize-response", [
+            $res = $this->agentClient(30)->post("{$this->baseUrl}/v1/ai/agent/synthesize-response", [
                 'goal_prompt' => $userGoal,
                 'action_summary' => $actionSummary,
                 'final_status' => $resultStatus,
@@ -265,7 +302,7 @@ class AiServiceClient
                 }
             }
         } catch (\Throwable $e) {
-            // Falls back to deterministic sentence
+            \Illuminate\Support\Facades\Log::warning("AiServiceClient synthesizeResponse exception: " . $e->getMessage());
         }
 
         return [
@@ -281,7 +318,7 @@ class AiServiceClient
     public function evaluateAgentCorrection(string $correctionText, string $activeTaskStatus, ?string $currentStep = null): ?array
     {
         try {
-            $res = $this->agentClient(6)->post("{$this->baseUrl}/v1/ai/agent/evaluate-correction", [
+            $res = $this->agentClient(30)->post("{$this->baseUrl}/v1/ai/agent/evaluate-correction", [
                 'correction_text' => $correctionText,
                 'active_task_status' => $activeTaskStatus,
                 'current_step' => $currentStep,
@@ -295,5 +332,29 @@ class AiServiceClient
         }
 
         return null;
+    }
+
+    /**
+     * Classify schema columns into semantic roles via the AI service field classifier.
+     * Returns an array of classification results per column, or empty array on failure.
+     */
+    public function classifyFields(array $columns): array
+    {
+        try {
+            $res = $this->client()->post("{$this->baseUrl}/v1/rag/classify-fields", [
+                'columns' => $columns,
+            ]);
+
+            if ($res->successful()) {
+                $data = $res->json();
+                if ($data['success'] ?? false) {
+                    return $data['classifications'] ?? [];
+                }
+            }
+        } catch (\Throwable $e) {
+            // Classification failure is non-fatal; caller proceeds with unknown roles
+        }
+
+        return [];
     }
 }

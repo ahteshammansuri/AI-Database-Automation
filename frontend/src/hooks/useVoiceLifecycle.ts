@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { ttsAdapter } from "../services/ttsAdapter";
 
 export interface VoiceLifecycleOptions {
   onTranscript: (transcript: string) => void;
@@ -82,24 +83,42 @@ export const useVoiceLifecycle = ({
       let finalTxt = "";
       let interimTxt = "";
 
-      for (let i = event.resultIndex; i < event.results.length; ++i) {
-        if (event.results[i].isFinal) {
-          finalTxt += event.results[i][0].transcript;
-        } else {
-          interimTxt += event.results[i][0].transcript;
+      // Accumulate across ALL results in current recognition session to prevent dropped words
+      for (let i = 0; i < event.results.length; ++i) {
+        const item = event.results[i];
+        if (item && item[0]) {
+          if (item.isFinal) {
+            finalTxt += item[0].transcript + " ";
+          } else {
+            interimTxt += item[0].transcript + " ";
+          }
         }
       }
 
-      const activeText = (finalTxt || interimTxt).trim();
+      finalTxt = finalTxt.trim();
+      interimTxt = interimTxt.trim();
+      const activeText = (finalTxt ? (finalTxt + (interimTxt ? " " + interimTxt : "")) : interimTxt).trim();
+
       if (activeText) {
         latestSpeechRef.current = activeText;
+      }
+
+      // If user has already released the hold button, dispatch speech as soon as results arrive
+      if (!isListeningRef.current && activeText && !hasDispatchedTranscriptRef.current) {
+        hasDispatchedTranscriptRef.current = true;
+        setTranscript(activeText);
+        setInterimTranscript("");
+        clearSilenceTimer();
+        stopAudioAnalysis();
+        onTranscript(activeText);
+        return;
       }
 
       if (interimTxt) {
         setInterimTranscript(interimTxt);
         clearSilenceTimer();
         silenceTimerRef.current = setTimeout(() => {
-          if (latestSpeechRef.current && !hasDispatchedTranscriptRef.current && isListeningRef.current) {
+          if (latestSpeechRef.current && !hasDispatchedTranscriptRef.current) {
             hasDispatchedTranscriptRef.current = true;
             const textToDispatch = latestSpeechRef.current;
             setTranscript(textToDispatch);
@@ -113,13 +132,12 @@ export const useVoiceLifecycle = ({
             stopAudioAnalysis();
             onTranscript(textToDispatch);
           }
-        }, 1500);
+        }, 1200);
       }
 
-      if (finalTxt) {
-        const cleanFinal = finalTxt.trim();
+      if (finalTxt && !interimTxt) {
         clearSilenceTimer();
-        setTranscript(cleanFinal);
+        setTranscript(finalTxt);
         setInterimTranscript("");
         hasDispatchedTranscriptRef.current = true;
         setIsListening(false);
@@ -129,18 +147,21 @@ export const useVoiceLifecycle = ({
           recognition.stop();
         } catch {}
         stopAudioAnalysis();
-        onTranscript(cleanFinal);
+        onTranscript(finalTxt);
       }
     };
 
     recognition.onerror = (event: any) => {
       clearSilenceTimer();
+      // Only display no-speech error if no transcript was captured at all
       if (event.error === "no-speech") {
-        setError("No speech detected. Hold the button and speak clearly.");
+        if (!latestSpeechRef.current && !hasDispatchedTranscriptRef.current) {
+          setError("No speech detected. Hold or tap the button and speak clearly.");
+        }
       } else if (event.error === "not-allowed" || event.error === "service-not-allowed") {
-        setError("Microphone permission needed. You can also type your instruction directly below.");
+        setError("Microphone permission needed. You can also type your instruction directly in the box below.");
       } else if (event.error !== "aborted") {
-        setError(`Notice: ${event.error}. You can also type or use quick action chips below.`);
+        setError(`Speech notice: ${event.error}. You can also type directly in the box below.`);
       }
       stopAudioAnalysis();
       setIsListening(false);
@@ -155,13 +176,13 @@ export const useVoiceLifecycle = ({
       isListeningRef.current = false;
       onListeningChange?.(false);
 
-      // If speech ended with captured text that wasn't finalized yet, dispatch it
-      if (latestSpeechRef.current && !hasDispatchedTranscriptRef.current) {
+      // If speech ended with captured text that wasn't dispatched yet, dispatch it immediately
+      const pendingText = latestSpeechRef.current.trim();
+      if (pendingText && !hasDispatchedTranscriptRef.current) {
         hasDispatchedTranscriptRef.current = true;
-        const text = latestSpeechRef.current;
-        setTranscript(text);
+        setTranscript(pendingText);
         setInterimTranscript("");
-        onTranscript(text);
+        onTranscript(pendingText);
       }
     };
 
@@ -246,11 +267,9 @@ export const useVoiceLifecycle = ({
     }
 
     try {
-      // Stop speech synthesis if agent is currently speaking
-      if (window.speechSynthesis) {
-        window.speechSynthesis.cancel();
-        setIsSpeaking(false);
-      }
+      // Instant Barge-In: Halt speech synthesis immediately when user starts speaking
+      ttsAdapter.stop();
+      setIsSpeaking(false);
 
       setIsListening(true);
       isListeningRef.current = true;
@@ -303,44 +322,28 @@ export const useVoiceLifecycle = ({
     }
   }, [startListening, stopListening]);
 
-  // Clean, concise speech synthesis (TTS)
+  // Clean, concise speech synthesis (TTS) with instant barge-in & neural HTTP fallback
   const speak = useCallback(
     (text: string) => {
-      if (!voiceResponsesEnabled || !text || !window.speechSynthesis) return;
+      if (!voiceResponsesEnabled || !text) return;
 
-      window.speechSynthesis.cancel();
-
-      const cleanText = text
-        .replace(/```[\s\S]*?```/g, "")
-        .replace(/`([^`]+)`/g, "$1")
-        .replace(/[*_#~]/g, "")
-        .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-        .replace(/[🚫⚠️✅ℹ️]/g, "")
-        .trim();
-
+      const cleanText = ttsAdapter.cleanSpokenText(text);
       if (!cleanText) return;
 
       setLastSpokenText(cleanText);
 
-      const utterance = new SpeechSynthesisUtterance(cleanText);
-      utterance.rate = 1.05;
-      utterance.pitch = 1.0;
-      utterance.lang = navigator.language || "en-US";
-
-      utterance.onstart = () => setIsSpeaking(true);
-      utterance.onend = () => setIsSpeaking(false);
-      utterance.onerror = () => setIsSpeaking(false);
-
-      window.speechSynthesis.speak(utterance);
+      ttsAdapter.speak(
+        cleanText,
+        () => setIsSpeaking(true),
+        () => setIsSpeaking(false)
+      );
     },
     [voiceResponsesEnabled]
   );
 
   const stopSpeaking = useCallback(() => {
-    if (window.speechSynthesis) {
-      window.speechSynthesis.cancel();
-      setIsSpeaking(false);
-    }
+    ttsAdapter.stop();
+    setIsSpeaking(false);
   }, []);
 
   const clearTranscripts = useCallback(() => {

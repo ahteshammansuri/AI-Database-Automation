@@ -9,6 +9,8 @@ use App\Models\AuditLog;
 use App\Services\AiServiceClient;
 use App\Services\EmailApprovalService;
 use App\Services\LiveEventService;
+use App\Services\NoveltyCheckService;
+use App\Services\ContextPackageService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -29,7 +31,9 @@ class GenerateAutomationContentJob implements ShouldQueue
 
     public function handle(
         AiServiceClient $aiClient,
-        EmailApprovalService $approvalService
+        EmailApprovalService $approvalService,
+        NoveltyCheckService $noveltyService,
+        ContextPackageService $contextPackageService
     ): void {
         $startTime = microtime(true);
 
@@ -191,6 +195,8 @@ class GenerateAutomationContentJob implements ShouldQueue
                     ]
                 );
 
+                $recentTitles = $contextPackageService->loadRecentTitles($automation, 50);
+
                 $aiResult = $aiClient->generateContent([
                     'provider' => $provider,
                     'model' => $model,
@@ -200,9 +206,57 @@ class GenerateAutomationContentJob implements ShouldQueue
                     'required_fields' => $requiredFields,
                     'context_passages' => $contextPassages,
                     'rejection_feedback' => $this->rejectionFeedback,
+                    'recent_titles' => $recentTitles,
                 ]);
 
                 $payload = $aiResult['data'] ?? [];
+
+                // Novelty / duplicate title verification
+                if (!empty($payload['title']) && !empty($recentTitles)) {
+                    $novelty = $noveltyService->check($payload['title'], $automation, 0.92);
+                    if ($novelty['is_duplicate']) {
+                        $execution->addTimelineEvent(
+                            'NOVELTY_DUPLICATE_DETECTED',
+                            "Candidate title '{$payload['title']}' has similarity {$novelty['highest_similarity']} with recent title '{$novelty['matched_title']}'. Regenerating with angle variation.",
+                            $novelty
+                        );
+
+                        $anglePrompt = $finalPrompt . "\n\nCRITICAL NOVELTY DIRECTIVE: The proposed title '{$payload['title']}' is too similar to existing publication '{$novelty['matched_title']}'. " . ($novelty['angle_suggestion'] ?? "Provide a fresh title and unique perspective.");
+                        try {
+                            $retryResult = $aiClient->generateContent([
+                                'provider' => $provider,
+                                'model' => $model,
+                                'api_key' => $apiKey,
+                                'prompt' => $anglePrompt,
+                                'target_table' => $automation->target_table,
+                                'required_fields' => $requiredFields,
+                                'context_passages' => $contextPassages,
+                                'rejection_feedback' => $this->rejectionFeedback,
+                                'recent_titles' => $recentTitles,
+                            ]);
+                            if (!empty($retryResult['data']['title'])) {
+                                $oldTitle = $payload['title'];
+                                $payload = $retryResult['data'];
+                                $execution->addTimelineEvent(
+                                    'NOVELTY_ANGLE_APPLIED',
+                                    "Successfully regenerated fresh title '{$payload['title']}' via angle variation.",
+                                    [
+                                        'new_title' => $payload['title'],
+                                        'previous_candidate' => $oldTitle,
+                                        'duplicate_of' => $novelty['matched_title'],
+                                    ]
+                                );
+                            }
+                        } catch (\Throwable $e) {
+                            Log::warning("Novelty angle regeneration failed: " . $e->getMessage());
+                        }
+                    } else {
+                        $execution->addTimelineEvent(
+                            'NOVELTY_VERIFIED',
+                            "Title novelty verified against recent publications (Max similarity: {$novelty['highest_similarity']})."
+                        );
+                    }
+                }
 
                 $execution->addTimelineEvent(
                     'AI_INFERENCE_COMPLETED',
@@ -231,6 +285,11 @@ class GenerateAutomationContentJob implements ShouldQueue
 
             // Record duration
             $durationMs = (int) round((microtime(true) - $startTime) * 1000);
+
+            // Compute content quality metrics (Readability, SEO, Factual grounding)
+            if (app(\App\Services\FeatureFlagService::class)->isEnabled('FEATURE_QUALITY_SCORE')) {
+                $payload['quality_metrics'] = app(\App\Services\QualityScoreService::class)->evaluateContent($payload, $contextPassages);
+            }
 
             // Determine approval requirement
             $requiresApproval = (bool) $automation->requires_approval;

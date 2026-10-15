@@ -29,9 +29,47 @@ class RetrievedChunk(BaseModel):
     document_id: int
     text: str
     score: float
+    embedding_backend: Optional[str] = None
 
 
 class QueryResponse(BaseModel):
     query: str
     user_id: int
     chunks: List[RetrievedChunk]
+
+
+# ---------------------------------------------------------------------------
+# Field Classifier schemas
+# ---------------------------------------------------------------------------
+
+class ColumnInput(BaseModel):
+    name: str
+    db_type: str = "varchar"
+    is_pk: bool = False
+    is_unique: bool = False
+    nullable: bool = True
+    max_length: Optional[int] = None
+    enum_values: List[str] = []
+    fk_table: Optional[str] = None
+    sample_values: List = []
+    auto_increment: bool = False
+    default_value: Optional[str] = None
+
+
+class FieldClassifyRequest(BaseModel):
+    columns: List[ColumnInput] = Field(..., description="List of column descriptors from schema introspection")
+
+
+class FieldClassificationResult(BaseModel):
+    column_name: str
+    role: str
+    confidence: float
+    evidence: str
+    needs_user_confirmation: bool
+    writable_by_automation: bool
+    role_description: str
+
+
+class FieldClassifyResponse(BaseModel):
+    success: bool
+    classifications: List[FieldClassificationResult]

@@ -65,6 +65,11 @@ class DbConnection extends Model
         return $this->hasMany(Automation::class, 'connection_id');
     }
 
+    public function schemaSnapshot(): \Illuminate\Database\Eloquent\Relations\HasOne
+    {
+        return $this->hasOne(SchemaSnapshot::class, 'connection_id')->latestOfMany();
+    }
+
     public function getIsConfiguredAttribute(): bool
     {
         return !empty($this->host) && !empty($this->database_name) && !empty($this->username);

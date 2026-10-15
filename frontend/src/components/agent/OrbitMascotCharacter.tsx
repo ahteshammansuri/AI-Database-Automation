@@ -177,6 +177,13 @@ const STATE_META: Record<
     badgeBg: "bg-violet-500/20 text-violet-300 border-violet-500/30 animate-pulse",
     eyeType: "thinking",
   },
+  thinking: {
+    label: "Thinking...",
+    glowColor: "rgba(139, 92, 246, 0.8)",
+    thrustColor: "#a78bfa",
+    badgeBg: "bg-violet-500/25 text-violet-200 border-violet-400/50 animate-pulse",
+    eyeType: "thinking",
+  },
   planning: {
     label: "Structuring Plan",
     glowColor: "rgba(59, 130, 246, 0.6)",
@@ -383,9 +390,15 @@ export const OrbitMascotCharacter: React.FC<OrbitMascotCharacterProps> = ({
   const floatAnim = prefersReducedMotion
     ? {}
     : {
-        y: normalizedState === "moving" ? [-2, 3, -2] : [-4, 4, -4],
-        rotate: normalizedState === "listening" ? 3.5 : normalizedState === "interrupted" ? -3 : 0,
+        y: normalizedState === "moving" ? [-3, 4, -3] : [-5, 5, -5],
+        rotate: normalizedState === "listening" ? 3.5 : normalizedState === "interrupted" ? -3 : [0, 1.5, 0, -1.5, 0],
       };
+
+  const isFrontFacing = !angle || angle === "front" || angle === "front_three_quarter";
+  const isThinking = ["thinking", "planning", "understanding", "retrieving_context"].includes(normalizedState);
+  const isWorking = ["working", "typing", "entering_data", "executing", "processing"].includes(normalizedState);
+  const isPointing = ["navigating", "pointing", "moving"].includes(normalizedState);
+  const isGreeting = ["speaking", "success", "celebrate", "celebration"].includes(normalizedState);
 
   return (
     <div
@@ -405,32 +418,59 @@ export const OrbitMascotCharacter: React.FC<OrbitMascotCharacterProps> = ({
       >
         {/* Soft Ambient Levitation Thrust Glow beneath feet */}
         <motion.div
-          className="absolute -bottom-1 w-3/4 h-3 rounded-full blur-[6px] pointer-events-none transition-colors duration-500"
+          className="absolute -bottom-1.5 w-3/4 h-3.5 rounded-full blur-[7px] pointer-events-none transition-colors duration-500"
           animate={
             prefersReducedMotion
               ? { opacity: 0.5 }
               : {
-                  scale: [0.92, 1.1 + Math.min(0.25, audioLevel * 0.4), 0.92],
-                  opacity: [0.45, 0.85, 0.45],
+                  scale: [0.92, 1.15 + Math.min(0.3, audioLevel * 0.5), 0.92],
+                  opacity: [0.55, 0.95, 0.55],
                 }
           }
           transition={{
-            duration: normalizedState === "listening" ? 0.9 : 2.0,
+            duration: normalizedState === "listening" ? 0.8 : normalizedState === "moving" ? 1.0 : 2.0,
             repeat: Infinity,
             ease: "easeInOut",
           }}
           style={{
             backgroundColor: meta.thrustColor,
-            boxShadow: `0 0 18px 5px ${meta.thrustColor}`,
+            boxShadow: `0 0 20px 6px ${meta.thrustColor}`,
           }}
         />
+
+        {/* Dynamic Thruster Jets underneath feet */}
+        <motion.div
+          className="absolute bottom-1 flex space-x-5 pointer-events-none z-0"
+          animate={
+            prefersReducedMotion
+              ? {}
+              : {
+                  height: normalizedState === "moving" ? [10, 16, 10] : [6, 11, 6],
+                  opacity: [0.7, 1, 0.7],
+                }
+          }
+          transition={{ duration: 0.6, repeat: Infinity, ease: "easeInOut" }}
+        >
+          <div
+            className="w-2 rounded-b-full blur-[1px]"
+            style={{
+              background: `linear-gradient(to bottom, #FFFFFF 0%, ${meta.thrustColor} 70%, transparent 100%)`,
+            }}
+          />
+          <div
+            className="w-2 rounded-b-full blur-[1px]"
+            style={{
+              background: `linear-gradient(to bottom, #FFFFFF 0%, ${meta.thrustColor} 70%, transparent 100%)`,
+            }}
+          />
+        </motion.div>
 
         {/* Character Visual: High-DPI Sprite or Vector Rig Fallback */}
         <motion.div
           className="relative z-10 w-full h-full flex items-center justify-center pointer-events-none"
           animate={floatAnim}
           transition={{
-            duration: normalizedState === "moving" ? 1.0 : 2.4,
+            duration: normalizedState === "moving" ? 0.9 : 2.2,
             repeat: Infinity,
             ease: "easeInOut",
           }}
@@ -450,24 +490,103 @@ export const OrbitMascotCharacter: React.FC<OrbitMascotCharacterProps> = ({
               />
 
               {/* Dynamic Audio Level Antenna Halo (Voice pulse) */}
-              {audioLevel > 0.08 && (
+              {(audioLevel > 0.08 || normalizedState === "listening") && (
                 <div
-                  className="absolute top-[6%] left-[49%] -translate-x-1/2 w-4 h-4 rounded-full pointer-events-none animate-ping"
+                  className="absolute top-[5%] left-[50%] -translate-x-1/2 w-4 h-4 rounded-full pointer-events-none animate-ping"
                   style={{
                     backgroundColor: meta.thrustColor,
-                    opacity: Math.min(0.9, audioLevel * 1.3),
+                    opacity: Math.min(0.95, Math.max(0.4, audioLevel * 1.5)),
                   }}
                 />
               )}
 
-              {/* Natural Eye Blink Overlay when Idle on Front View */}
-              {blink && normalizedState === "idle" && (!angle || angle === "front") && (
-                <div
-                  className="absolute top-[32%] left-[45%] -translate-x-1/2 flex space-x-2.5 pointer-events-none"
-                  style={{ transform: "scale(0.85)" }}
-                >
-                  <div className="w-3 h-0.5 bg-[#00D4FF] rounded-full shadow-[0_0_8px_#00D4FF]" />
-                  <div className="w-3 h-0.5 bg-[#00D4FF] rounded-full shadow-[0_0_8px_#00D4FF]" />
+              {/* Articulated Live Visor Overlay (Blinks, Scanning, Emotion Curves) */}
+              {isFrontFacing && (
+                <div className="absolute top-[28%] left-[50%] -translate-x-1/2 w-[34%] h-[16%] pointer-events-none flex items-center justify-center overflow-hidden">
+                  {blink ? (
+                    // Natural Eye Blink across all active states
+                    <div className="flex space-x-2.5 w-full justify-center">
+                      <div className="w-2.5 h-0.5 bg-[#00D4FF] rounded-full shadow-[0_0_8px_#00D4FF]" />
+                      <div className="w-2.5 h-0.5 bg-[#00D4FF] rounded-full shadow-[0_0_8px_#00D4FF]" />
+                    </div>
+                  ) : isThinking ? (
+                    // Thinking / Planning Eye Scanner Beam
+                    <motion.div
+                      className="w-2 h-2.5 bg-[#00D4FF] rounded-full shadow-[0_0_10px_#00D4FF]"
+                      animate={{ x: [-8, 8, -8] }}
+                      transition={{ duration: 1.2, repeat: Infinity, ease: "easeInOut" }}
+                    />
+                  ) : isGreeting ? (
+                    // Cheerful Arcs when speaking or celebrating
+                    <div className="flex space-x-2.5">
+                      <svg width="12" height="8" viewBox="0 0 12 8">
+                        <path d="M 1 6 Q 6 1 11 6" stroke="#00D4FF" strokeWidth="2" strokeLinecap="round" fill="none" />
+                      </svg>
+                      <svg width="12" height="8" viewBox="0 0 12 8">
+                        <path d="M 1 6 Q 6 1 11 6" stroke="#00D4FF" strokeWidth="2" strokeLinecap="round" fill="none" />
+                      </svg>
+                    </div>
+                  ) : normalizedState === "listening" ? (
+                    // Focused Alert Rings when listening
+                    <div className="flex space-x-2">
+                      <div className="w-2.5 h-3 border-2 border-[#00D4FF] rounded-full shadow-[0_0_8px_#00D4FF] animate-pulse" />
+                      <div className="w-2.5 h-3 border-2 border-[#00D4FF] rounded-full shadow-[0_0_8px_#00D4FF] animate-pulse" />
+                    </div>
+                  ) : (
+                    // Idle Calm Gaze
+                    <div className="flex space-x-2.5 items-center">
+                      <div className="w-2 h-2.5 bg-[#00D4FF] rounded-full shadow-[0_0_6px_#00D4FF]" />
+                      <div className="w-2 h-2.5 bg-[#00D4FF] rounded-full shadow-[0_0_6px_#00D4FF]" />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Articulated Hand Gestures */}
+              {isFrontFacing && (
+                <div className="absolute inset-0 pointer-events-none">
+                  {/* Waving Hand on Greeting */}
+                  {isGreeting && (
+                    <motion.div
+                      className="absolute top-[48%] right-[12%] w-4 h-4"
+                      animate={{ rotate: [-10, 22, -10] }}
+                      transition={{ duration: 0.8, repeat: Infinity, ease: "easeInOut" }}
+                    >
+                      <svg width="16" height="16" viewBox="0 0 16 16">
+                        <circle cx="8" cy="8" r="4.5" fill="#FFFFFF" stroke="#CBD5E1" strokeWidth="1" />
+                        <circle cx="8" cy="8" r="2" fill="#00D4FF" />
+                      </svg>
+                    </motion.div>
+                  )}
+
+                  {/* Pointing Hand on Navigating / Directing */}
+                  {isPointing && (
+                    <motion.div
+                      className="absolute top-[52%] right-[10%] w-5 h-5"
+                      animate={{ x: [0, 4, 0] }}
+                      transition={{ duration: 0.7, repeat: Infinity, ease: "easeInOut" }}
+                    >
+                      <svg width="20" height="20" viewBox="0 0 20 20">
+                        <path d="M 4 10 L 14 10 M 10 6 L 15 10 L 10 14" stroke="#00D4FF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    </motion.div>
+                  )}
+
+                  {/* Typing / Data Sparks while Working */}
+                  {isWorking && (
+                    <div className="absolute top-[64%] left-[50%] -translate-x-1/2 flex space-x-4">
+                      <motion.div
+                        className="w-1.5 h-1.5 bg-[#00D4FF] rounded-full shadow-[0_0_6px_#00D4FF]"
+                        animate={{ y: [0, -3, 0], opacity: [0.4, 1, 0.4] }}
+                        transition={{ duration: 0.4, repeat: Infinity }}
+                      />
+                      <motion.div
+                        className="w-1.5 h-1.5 bg-[#8B5CF6] rounded-full shadow-[0_0_6px_#8B5CF6]"
+                        animate={{ y: [-3, 0, -3], opacity: [1, 0.4, 1] }}
+                        transition={{ duration: 0.4, repeat: Infinity }}
+                      />
+                    </div>
+                  )}
                 </div>
               )}
             </div>

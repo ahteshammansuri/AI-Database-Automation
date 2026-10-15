@@ -12,7 +12,9 @@ use App\Services\DatabaseSafetyService;
 use App\Models\ContentVersion;
 use App\Services\SafeDatabaseExecutor;
 use App\Services\LiveEventService;
+use App\Models\FieldMapping;
 use Illuminate\Http\Request;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Str;
 use Carbon\Carbon;
 
@@ -54,6 +56,7 @@ class AutomationController extends Controller
             'requires_approval' => 'nullable|boolean',
             'reviewer_email' => 'nullable|email',
             'timeout_policy' => 'nullable|string|in:AUTO_PUBLISH_LATEST,KEEP_DRAFT,CANCEL',
+            'safe_deadline_policy' => 'nullable|string|in:skip,publish_last_valid,notify_and_wait',
             'is_active' => 'nullable|boolean',
         ]);
 
@@ -105,6 +108,7 @@ class AutomationController extends Controller
             'requires_approval' => $requiresApproval,
             'reviewer_email' => $validated['reviewer_email'] ?? $request->user()->email,
             'timeout_policy' => $validated['timeout_policy'] ?? 'AUTO_PUBLISH_LATEST',
+            'safe_deadline_policy' => $validated['safe_deadline_policy'] ?? 'notify_and_wait',
             'is_active' => $validated['is_active'] ?? true,
         ]);
 
@@ -157,6 +161,7 @@ class AutomationController extends Controller
             'publication_time' => 'sometimes|string',
             'timezone' => 'sometimes|nullable|string',
             'reviewer_email' => 'nullable|email',
+            'safe_deadline_policy' => 'sometimes|nullable|string|in:skip,publish_last_valid,notify_and_wait',
         ]);
 
         if (isset($validated['generation_time']) || isset($validated['publication_time'])) {
@@ -678,6 +683,59 @@ class AutomationController extends Controller
             'action' => $action,
             'suggested_value' => (string) $suggested,
             'explanation' => "Deterministic assistance heuristic applied for {$action}.",
+        ]);
+    }
+
+    /**
+     * Retrieve persisted field mappings for an automation.
+     */
+    public function getFieldMappings(Request $request, int $id): JsonResponse
+    {
+        $automation = Automation::where('user_id', $request->user()->id)->where('id', $id)->firstOrFail();
+        $mappings = FieldMapping::where('automation_id', $automation->id)->get();
+
+        return response()->json([
+            'success' => true,
+            'automation_id' => $automation->id,
+            'field_mappings' => $mappings,
+        ]);
+    }
+
+    /**
+     * Update/confirm field mappings for an automation.
+     */
+    public function updateFieldMappings(Request $request, int $id): JsonResponse
+    {
+        $automation = Automation::where('user_id', $request->user()->id)->where('id', $id)->firstOrFail();
+
+        $validated = $request->validate([
+            'mappings' => 'required|array',
+            'mappings.*.column_name' => 'required|string',
+            'mappings.*.role' => 'required|string',
+            'mappings.*.confidence' => 'nullable|numeric',
+            'mappings.*.confirmed' => 'nullable|boolean',
+            'mappings.*.override_instructions' => 'nullable|string',
+        ]);
+
+        foreach ($validated['mappings'] as $m) {
+            FieldMapping::updateOrCreate(
+                [
+                    'automation_id' => $automation->id,
+                    'column_name' => $m['column_name'],
+                ],
+                [
+                    'role' => $m['role'],
+                    'confidence' => $m['confidence'] ?? 1.0,
+                    'confirmed' => $m['confirmed'] ?? true,
+                    'override_instructions' => $m['override_instructions'] ?? null,
+                ]
+            );
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Field mappings updated successfully.',
+            'field_mappings' => FieldMapping::where('automation_id', $automation->id)->get(),
         ]);
     }
 }

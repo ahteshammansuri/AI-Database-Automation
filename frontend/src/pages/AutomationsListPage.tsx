@@ -1,13 +1,16 @@
 import React, { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { Workflow, Plus, Play, Pause, Trash2, Database, Clock, CheckCircle, AlertCircle, Zap, RefreshCw, Cpu, Settings } from "lucide-react";
 import { api } from "../services/api";
 import { StatusPill } from "../components/common/StatusPill";
 import { SearchableSelect } from "../components/common/SearchableSelect";
 import { useToast } from "../context/ToastContext";
+import { actionBridge } from "../services/actionBridge";
+import { pageStateService } from "../services/pageStateService";
 
 export const AutomationsListPage: React.FC = () => {
+  const navigate = useNavigate();
   const [automations, setAutomations] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionMsg, setActionMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -33,8 +36,27 @@ export const AutomationsListPage: React.FC = () => {
   };
 
   useEffect(() => {
+    pageStateService.setRoute("/automations", "Automations List");
     loadData();
-  }, []);
+
+    const unsubs = [
+      actionBridge.on("automations.navigate_create", () => {
+        navigate("/automations/new");
+        return { status: "ok" };
+      }),
+      actionBridge.on("automations.trigger_run", async (payload: any) => {
+        if (payload?.id) {
+          await handleTrigger(payload.id);
+          return { status: "ok" };
+        }
+        return { status: "validation_error", error: "Missing automation id" };
+      }),
+    ];
+
+    return () => {
+      unsubs.forEach((unsub) => unsub());
+    };
+  }, [navigate]);
 
   const handleTrigger = async (id: number) => {
     try {

@@ -12,6 +12,9 @@ class GenerateRequest(BaseModel):
     required_fields: List[str] = Field(default_factory=lambda: ["title", "slug", "content", "excerpt"], description="List of columns to generate")
     context_passages: List[str] = Field(default_factory=list, description="Retrieved RAG context passages")
     rejection_feedback: Optional[str] = Field(default=None, description="Feedback from reviewer on rejected version")
+    schema_constraints: Optional[Dict[str, Any]] = Field(default=None, description="Per-column schema constraints (types, max_length, enums)")
+    relation_catalog: Optional[Dict[str, Any]] = Field(default=None, description="Allowed reference values for FK columns")
+    recent_titles: Optional[List[str]] = Field(default=None, description="Recent published titles to prevent duplicates")
 
 
 class GenerateResponse(BaseModel):
@@ -21,6 +24,19 @@ class GenerateResponse(BaseModel):
     latency_seconds: float
     data: Dict[str, Any]
     error: Optional[str] = None
+
+
+class NoveltyCheckRequest(BaseModel):
+    candidate_title: str = Field(..., description="The title proposed by AI generation")
+    recent_titles: List[str] = Field(default_factory=list, description="Titles previously published for this automation")
+    threshold: float = Field(default=0.92, description="Cosine similarity cutoff above which a title is considered duplicate")
+
+
+class NoveltyCheckResponse(BaseModel):
+    is_duplicate: bool
+    highest_similarity: float
+    matched_title: Optional[str] = None
+    angle_suggestion: Optional[str] = None
 
 
 class ProviderHealthRequest(BaseModel):

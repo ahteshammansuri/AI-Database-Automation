@@ -113,14 +113,14 @@ export const usePressAndHold = ({
       const isDeliberateHold = duration >= holdThresholdMs || isHoldRecognizedRef.current;
 
       if (isDeliberateHold) {
-        // Sustained PRESS AND HOLD
+        // Sustained PRESS AND HOLD: release stops recording and sends transcript
         onHoldEnd();
       } else {
-        // Quick TAP (< threshold)
+        // Quick TAP (< threshold): cleanly delegate to tap toggle
         onTap();
       }
     },
-    [holdThresholdMs, onHoldEnd, onTap]
+    [holdThresholdMs, onHoldEnd, onTap, startOnDown]
   );
 
   const handlePointerCancel = useCallback(

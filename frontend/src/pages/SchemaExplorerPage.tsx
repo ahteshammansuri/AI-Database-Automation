@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo } from "react";
+import React, { useEffect, useState, useMemo, useRef } from "react";
 import { useSearchParams, Link } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -26,6 +26,8 @@ import { api } from "../services/api";
 import { ConnectionProfile, SchemaResponse, SchemaTable } from "../types";
 import { StatusPill } from "../components/common/StatusPill";
 import { SearchableSelect } from "../components/common/SearchableSelect";
+import { actionBridge } from "../services/actionBridge";
+import { pageStateService } from "../services/pageStateService";
 
 export const SchemaExplorerPage: React.FC = () => {
   const [searchParams] = useSearchParams();
@@ -34,6 +36,8 @@ export const SchemaExplorerPage: React.FC = () => {
   const [connections, setConnections] = useState<ConnectionProfile[]>([]);
   const [selectedConnId, setSelectedConnId] = useState<number | null>(null);
   const [schema, setSchema] = useState<SchemaResponse | null>(null);
+  const schemaRef = useRef<SchemaResponse | null>(null);
+  schemaRef.current = schema;
   const [selectedTable, setSelectedTable] = useState<SchemaTable | null>(null);
   const [isInitializing, setIsInitializing] = useState(true);
   const [loadingSchema, setLoadingSchema] = useState(false);
@@ -88,8 +92,34 @@ export const SchemaExplorerPage: React.FC = () => {
       }
     };
     init();
+
+    pageStateService.setRoute("/explorer", "Schema Explorer");
+
+    const unsubs = [
+      actionBridge.on("explorer.select_connection", async (payload: any) => {
+        if (payload?.connection_id) {
+          await handleConnectionChange(Number(payload.connection_id));
+          return { status: "ok" };
+        }
+        return { status: "validation_error", error: "Missing connection_id" };
+      }),
+      actionBridge.on("explorer.select_table", (payload: any) => {
+        const currentTables = schemaRef.current?.tables;
+        if (payload?.table_name && currentTables) {
+          const match = currentTables.find((t: any) => t.name.toLowerCase() === String(payload.table_name).toLowerCase());
+          if (match) {
+            setSelectedTable(match);
+            return { status: "ok" };
+          }
+          return { status: "validation_error", error: `Table '${payload.table_name}' not found` };
+        }
+        return { status: "validation_error", error: "Missing table_name or schema not loaded" };
+      }),
+    ];
+
     return () => {
       isMounted = false;
+      unsubs.forEach((u) => u());
     };
   }, [connParam]);
 
@@ -98,6 +128,7 @@ export const SchemaExplorerPage: React.FC = () => {
     if (selectedTable) {
       setUserNote(selectedTable.ai_suggestion?.user_notes || "");
       setNoteSavedFeedback(false);
+      pageStateService.setActiveEntity("table", selectedTable.name, selectedTable.name);
     }
   }, [selectedTable]);
 

@@ -32,8 +32,42 @@ class Automation extends Model
         'requires_approval',
         'reviewer_email',
         'timeout_policy',
+        'safe_deadline_policy',
         'is_active',
     ];
+
+    protected $attributes = [
+        'field_mappings' => '[]',
+        'operation_mode' => 'AI_CREATE',
+        'schedule_type' => 'DAILY',
+        'generation_time' => '08:00',
+        'publication_time' => '09:00',
+        'timezone' => 'UTC',
+        'requires_approval' => true,
+        'is_active' => true,
+    ];
+
+    protected $appends = [
+        'lead_time_minutes',
+    ];
+
+    public function getLeadTimeMinutesAttribute(): int
+    {
+        if (empty($this->generation_time) || empty($this->publication_time)) {
+            return 30;
+        }
+
+        try {
+            $gen = \Carbon\Carbon::createFromFormat('H:i', substr($this->generation_time, 0, 5));
+            $pub = \Carbon\Carbon::createFromFormat('H:i', substr($this->publication_time, 0, 5));
+            if ($pub->lt($gen)) {
+                $pub->addDay();
+            }
+            return (int) $gen->diffInMinutes($pub);
+        } catch (\Throwable $e) {
+            return 30;
+        }
+    }
 
     protected function casts(): array
     {
