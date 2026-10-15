@@ -128,6 +128,10 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/agent/preferences', [AgentController::class, 'getPreferences']);
     Route::put('/agent/preferences', [AgentController::class, 'updatePreferences']);
     Route::get('/agent/tools', [AgentController::class, 'tools']);
+    Route::post('/agent/ui-actions/{correlationId}/ack', [AgentController::class, 'uiAck']);
+    Route::post('/agent/heartbeat', [AgentController::class, 'heartbeat']);
+    Route::get('/agent/surfaces', [AgentController::class, 'surfaces']);
+    Route::post('/agent/tasks/{id}/continue', [AgentController::class, 'continueAfterSecret']);
 
     // Phase 6: Feature Flags & Advanced Platform Capabilities
     Route::get('/features', [FeatureFlagController::class, 'index']);

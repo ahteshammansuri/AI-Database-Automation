@@ -72,6 +72,15 @@ class LiveEventController extends Controller
             return response()->json(['error' => 'Unauthorized'], 401);
         }
 
+        if ($request->boolean('baseline')) {
+            // Fresh page load: start from "now". Persisted task state is fetched separately,
+            // so old events (including UI actions) are never replayed into the new page.
+            return response()->json([
+                'events' => [],
+                'latest_id' => (int) \Illuminate\Support\Facades\DB::table('workspace_events')->where('user_id', $user->id)->max('id'),
+            ]);
+        }
+
         $sinceId = (int) $request->query('since_id', $request->query('since', 0));
         $limit = min((int) $request->query('limit', 50), 100);
 

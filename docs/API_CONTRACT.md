@@ -233,3 +233,38 @@
     "latency_seconds": 1.45
   }
   ```
+
+---
+
+## Orbit agent API (observe-act loop)
+
+All routes require `Authorization: Bearer <token>` and are scoped to the signed-in user. A resource that belongs to someone else returns 404.
+
+| Method & path | Body | Response |
+|---|---|---|
+| `POST /api/agent/conversations/{id}/messages` | `content` (≤4000, secrets are redacted server-side too), `is_voice`, `secure_input_data` (e.g. `{password}`; encrypted into the task vault, never stored in messages), `page_context` (non-secret page snapshot) | **202** `{conversation, task, message, turn_id}`. The turn runs on the `agent` queue; progress arrives as live events. |
+| `POST /api/agent/tasks/{id}/interrupt` | `action`: `STOP` \| `PAUSE` \| `RESUME` | `{task, message}`. A running task stops or pauses at the next safe step. |
+| `POST /api/agent/tasks/{id}/confirm` | — | **202** and runs the exact pending tool call; **409** if nothing is pending. |
+| `POST /api/agent/tasks/{id}/correct` | `correction` | Same as posting a message (the model interprets it). |
+| `POST /api/agent/ui-actions/{correlationId}/ack` | `status`: `ok` \| `validation_error` \| `not_mounted` \| `error` \| `timeout`; `result`: `{errors?, values?, message?}` | `{correlation_id, status}` |
+| `POST /api/agent/heartbeat` | — | `{ok, server_time}`. Marks this browser as able to show UI actions (30 s TTL). |
+| `GET /api/agent/tasks/{id}` / `.../timeline` | — | Task with `status`, `stage`, `plan_version`, `pending_tool_call`, `last_decision`, and timeline. |
+| `GET /api/agent/tools` | — | `tools` (definitions), `model_visible` (what the model sees), `availability`. |
+| `GET /api/live/events?since_id=N` / `?baseline=1` | — | Ordered persisted events; `baseline=1` returns only `latest_id` (no replay). |
+
+### Internal AI service
+
+`POST /v1/ai/agent/decide` (requires `X-Service-Token`). It receives the utterance, runtime context, tool schemas, observations, slots, provider/model, and a server-derived `user_id`. It returns `{success, decision (orbit.v1), error_category, rag {attempted, used, source_ids, index_version, embedding_backend, chunks}, model_used, duration_ms, repairs}`.
+
+Error categories: `MODEL_UNAVAILABLE`, `MODEL_OUTPUT_INVALID`, `PROVIDER_ERROR`, `PROVIDER_UNSUPPORTED`.
+
+The old `/v1/ai/agent/plan`, `/evaluate-correction` and `/synthesize-response` endpoints have been removed.
+
+### Orbit on-screen operation
+
+| Method & path | Body | Response |
+|---|---|---|
+| `GET /api/agent/surfaces` | — | The server-owned surface catalog `{version, pages[], surfaces[]}` (fields, actions, `consequential`, `verifies`). |
+| `POST /api/agent/tasks/{id}/continue` | `surface`, `field` (a `secret` field of that surface), optional `page_context`. **Secret values are rejected (422).** | **202**: queues the next turn with the note "I typed the … myself". |
+
+UI actions requested by the agent loop arrive as `agent.ui_action` events: `surface.go_to_page`, `surface.open_form`, `surface.read_screen`, `surface.fill_fields`, `surface.choose_option`, `surface.press`, `surface.ask_secret_in_form`, `surface.show_me`. The browser acknowledges each one via `POST /api/agent/ui-actions/{correlationId}/ack` with `{status, result}`, where `result` may contain `success`, `message`, `resource{type,id}`, `missing_required`, `fields`, `candidates` and `data`. The server sanitises it (secret-like keys dropped, size capped).

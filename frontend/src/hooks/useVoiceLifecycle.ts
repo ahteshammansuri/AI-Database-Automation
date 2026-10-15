@@ -13,9 +13,15 @@ export interface VoiceLifecycleReturn {
   isSpeaking: boolean;
   transcript: string;
   interimTranscript: string;
-  audioLevel: number;
+  /** Real microphone input level 0..1, or null when it cannot be measured. */
+  audioLevel: number | null;
   lastSpokenText: string;
   error: string | null;
+  /**
+   * The browser's built-in recognizer (Chrome/Edge webkitSpeechRecognition) sends audio
+   * to the browser vendor's speech service. Surfaced so the UI can disclose it.
+   */
+  usesRemoteRecognition: boolean;
   startListening: () => void;
   stopListening: () => void;
   toggleListening: () => void;
@@ -24,6 +30,8 @@ export interface VoiceLifecycleReturn {
   clearTranscripts: () => void;
 }
 
+const SILENCE_DISPATCH_MS = 1200;
+
 export const useVoiceLifecycle = ({
   onTranscript,
   onListeningChange,
@@ -31,12 +39,19 @@ export const useVoiceLifecycle = ({
 }: VoiceLifecycleOptions): VoiceLifecycleReturn => {
   const [isSupported, setIsSupported] = useState<boolean>(true);
   const [isListening, setIsListening] = useState<boolean>(false);
-  const [isSpeaking, setIsSpeaking] = useState<boolean>(false);
+  const [isSpeaking, setIsSpeaking] = useState<boolean>(ttsAdapter.isSpeaking());
   const [transcript, setTranscript] = useState<string>("");
   const [interimTranscript, setInterimTranscript] = useState<string>("");
-  const [audioLevel, setAudioLevel] = useState<number>(0);
+  const [audioLevel, setAudioLevel] = useState<number | null>(null);
   const [lastSpokenText, setLastSpokenText] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
+
+  // Callbacks live in refs so the recognizer is created once and never torn down mid-utterance
+  // just because a parent re-rendered with new function identities.
+  const onTranscriptRef = useRef(onTranscript);
+  const onListeningChangeRef = useRef(onListeningChange);
+  onTranscriptRef.current = onTranscript;
+  onListeningChangeRef.current = onListeningChange;
 
   const recognitionRef = useRef<any>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -45,24 +60,62 @@ export const useVoiceLifecycle = ({
   const animFrameRef = useRef<number | null>(null);
   const isListeningRef = useRef<boolean>(false);
   const latestSpeechRef = useRef<string>("");
-  const hasDispatchedTranscriptRef = useRef<boolean>(false);
+  const dispatchedRef = useRef<boolean>(false);
   const silenceTimerRef = useRef<any>(null);
 
-  const clearSilenceTimer = useCallback(() => {
+  const usesRemoteRecognition =
+    typeof window !== "undefined" && !(window as any).SpeechRecognition && !!(window as any).webkitSpeechRecognition;
+
+  const clearSilenceTimer = () => {
     if (silenceTimerRef.current) {
       clearTimeout(silenceTimerRef.current);
       silenceTimerRef.current = null;
     }
+  };
+
+  const stopAudioAnalysis = () => {
+    if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+    animFrameRef.current = null;
+    mediaStreamRef.current?.getTracks().forEach((t) => t.stop());
+    mediaStreamRef.current = null;
+    if (audioContextRef.current && audioContextRef.current.state !== "closed") {
+      audioContextRef.current.close().catch(() => {});
+    }
+    audioContextRef.current = null;
+    analyserRef.current = null;
+    setAudioLevel(null);
+  };
+
+  const setListening = (v: boolean) => {
+    isListeningRef.current = v;
+    setIsListening(v);
+    onListeningChangeRef.current?.(v);
+  };
+
+  /** Send the captured utterance exactly once per listening session. */
+  const dispatch = (text: string) => {
+    const clean = text.trim();
+    if (!clean || dispatchedRef.current) return;
+    dispatchedRef.current = true;
+    clearSilenceTimer();
+    setTranscript(clean);
+    setInterimTranscript("");
+    onTranscriptRef.current(clean);
+  };
+
+  // Track real playback state from the single TTS channel.
+  useEffect(() => {
+    return ttsAdapter.subscribe((e) => {
+      if (e.type === "start") setIsSpeaking(true);
+      if (e.type === "end" || e.type === "error" || e.type === "cancelled") setIsSpeaking(false);
+    });
   }, []);
 
-  // Initialize SpeechRecognition on mount
   useEffect(() => {
-    const SpeechRecognition =
-      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
       setIsSupported(false);
-      setError("Speech recognition is not natively supported in this browser. You can type directly in the box below.");
+      setError("Voice input is not supported in this browser. Use \"Type instead\".");
       return;
     }
 
@@ -72,185 +125,115 @@ export const useVoiceLifecycle = ({
     recognition.lang = navigator.language || "en-US";
 
     recognition.onstart = () => {
-      setIsListening(true);
-      isListeningRef.current = true;
       setError(null);
-      hasDispatchedTranscriptRef.current = false;
-      onListeningChange?.(true);
+      dispatchedRef.current = false;
+      setListening(true);
     };
 
     recognition.onresult = (event: any) => {
       let finalTxt = "";
       let interimTxt = "";
-
-      // Accumulate across ALL results in current recognition session to prevent dropped words
       for (let i = 0; i < event.results.length; ++i) {
         const item = event.results[i];
-        if (item && item[0]) {
-          if (item.isFinal) {
-            finalTxt += item[0].transcript + " ";
-          } else {
-            interimTxt += item[0].transcript + " ";
-          }
+        if (item?.[0]) {
+          if (item.isFinal) finalTxt += item[0].transcript + " ";
+          else interimTxt += item[0].transcript + " ";
         }
       }
-
       finalTxt = finalTxt.trim();
       interimTxt = interimTxt.trim();
-      const activeText = (finalTxt ? (finalTxt + (interimTxt ? " " + interimTxt : "")) : interimTxt).trim();
+      const active = [finalTxt, interimTxt].filter(Boolean).join(" ").trim();
+      if (active) latestSpeechRef.current = active;
 
-      if (activeText) {
-        latestSpeechRef.current = activeText;
-      }
-
-      // If user has already released the hold button, dispatch speech as soon as results arrive
-      if (!isListeningRef.current && activeText && !hasDispatchedTranscriptRef.current) {
-        hasDispatchedTranscriptRef.current = true;
-        setTranscript(activeText);
-        setInterimTranscript("");
-        clearSilenceTimer();
+      // Released already (press-and-hold): send as soon as text arrives.
+      if (!isListeningRef.current && active) {
         stopAudioAnalysis();
-        onTranscript(activeText);
+        dispatch(active);
         return;
       }
 
-      if (interimTxt) {
-        setInterimTranscript(interimTxt);
-        clearSilenceTimer();
-        silenceTimerRef.current = setTimeout(() => {
-          if (latestSpeechRef.current && !hasDispatchedTranscriptRef.current) {
-            hasDispatchedTranscriptRef.current = true;
-            const textToDispatch = latestSpeechRef.current;
-            setTranscript(textToDispatch);
-            setInterimTranscript("");
-            setIsListening(false);
-            isListeningRef.current = false;
-            onListeningChange?.(false);
-            try {
-              recognition.stop();
-            } catch {}
-            stopAudioAnalysis();
-            onTranscript(textToDispatch);
+      setInterimTranscript(active);
+      clearSilenceTimer();
+      silenceTimerRef.current = setTimeout(() => {
+        if (latestSpeechRef.current && !dispatchedRef.current) {
+          try {
+            recognition.stop();
+          } catch {
+            // already stopping
           }
-        }, 1200);
-      }
-
-      if (finalTxt && !interimTxt) {
-        clearSilenceTimer();
-        setTranscript(finalTxt);
-        setInterimTranscript("");
-        hasDispatchedTranscriptRef.current = true;
-        setIsListening(false);
-        isListeningRef.current = false;
-        onListeningChange?.(false);
-        try {
-          recognition.stop();
-        } catch {}
-        stopAudioAnalysis();
-        onTranscript(finalTxt);
-      }
+          setListening(false);
+          stopAudioAnalysis();
+          dispatch(latestSpeechRef.current);
+        }
+      }, SILENCE_DISPATCH_MS);
     };
 
     recognition.onerror = (event: any) => {
       clearSilenceTimer();
-      // Only display no-speech error if no transcript was captured at all
       if (event.error === "no-speech") {
-        if (!latestSpeechRef.current && !hasDispatchedTranscriptRef.current) {
-          setError("No speech detected. Hold or tap the button and speak clearly.");
-        }
+        if (!latestSpeechRef.current) setError("I didn't hear anything. Hold the button and speak, or type instead.");
       } else if (event.error === "not-allowed" || event.error === "service-not-allowed") {
-        setError("Microphone permission needed. You can also type your instruction directly in the box below.");
+        setError("Microphone access is blocked. Allow it in the browser, or type instead.");
+      } else if (event.error === "network") {
+        setError("Speech recognition needs a network connection in this browser. Type instead, or try again.");
+      } else if (event.error === "audio-capture") {
+        setError("No microphone was found. Type instead.");
       } else if (event.error !== "aborted") {
-        setError(`Speech notice: ${event.error}. You can also type directly in the box below.`);
+        setError(`Voice input problem (${event.error}). You can type instead.`);
       }
       stopAudioAnalysis();
-      setIsListening(false);
-      isListeningRef.current = false;
-      onListeningChange?.(false);
+      setListening(false);
     };
 
     recognition.onend = () => {
       clearSilenceTimer();
       stopAudioAnalysis();
-      setIsListening(false);
-      isListeningRef.current = false;
-      onListeningChange?.(false);
-
-      // If speech ended with captured text that wasn't dispatched yet, dispatch it immediately
-      const pendingText = latestSpeechRef.current.trim();
-      if (pendingText && !hasDispatchedTranscriptRef.current) {
-        hasDispatchedTranscriptRef.current = true;
-        setTranscript(pendingText);
-        setInterimTranscript("");
-        onTranscript(pendingText);
-      }
+      if (isListeningRef.current) setListening(false);
+      if (latestSpeechRef.current && !dispatchedRef.current) dispatch(latestSpeechRef.current);
     };
 
     recognitionRef.current = recognition;
-
     return () => {
       clearSilenceTimer();
       try {
         recognition.abort();
       } catch {
-        // Ignore abort on unmount
+        // ignore
       }
       stopAudioAnalysis();
+      recognitionRef.current = null;
     };
-  }, [onTranscript, onListeningChange, clearSilenceTimer]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  // Audio volume analyzer for dynamic pulse
   const startAudioAnalysis = async () => {
     try {
       if (!navigator.mediaDevices?.getUserMedia) return;
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!isListeningRef.current) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
       mediaStreamRef.current = stream;
-
-      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-      audioContextRef.current = audioCtx;
-
-      const analyser = audioCtx.createAnalyser();
+      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      audioContextRef.current = ctx;
+      const analyser = ctx.createAnalyser();
       analyser.fftSize = 64;
       analyserRef.current = analyser;
-
-      const source = audioCtx.createMediaStreamSource(stream);
-      source.connect(analyser);
-
-      const dataArray = new Uint8Array(analyser.frequencyBinCount);
-
-      const checkVolume = () => {
+      ctx.createMediaStreamSource(stream).connect(analyser);
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      const tick = () => {
         if (!analyserRef.current) return;
-        analyserRef.current.getByteFrequencyData(dataArray);
+        analyserRef.current.getByteFrequencyData(data);
         let sum = 0;
-        for (let i = 0; i < dataArray.length; i++) {
-          sum += dataArray[i];
-        }
-        const avg = sum / dataArray.length;
-        const normalized = Math.min(1.0, avg / 128);
-        setAudioLevel(normalized);
-        animFrameRef.current = requestAnimationFrame(checkVolume);
+        for (let i = 0; i < data.length; i++) sum += data[i];
+        setAudioLevel(Math.min(1, sum / data.length / 128));
+        animFrameRef.current = requestAnimationFrame(tick);
       };
-
-      checkVolume();
+      tick();
     } catch {
-      setAudioLevel(0.25); // Fallback soft pulse
+      setAudioLevel(null); // level unavailable; never faked
     }
-  };
-
-  const stopAudioAnalysis = () => {
-    if (animFrameRef.current) {
-      cancelAnimationFrame(animFrameRef.current);
-      animFrameRef.current = null;
-    }
-    if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
-      mediaStreamRef.current = null;
-    }
-    if (audioContextRef.current && audioContextRef.current.state !== "closed") {
-      audioContextRef.current.close().catch(() => {});
-      audioContextRef.current = null;
-    }
-    setAudioLevel(0);
   };
 
   const startListening = useCallback(() => {
@@ -259,99 +242,69 @@ export const useVoiceLifecycle = ({
     setTranscript("");
     setInterimTranscript("");
     latestSpeechRef.current = "";
-    hasDispatchedTranscriptRef.current = false;
+    dispatchedRef.current = false;
+
+    // Barge-in: Orbit stops talking the moment the user starts.
+    ttsAdapter.stop();
 
     if (!recognitionRef.current) {
-      setError("Speech recognition unavailable in this environment.");
+      setError("Voice input is unavailable here. Type instead.");
       return;
     }
-
+    setListening(true);
     try {
-      // Instant Barge-In: Halt speech synthesis immediately when user starts speaking
-      ttsAdapter.stop();
-      setIsSpeaking(false);
-
-      setIsListening(true);
-      isListeningRef.current = true;
-      onListeningChange?.(true);
-
       recognitionRef.current.start();
-      startAudioAnalysis();
     } catch {
-      // If already started or transitioning, abort and start cleanly
       try {
         recognitionRef.current.abort();
         recognitionRef.current.start();
-        startAudioAnalysis();
       } catch (err: any) {
-        setError("Could not start microphone: " + (err?.message || "Unknown error"));
+        setListening(false);
+        setError("Could not start the microphone: " + (err?.message || "unknown error"));
+        return;
       }
     }
-  }, [onListeningChange, clearSilenceTimer]);
+    void startAudioAnalysis();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const stopListening = useCallback(() => {
     clearSilenceTimer();
-    isListeningRef.current = false;
-    setIsListening(false);
-    onListeningChange?.(false);
-
-    // Immediately dispatch any captured speech on release
-    if (latestSpeechRef.current && !hasDispatchedTranscriptRef.current) {
-      hasDispatchedTranscriptRef.current = true;
-      const text = latestSpeechRef.current;
-      setTranscript(text);
-      setInterimTranscript("");
-      onTranscript(text);
-    }
-
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.stop();
-      } catch {
-        // Ignore already stopped
-      }
+    setListening(false);
+    if (latestSpeechRef.current) dispatch(latestSpeechRef.current);
+    try {
+      recognitionRef.current?.stop();
+    } catch {
+      // already stopped
     }
     stopAudioAnalysis();
-  }, [onListeningChange, onTranscript, clearSilenceTimer]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const toggleListening = useCallback(() => {
-    if (isListeningRef.current) {
-      stopListening();
-    } else {
-      startListening();
-    }
+    if (isListeningRef.current) stopListening();
+    else startListening();
   }, [startListening, stopListening]);
 
-  // Clean, concise speech synthesis (TTS) with instant barge-in & neural HTTP fallback
   const speak = useCallback(
     (text: string) => {
       if (!voiceResponsesEnabled || !text) return;
-
-      const cleanText = ttsAdapter.cleanSpokenText(text);
-      if (!cleanText) return;
-
-      setLastSpokenText(cleanText);
-
-      ttsAdapter.speak(
-        cleanText,
-        () => setIsSpeaking(true),
-        () => setIsSpeaking(false)
-      );
+      const clean = ttsAdapter.cleanSpokenText(text);
+      if (!clean) return;
+      setLastSpokenText(clean);
+      void ttsAdapter.speak(clean);
     },
     [voiceResponsesEnabled]
   );
 
-  const stopSpeaking = useCallback(() => {
-    ttsAdapter.stop();
-    setIsSpeaking(false);
-  }, []);
+  const stopSpeaking = useCallback(() => ttsAdapter.stop(), []);
 
   const clearTranscripts = useCallback(() => {
     setTranscript("");
     setInterimTranscript("");
     setLastSpokenText("");
     latestSpeechRef.current = "";
-    hasDispatchedTranscriptRef.current = false;
+    dispatchedRef.current = false;
     setError(null);
   }, []);
 
@@ -364,6 +317,7 @@ export const useVoiceLifecycle = ({
     audioLevel,
     lastSpokenText,
     error,
+    usesRemoteRecognition,
     startListening,
     stopListening,
     toggleListening,

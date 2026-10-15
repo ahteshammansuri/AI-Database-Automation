@@ -10,6 +10,8 @@ export interface FormFieldState {
   label?: string;
   value: any;
   isMasked?: boolean;
+  /** True while the value is the form's untouched default (not something the user or Orbit entered). */
+  isDefault?: boolean;
   isValid?: boolean;
   error?: string;
 }
@@ -94,7 +96,7 @@ class PageStateService {
     formId: string,
     fieldName: string,
     value: any,
-    options?: { isSecret?: boolean; error?: string; label?: string; type?: string }
+    options?: { isSecret?: boolean; isDefault?: boolean; error?: string; label?: string; type?: string }
   ): void {
     if (!this.mountedForms.has(formId)) {
       this.registerForm(formId, formId);
@@ -114,6 +116,7 @@ class PageStateService {
       label: options?.label || fieldName,
       value: displayVal,
       isMasked: isSecret,
+      isDefault: Boolean(options?.isDefault),
       isValid: !options?.error,
       error: options?.error,
     };

@@ -17,13 +17,19 @@ interface LiveEventsContextType {
   lastEvent: WorkspaceLiveEvent | null;
   addListener: (callback: (event: WorkspaceLiveEvent) => void) => () => void;
   reconnect: () => void;
+  /** Poll quickly (for live agent choreography) while enabled; normal cadence otherwise. */
+  setFastPolling: (enabled: boolean) => void;
 }
+
+const NORMAL_POLL_MS = 3500;
+const FAST_POLL_MS = 350;
 
 const LiveEventsContext = createContext<LiveEventsContextType>({
   status: "disconnected",
   lastEvent: null,
   addListener: () => () => {},
   reconnect: () => {},
+  setFastPolling: () => {},
 });
 
 export const LiveEventsProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -33,6 +39,8 @@ export const LiveEventsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   const lastEventIdRef = useRef<number>(0);
   const isPollingRef = useRef<boolean>(false);
   const pollTimerRef = useRef<any>(null);
+  const baselineReadyRef = useRef<boolean>(false);
+  const [fastPolling, setFastPolling] = useState<boolean>(false);
 
   const { toast } = useToast();
 
@@ -105,12 +113,18 @@ export const LiveEventsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     isPollingRef.current = true;
 
     try {
+      if (!baselineReadyRef.current) {
+        // Start from "now": history is never replayed into a fresh page.
+        const base: any = await api.getLiveEventsBaseline();
+        lastEventIdRef.current = Number(base?.latest_id || 0);
+        baselineReadyRef.current = true;
+        setStatus("connected");
+        return;
+      }
       const res: any = await api.getLiveEvents(lastEventIdRef.current);
-      const items: WorkspaceLiveEvent[] = Array.isArray(res?.events)
-        ? res.events
-        : Array.isArray(res)
-        ? res
-        : [];
+      const raw: any[] = Array.isArray(res?.events) ? res.events : Array.isArray(res) ? res : [];
+      // The API names the field event_type; listeners use event_name.
+      const items: WorkspaceLiveEvent[] = raw.map((e) => ({ ...e, event_name: e.event_name ?? e.event_type }));
 
       if (items.length > 0) {
         items.forEach(dispatchEvent);
@@ -136,9 +150,10 @@ export const LiveEventsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     // Initial fetch to establish baseline latest_id
     pollEvents();
 
-    const intervalMs = 3500;
+    const intervalMs = fastPolling ? FAST_POLL_MS : NORMAL_POLL_MS;
     pollTimerRef.current = setInterval(() => {
-      if (document.visibilityState === "visible") {
+      // While Orbit is working, keep polling even in a background tab so acknowledgements are not lost.
+      if (fastPolling || document.visibilityState === "visible") {
         pollEvents();
       }
     }, intervalMs);
@@ -160,7 +175,7 @@ export const LiveEventsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("storage", handleStorageChange);
     };
-  }, [pollEvents]);
+  }, [pollEvents, fastPolling]);
 
   return (
     <LiveEventsContext.Provider
@@ -169,6 +184,7 @@ export const LiveEventsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         lastEvent,
         addListener,
         reconnect: pollEvents,
+        setFastPolling,
       }}
     >
       {children}

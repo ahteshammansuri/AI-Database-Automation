@@ -62,3 +62,49 @@ class TextChunker:
             })
 
         return chunks
+
+
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
+
+
+def chunk_markdown_by_heading(text: str, document_id: int, chunk_size: int = 900, overlap: int = 150) -> List[Dict[str, Any]]:
+    """
+    Split Markdown into chunks that never cross a heading boundary. Each chunk keeps the
+    heading path (e.g. "6. Database connection behavior") so retrieved snippets stay
+    attributable. Long sections are windowed with overlap.
+    """
+    if not text:
+        return []
+    matches = list(_HEADING_RE.finditer(text))
+    sections = []
+    if not matches or matches[0].start() > 0:
+        end = matches[0].start() if matches else len(text)
+        sections.append(("", text[:end]))
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        sections.append((m.group(2).strip(), text[m.end():end]))
+
+    chunks: List[Dict[str, Any]] = []
+    for heading, body in sections:
+        body = body.strip()
+        if not body:
+            continue
+        start = 0
+        while start < len(body):
+            window = body[start:start + chunk_size]
+            if start + chunk_size < len(body):
+                cut = window.rfind("\n")
+                if cut > chunk_size // 2:
+                    window = window[:cut]
+            idx = len(chunks)
+            chunks.append({
+                "chunk_id": f"doc_{document_id}_chk_{idx}",
+                "document_id": document_id,
+                "chunk_index": idx,
+                "heading": heading,
+                "text": (f"{heading}\n{window.strip()}" if heading else window.strip()),
+            })
+            if start + len(window) >= len(body):
+                break
+            start += max(len(window) - overlap, 1)
+    return chunks

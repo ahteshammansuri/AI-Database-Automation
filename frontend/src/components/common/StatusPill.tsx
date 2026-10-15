@@ -15,7 +15,7 @@ export const StatusPill: React.FC<StatusPillProps> = ({ status, size = "md" }) =
     colorStyles = "bg-emerald-50 text-emerald-700 border-emerald-200";
   } else if (s === "PENDING_APPROVAL" || s === "GENERATING" || s === "REVIEW_NEEDED" || s === "PAUSED") {
     colorStyles = "bg-amber-50 text-amber-700 border-amber-200";
-  } else if (s === "FAILED" || s === "REJECTED" || s === "RESTRICTED" || s === "DISABLED") {
+  } else if (s === "FAILED" || s === "REJECTED" || s === "RESTRICTED" || s === "DISABLED" || s === "CONNECTION_ERROR") {
     colorStyles = "bg-rose-50 text-rose-700 border-rose-200";
   } else if (s === "EXECUTING" || s === "SCHEDULED" || s === "IN_PROGRESS") {
     colorStyles = "bg-sky-50 text-sky-700 border-sky-200";

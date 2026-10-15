@@ -1,0 +1,613 @@
+{
+  "character": {
+    "name": "Orbit",
+    "version": "3.1.0",
+    "source": "frontend/src/components/agent/orbit/OrbitRig.tsx",
+    "reference": "references/character-design-sheet-light.png"
+  },
+  "technique": "Layered SVG rig with 3D shading (radial-gradient base, blue rim light, specular highlights, ambient occlusion, gradient glow halos; no blur filters) and per-joint springs; no sprite swapping",
+  "parts": [
+    "antenna",
+    "antenna_orb",
+    "blush",
+    "cape",
+    "cape_collar",
+    "cape_tail",
+    "chest_badge",
+    "chest_emblem",
+    "core_light",
+    "ear_pods",
+    "eye_sparkles",
+    "eyelids",
+    "eyes",
+    "face_screen",
+    "fingers",
+    "forearm_l",
+    "forearm_r",
+    "glowing_soles",
+    "hand_l",
+    "hand_r",
+    "head",
+    "helmet",
+    "hover_feet",
+    "iris",
+    "mouth",
+    "neck",
+    "pupils",
+    "scarf_collar",
+    "shadow",
+    "thrusters",
+    "thumb",
+    "torso",
+    "upper_arm_l",
+    "upper_arm_r"
+  ],
+  "hand_shapes": [
+    "mitten",
+    "point",
+    "open",
+    "fist"
+  ],
+  "eye_shapes": [
+    "open",
+    "happy",
+    "closed",
+    "wide",
+    "focused",
+    "sad",
+    "squint"
+  ],
+  "mouth_shapes": [
+    "smile",
+    "grin",
+    "open",
+    "o",
+    "flat",
+    "frown",
+    "wavy",
+    "talk"
+  ],
+  "dock_size_px": {
+    "compact": 64,
+    "dock": 100
+  },
+  "reduced_motion": "joints snap to pose; no hover, blink, travel spring, wave, ripple or rotation loops; travel becomes an instant reposition",
+  "timers_allowed_for": [
+    "blink",
+    "breathe",
+    "hover",
+    "curious tilt",
+    "antenna sway"
+  ],
+  "never_timer_driven": [
+    "thinking",
+    "working",
+    "clicking",
+    "typing",
+    "success",
+    "error",
+    "needs_confirmation"
+  ],
+  "not_implemented": {
+    "dive": "planned playful idle; not implemented",
+    "swim": "planned playful idle; not implemented",
+    "walk": "Orbit hovers/flies; no walk cycle"
+  },
+  "states": {
+    "idle": {
+      "eyes": "open",
+      "mouth": "smile",
+      "hands": [
+        "mitten",
+        "mitten"
+      ],
+      "motions": [
+        "float",
+        "breathe"
+      ],
+      "extras": [],
+      "core": "#00D4FF",
+      "trigger": "no active task; default"
+    },
+    "curious": {
+      "eyes": "open",
+      "mouth": "o",
+      "hands": [
+        "mitten",
+        "mitten"
+      ],
+      "motions": [
+        "float",
+        "breathe",
+        "tilt"
+      ],
+      "extras": [],
+      "core": "#00D4FF",
+      "trigger": "idle personality (timer-allowed)"
+    },
+    "greeting": {
+      "eyes": "happy",
+      "mouth": "grin",
+      "hands": [
+        "mitten",
+        "open"
+      ],
+      "motions": [
+        "float",
+        "wave"
+      ],
+      "extras": [],
+      "core": "#00D4FF",
+      "trigger": "preview / future greeting gesture"
+    },
+    "resting": {
+      "eyes": "open",
+      "mouth": "flat",
+      "hands": [
+        "mitten",
+        "mitten"
+      ],
+      "motions": [
+        "float",
+        "breathe"
+      ],
+      "extras": [
+        "zz"
+      ],
+      "core": "#00D4FF",
+      "trigger": "long idle (timer-allowed)"
+    },
+    "waking": {
+      "eyes": "wide",
+      "mouth": "o",
+      "hands": [
+        "mitten",
+        "mitten"
+      ],
+      "motions": [
+        "float",
+        "breathe"
+      ],
+      "extras": [],
+      "core": "#00D4FF",
+      "trigger": "activation"
+    },
+    "listening": {
+      "eyes": "wide",
+      "mouth": "smile",
+      "hands": [
+        "mitten",
+        "mitten"
+      ],
+      "motions": [
+        "float",
+        "breathe"
+      ],
+      "extras": [],
+      "core": "#00D4FF",
+      "trigger": "microphone recognition onstart (real)"
+    },
+    "transcribing": {
+      "eyes": "focused",
+      "mouth": "flat",
+      "hands": [
+        "mitten",
+        "mitten"
+      ],
+      "motions": [
+        "float",
+        "scan"
+      ],
+      "extras": [],
+      "core": "#00D4FF",
+      "trigger": "recognition interim results"
+    },
+    "understanding": {
+      "eyes": "focused",
+      "mouth": "o",
+      "hands": [
+        "mitten",
+        "mitten"
+      ],
+      "motions": [
+        "float",
+        "nod"
+      ],
+      "extras": [],
+      "core": "#00D4FF",
+      "trigger": ""
+    },
+    "thinking": {
+      "eyes": "focused",
+      "mouth": "flat",
+      "hands": [
+        "mitten",
+        "fist"
+      ],
+      "motions": [
+        "float",
+        "breathe"
+      ],
+      "extras": [
+        "thinking_dots"
+      ],
+      "core": "#A78BFA",
+      "trigger": "agent.turn_stage THINKING/UNDERSTANDING while a model request is in flight"
+    },
+    "speaking": {
+      "eyes": "open",
+      "mouth": "talk",
+      "hands": [
+        "mitten",
+        "open"
+      ],
+      "motions": [
+        "float",
+        "talk"
+      ],
+      "extras": [],
+      "core": "#00D4FF",
+      "trigger": "ttsAdapter start..end (real playback)"
+    },
+    "interrupted": {
+      "eyes": "wide",
+      "mouth": "flat",
+      "hands": [
+        "mitten",
+        "open"
+      ],
+      "motions": [
+        "float"
+      ],
+      "extras": [
+        "stop_glow"
+      ],
+      "core": "#FBBF24",
+      "trigger": "task INTERRUPT_REQUESTED"
+    },
+    "planning": {
+      "eyes": "focused",
+      "mouth": "flat",
+      "hands": [
+        "mitten",
+        "mitten"
+      ],
+      "motions": [
+        "float",
+        "breathe"
+      ],
+      "extras": [
+        "tablet"
+      ],
+      "core": "#00D4FF",
+      "trigger": "model CREATE_OR_REVISE_PLAN"
+    },
+    "moving": {
+      "eyes": "focused",
+      "mouth": "smile",
+      "hands": [
+        "mitten",
+        "mitten"
+      ],
+      "motions": [
+        "fly"
+      ],
+      "extras": [
+        "trail"
+      ],
+      "core": "#00D4FF",
+      "trigger": "orbitStage travel to a registered target"
+    },
+    "arriving": {
+      "eyes": "open",
+      "mouth": "smile",
+      "hands": [
+        "mitten",
+        "mitten"
+      ],
+      "motions": [
+        "float",
+        "breathe"
+      ],
+      "extras": [],
+      "core": "#00D4FF",
+      "trigger": "travel settle"
+    },
+    "pointing": {
+      "eyes": "open",
+      "mouth": "smile",
+      "hands": [
+        "mitten",
+        "point"
+      ],
+      "motions": [
+        "float",
+        "breathe"
+      ],
+      "extras": [],
+      "core": "#00D4FF",
+      "trigger": "orbitStage gesture point (show_result / focus_target)"
+    },
+    "clicking": {
+      "eyes": "focused",
+      "mouth": "smile",
+      "hands": [
+        "mitten",
+        "point"
+      ],
+      "motions": [
+        "float",
+        "tap"
+      ],
+      "extras": [
+        "ripple"
+      ],
+      "core": "#00D4FF",
+      "trigger": "orbitStage gesture tap before a press/open/navigate action"
+    },
+    "typing": {
+      "eyes": "focused",
+      "mouth": "flat",
+      "hands": [
+        "mitten",
+        "mitten"
+      ],
+      "motions": [
+        "float",
+        "type"
+      ],
+      "extras": [
+        "keyboard"
+      ],
+      "core": "#00D4FF",
+      "trigger": "orbitStage gesture type during connections.set_fields"
+    },
+    "inspecting": {
+      "eyes": "squint",
+      "mouth": "flat",
+      "hands": [
+        "mitten",
+        "mitten"
+      ],
+      "motions": [
+        "float",
+        "scan"
+      ],
+      "extras": [],
+      "core": "#00D4FF",
+      "trigger": "result inspection"
+    },
+    "waiting": {
+      "eyes": "open",
+      "mouth": "smile",
+      "hands": [
+        "mitten",
+        "mitten"
+      ],
+      "motions": [
+        "float",
+        "breathe"
+      ],
+      "extras": [],
+      "core": "#00D4FF",
+      "trigger": "waiting on a service"
+    },
+    "validating": {
+      "eyes": "squint",
+      "mouth": "flat",
+      "hands": [
+        "mitten",
+        "mitten"
+      ],
+      "motions": [
+        "float",
+        "scan"
+      ],
+      "extras": [],
+      "core": "#A78BFA",
+      "trigger": "gesture inspect"
+    },
+    "working": {
+      "eyes": "focused",
+      "mouth": "flat",
+      "hands": [
+        "mitten",
+        "mitten"
+      ],
+      "motions": [
+        "float",
+        "busy"
+      ],
+      "extras": [],
+      "core": "#00D4FF",
+      "trigger": "agent.turn_stage CALLING_TOOL"
+    },
+    "processing": {
+      "eyes": "focused",
+      "mouth": "flat",
+      "hands": [
+        "mitten",
+        "mitten"
+      ],
+      "motions": [
+        "float",
+        "breathe"
+      ],
+      "extras": [
+        "rings"
+      ],
+      "core": "#A78BFA",
+      "trigger": "CALLING_TOOL for schema scans"
+    },
+    "returning": {
+      "eyes": "open",
+      "mouth": "smile",
+      "hands": [
+        "mitten",
+        "mitten"
+      ],
+      "motions": [
+        "fly"
+      ],
+      "extras": [
+        "trail"
+      ],
+      "core": "#00D4FF",
+      "trigger": "orbitStage return"
+    },
+    "success": {
+      "eyes": "happy",
+      "mouth": "grin",
+      "hands": [
+        "open",
+        "open"
+      ],
+      "motions": [
+        "float",
+        "bounce"
+      ],
+      "extras": [],
+      "core": "#34D399",
+      "trigger": "agent.task_updated SUCCEEDED (verified)"
+    },
+    "celebrate": {
+      "eyes": "happy",
+      "mouth": "grin",
+      "hands": [
+        "open",
+        "open"
+      ],
+      "motions": [
+        "float",
+        "bounce"
+      ],
+      "extras": [
+        "sparkles"
+      ],
+      "core": "#34D399",
+      "trigger": "SUCCEEDED + celebrating emotion"
+    },
+    "partial_success": {
+      "eyes": "open",
+      "mouth": "flat",
+      "hands": [
+        "mitten",
+        "open"
+      ],
+      "motions": [
+        "float",
+        "breathe"
+      ],
+      "extras": [],
+      "core": "#FBBF24",
+      "trigger": "PARTIAL_SUCCESS"
+    },
+    "needs_input": {
+      "eyes": "open",
+      "mouth": "smile",
+      "hands": [
+        "mitten",
+        "open"
+      ],
+      "motions": [
+        "float",
+        "breathe"
+      ],
+      "extras": [],
+      "core": "#00D4FF",
+      "trigger": "WAITING_FOR_INPUT"
+    },
+    "needs_confirmation": {
+      "eyes": "open",
+      "mouth": "flat",
+      "hands": [
+        "mitten",
+        "open"
+      ],
+      "motions": [
+        "float",
+        "breathe"
+      ],
+      "extras": [],
+      "core": "#FBBF24",
+      "trigger": "WAITING_FOR_APPROVAL"
+    },
+    "warning": {
+      "eyes": "sad",
+      "mouth": "wavy",
+      "hands": [
+        "mitten",
+        "open"
+      ],
+      "motions": [
+        "float",
+        "breathe"
+      ],
+      "extras": [],
+      "core": "#FBBF24",
+      "trigger": "PARTIAL_SUCCESS / warning"
+    },
+    "error": {
+      "eyes": "sad",
+      "mouth": "frown",
+      "hands": [
+        "mitten",
+        "mitten"
+      ],
+      "motions": [
+        "float",
+        "shake"
+      ],
+      "extras": [],
+      "core": "#F87171",
+      "trigger": "FAILED (tool or model)"
+    },
+    "paused": {
+      "eyes": "open",
+      "mouth": "flat",
+      "hands": [
+        "mitten",
+        "mitten"
+      ],
+      "motions": [
+        "float",
+        "breathe"
+      ],
+      "extras": [],
+      "core": "#FBBF24",
+      "trigger": "PAUSED / PAUSE_REQUESTED"
+    },
+    "cancelled": {
+      "eyes": "open",
+      "mouth": "flat",
+      "hands": [
+        "open",
+        "mitten"
+      ],
+      "motions": [
+        "float",
+        "breathe"
+      ],
+      "extras": [],
+      "core": "#94A3B8",
+      "trigger": "CANCELLED"
+    },
+    "offline": {
+      "eyes": "closed",
+      "mouth": "flat",
+      "hands": [
+        "mitten",
+        "mitten"
+      ],
+      "motions": [
+        "float",
+        "breathe"
+      ],
+      "extras": [
+        "zz"
+      ],
+      "core": "#94A3B8",
+      "trigger": "FAILED with service error (model or AI service unavailable)"
+    }
+  }
+}

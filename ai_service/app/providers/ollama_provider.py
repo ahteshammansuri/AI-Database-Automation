@@ -1,9 +1,15 @@
 import json
 import re
+import threading
 import time
 from typing import Dict, Any, List, Optional
 import httpx
-from ai_service.app.providers.base import BaseAIProvider
+from ai_service.app.providers.base import (
+    BaseAIProvider,
+    ProviderError,
+    ProviderTimeoutError,
+    ProviderUnavailableError,
+)
 from ai_service.app.config import settings
 
 
@@ -68,17 +74,14 @@ class OllamaProvider(BaseAIProvider):
                     ) if target_model else True
 
                     if not model_found:
-                        target_model = models[0]
-                        self.model = target_model
-
-                    return {
-                        "available": True,
-                        "daemon_running": True,
-                        "model_installed": True,
-                        "latency_ms": latency_ms,
-                        "models": models,
-                        "message": f"Connected to local Ollama. Active model '{target_model}' is ready."
-                    }
+                        return {
+                            "available": False,
+                            "daemon_running": True,
+                            "model_installed": False,
+                            "latency_ms": latency_ms,
+                            "models": models,
+                            "message": f"Ollama is running, but model '{target_model}' is not installed. Run 'ollama pull {target_model}' or pick one of: {', '.join(models)}."
+                        }
 
                     return {
                         "available": True,
@@ -268,481 +271,138 @@ class OllamaProvider(BaseAIProvider):
 
             return parsed
 
-    def plan_agent_turn(
-        self,
-        goal: str,
-        context: Dict[str, Any],
-        available_tools: List[Dict[str, Any]],
-        rag_chunks: List[Dict[str, Any]]
-    ) -> Dict[str, Any]:
-        """
-        Invokes local Ollama LLM to reason about the user turn, extract slots, and select tools.
-        Dynamically handles greetings, RAG-grounded product queries, general chat, and autonomous actions.
-        """
-        lower_goal = goal.strip().lower()
+    # ------------------------------------------------------------------
+    # Agent loop: structured chat
+    # ------------------------------------------------------------------
 
-        # 1. Prohibited destructive SQL check (Zero Tolerance Guardrail)
-        if re.search(r"\b(drop|truncate|alter|delete\s+from|raw\s+sql|exec\s+raw)\b", lower_goal):
-            return {
-                "task_type": "POLICY_REJECTED",
-                "outcome": "DISALLOWED_BY_POLICY",
-                "extracted_slots": {},
-                "explanation": "Destructive SQL operations (DROP, TRUNCATE, DELETE, ALTER, and arbitrary SQL execution) are strictly prohibited on customer target databases by platform security guardrails.",
-                "steps": []
-            }
-
-        # 2. Status / List Connections intent check (takes precedence over add-connection keywords)
-        is_status_query = bool(re.search(r"\b(status|health|check.*conn|conn.*status|list|show|view|existing)\b", lower_goal)) and not any(k in lower_goal for k in ["add ", "create ", "new ", "save "])
-        existing_connections = context.get("connections", [])
-        if is_status_query and any(k in lower_goal for k in ["connect", "database", "db", "status"]):
-            conn_count = len(existing_connections)
-            if conn_count == 0:
-                explanation = "You don't have any database connections configured in your workspace yet. Let's set one up! I can open the connection setup form for you right now."
-            else:
-                conn_names = ", ".join([f"'{c.get('name', 'Database')}' ({c.get('host', '127.0.0.1')}:{c.get('database_name', '')})" for c in existing_connections])
-                explanation = f"You have {conn_count} configured database connection(s): {conn_names}. All connection profiles are stored securely."
-
-            return {
-                "task_type": "LIST_CONNECTIONS",
-                "outcome": "SUPPORTED_AND_SPECIFIED",
-                "extracted_slots": {},
-                "explanation": explanation,
-                "steps": [
-                    {
-                        "tool": "list_database_connections",
-                        "label": "Listing Database Connections",
-                        "args": {},
-                        "risk_level": "LOW",
-                        "requires_confirmation": False
-                    }
-                ]
-            }
-
-        # 3. Product / Project Inquiries ("What is this project about?", "How does automation work?", etc.) -> RAG + Ollama
-        is_project_query = any(k in lower_goal for k in [
-            "what is this project", "about this project", "project about", "what does this app do",
-            "what is dataauto", "how does this work", "how do automations work", "what is this platform",
-            "explain the platform", "what databases", "tell me about this project", "what can this project do"
-        ])
-        if is_project_query:
-            rag_context_text = ""
-            if rag_chunks:
-                rag_context_text = "\n".join([f"- {c.get('text', '')[:250]}" for c in rag_chunks])
-            else:
-                rag_context_text = (
-                    "DataAuto is an AI-Powered Multi-User Database Automation Platform. "
-                    "It connects to MySQL databases, inspects schema, generates and schedules automated content/data publishing "
-                    "with email approvals, and features Orbit, an autonomous AI companion that operates the portal on the user's behalf."
-                )
-
-            # Query Ollama dynamically with RAG context
-            try:
-                dynamic_resp = self._call_ollama_chat(
-                    prompt=f"Context from documentation:\n{rag_context_text}\n\nUser Question: \"{goal}\"\nAnswer the question concisely in 2-3 friendly sentences as Orbit:",
-                    system="You are Orbit, the autonomous AI database automation assistant. Explain the platform accurately and warmly based on the documentation context. Speak in 2-3 sentences max."
-                )
-            except Exception:
-                dynamic_resp = (
-                    "This project is DataAuto, an AI-Powered Database Automation Platform! "
-                    "It lets you connect your MySQL databases, discover tables and schema, and run scheduled AI content workflows with human approvals. "
-                    "I'm Orbit, your autonomous AI assistant here to help navigate and run everything for you."
-                )
-
-            citations = [{"chunk_id": c.get("chunk_id", "doc"), "text": c.get("text", "")[:120]} for c in (rag_chunks or [])]
-            return {
-                "task_type": "PRODUCT_EXPLANATION",
-                "outcome": "CONVERSATIONAL_RESPONSE",
-                "extracted_slots": {},
-                "explanation": dynamic_resp,
-                "rag_citations": citations,
-                "steps": []
-            }
-
-        # 4. Conversational Greetings & Identity ("Hello", "Hey", "Who are you?", "How are you?") -> Dynamic Ollama
-        is_greeting_or_identity = bool(re.search(r"^(hi|hello|hey|good\s+(morning|afternoon|evening)|howdy|greetings|how\s+are\s+you|who\s+are\s+you|what\s+is\s+your\s+name|what\s+can\s+you\s+do)\b", lower_goal))
-        if is_greeting_or_identity:
-            try:
-                dynamic_resp = self._call_ollama_chat(
-                    prompt=f"User says: \"{goal}\". Greet them or answer who you are and what you do, and offer to help with database connections or automations in 1-2 friendly sentences.",
-                    system="You are Orbit, a friendly autonomous AI mascot and database assistant. Speak warmly, naturally, and concisely in 1-2 sentences. Never output JSON."
-                )
-            except Exception:
-                dynamic_resp = "Hello! I'm Orbit, your autonomous AI database assistant. I can help you connect MySQL databases, inspect schemas, create automated workflows, and navigate the platform. What would you like to work on?"
-
-            return {
-                "task_type": "GREETING",
-                "outcome": "CONVERSATIONAL_RESPONSE",
-                "extracted_slots": {},
-                "explanation": dynamic_resp,
-                "steps": []
-            }
-
-        # 5. Extract connection slots from utterance
-        accumulated = context.get("accumulated_slots", {})
-        pre_extracted: Dict[str, Any] = {}
-        host_m = re.search(r"\bhost\s*(?:is|=|:)?\s*([a-zA-Z0-9\.\-_]+)", lower_goal)
-        if host_m:
-            pre_extracted["host"] = host_m.group(1).strip()
-        elif "127.0.0.1" in lower_goal or "localhost" in lower_goal:
-            pre_extracted["host"] = "127.0.0.1"
-
-        port_m = re.search(r"\bport\s*(?:is|=|:)?\s*(\d+)", lower_goal)
-        if port_m:
-            pre_extracted["port"] = int(port_m.group(1))
-
-        db_candidates = re.findall(r"(?:database|db)(?:\s+name)?\s*(?:is|=|:|\s+named|\s+called)?\s*['\"]?([a-zA-Z0-9_\-]+)['\"]?", lower_goal)
-        for cand in db_candidates:
-            if cand not in ["on", "with", "for", "in", "to", "at", "and", "connection", "profile", "server", "named", "called", "is"]:
-                pre_extracted["database"] = cand
-                break
-
-        user_candidates = re.findall(r"(?:username|user)\s*(?:is|=|:|\s+named|\s+called)?\s*['\"]?([a-zA-Z0-9_\-]+)['\"]?", lower_goal)
-        for cand in user_candidates:
-            if cand not in ["on", "with", "for", "in", "to", "at", "and", "named", "called", "is"]:
-                pre_extracted["username"] = cand
-                break
-
-        name_m = re.search(r"(?:connection\s+)?name\s*(?:is|=|:)?\s*['\"]([^'\"]+)['\"]", goal, re.IGNORECASE)
-        if name_m:
-            pre_extracted["name"] = name_m.group(1).strip()
-
-        combined_slots = {**accumulated, **pre_extracted}
-
-        # 6. Actionable Database Connection Intent ("I want to connect this database", "Connect to MySQL", etc.)
-        is_connect_action = any(k in lower_goal for k in ["connect", "add connection", "new database", "link database", "hook up mysql", "connect this database"])
-        if is_connect_action:
-            host_val = combined_slots.get("host", "127.0.0.1")
-            port_val = combined_slots.get("port", 3306)
-            db_val = combined_slots.get("database", "")
-            user_val = combined_slots.get("username", "root")
-            password_val = combined_slots.get("password", "")
-            name_val = combined_slots.get("name", db_val or "MySQL Target")
-
-            missing = []
-            if not db_val:
-                missing.append("database")
-            if not password_val and not combined_slots.get("password_hash"):
-                missing.append("password")
-            if not user_val:
-                missing.append("username")
-
-            steps = [
-                {
-                    "tool": "test_database_connection",
-                    "label": f"Testing Connection to MySQL on {host_val}:{port_val}",
-                    "args": {
-                        "host": host_val,
-                        "port": port_val,
-                        "database": db_val,
-                        "username": user_val,
-                        "password": password_val or ""
-                    },
-                    "risk_level": "LOW",
-                    "requires_confirmation": False
-                },
-                {
-                    "tool": "save_database_connection",
-                    "label": f"Saving Connection Profile '{name_val}'",
-                    "args": {
-                        "name": name_val,
-                        "host": host_val,
-                        "port": port_val,
-                        "database": db_val,
-                        "username": user_val,
-                        "password": password_val or "",
-                        "ssl_mode": "prefer"
-                    },
-                    "risk_level": "HIGH",
-                    "requires_confirmation": False
-                },
-                {
-                    "tool": "scan_database_schema",
-                    "label": "Discovering Database Schema & Tables",
-                    "args": {"connection_id": 0},
-                    "risk_level": "LOW",
-                    "requires_confirmation": False
-                }
-            ]
-
-            if missing:
-                first_missing = missing[0]
-                if first_missing == "password":
-                    question = f"What is the credentials password for database user '{user_val or 'root'}'?"
-                elif first_missing == "database":
-                    question = "Please enter your connection credentials: what is the name of the MySQL database you'd like to connect?"
-                elif first_missing == "username":
-                    question = "Please provide your database credentials username to connect to the database:"
-                else:
-                    question = f"Please enter your database credentials: {first_missing} for this connection:"
-
-                return {
-                    "task_type": "ADD_CONNECTION",
-                    "outcome": "MISSING_INFORMATION",
-                    "requires_input": True,
-                    "secure_input_type": "database_credentials",
-                    "question": question,
-                    "missing_fields": missing,
-                    "extracted_slots": combined_slots,
-                    "explanation": f"Missing required connection parameter: {first_missing}.",
-                    "steps": steps
-                }
-
-            return {
-                "task_type": "ADD_CONNECTION",
-                "outcome": "SUPPORTED_AND_SPECIFIED",
-                "extracted_slots": combined_slots,
-                "explanation": f"Ready to verify and connect to MySQL database '{db_val}' on {host_val}:{port_val}.",
-                "steps": steps
-            }
-
-        # 7. Schema Scan Intent
-        if any(k in lower_goal for k in ["scan", "schema", "tables", "columns", "inspect schema"]):
-            conn_id = combined_slots.get("connection_id") or (existing_connections[0]["id"] if existing_connections else 1)
-            return {
-                "task_type": "SCAN_SCHEMA",
-                "outcome": "SUPPORTED_AND_SPECIFIED",
-                "extracted_slots": combined_slots,
-                "explanation": f"Navigating to Schema Explorer to inspect tables and structure for connection #{conn_id}.",
-                "steps": [
-                    {
-                        "tool": "scan_database_schema",
-                        "label": f"Scanning Database Schema for Connection #{conn_id}",
-                        "args": {"connection_id": conn_id},
-                        "risk_level": "LOW",
-                        "requires_confirmation": False
-                    }
-                ]
-            }
-
-        # 8. Automation & Content Scheduling Intents
-        if any(k in lower_goal for k in ["automation", "automat", "blog", "schedule", "publish daily", "article", "post daily", "post weekly"]):
-            conn_id = combined_slots.get("connection_id")
-            if not conn_id:
-                conn_id = existing_connections[0]["id"] if existing_connections else 1
-
-            topic = "electric cars" if ("electric car" in lower_goal or "car" in lower_goal) else (combined_slots.get("topic") or "General Insights")
-            cat_match = re.search(r"category\s+([A-Za-z0-9_-]+)", goal, re.IGNORECASE)
-            cat = cat_match.group(1).strip() if cat_match else (combined_slots.get("category") or "Cars")
-
-            page_ctx = combined_slots.get("page_context") or {}
-            target_table = "posts"
-            if isinstance(page_ctx, dict) and page_ctx.get("activeEntity", {}).get("name"):
-                target_table = page_ctx["activeEntity"]["name"]
-            elif isinstance(page_ctx, dict) and page_ctx.get("activeEntity", {}).get("id"):
-                target_table = str(page_ctx["activeEntity"]["id"])
-
-            return {
-                "task_type": "CREATE_AUTOMATION",
-                "outcome": "SUPPORTED_AND_SPECIFIED",
-                "extracted_slots": {**combined_slots, "category": cat, "topic": topic, "target_table": target_table},
-                "explanation": f"Creating automation for topic '{topic}' in category '{cat}' targeting table '{target_table}'.",
-                "steps": [
-                    {
-                        "tool": "create_automation_draft",
-                        "label": f"Creating Automation for '{topic}'",
-                        "args": {
-                            "name": f"{topic.title()} Automation",
-                            "connection_id": conn_id,
-                            "target_table": target_table,
-                            "topic_prompt": topic,
-                            "category_name": cat,
-                            "schedule_type": "DAILY",
-                            "generation_time": "08:00",
-                            "publication_time": "09:00",
-                            "require_approval": True
-                        },
-                        "risk_level": "MEDIUM",
-                        "requires_confirmation": True
-                    }
-                ]
-            }
-
-        # 9. General Open-Ended Chat via Ollama (For anything else: questions, chit-chat, etc.)
+    def _installed_models(self, timeout: float = 5.0) -> List[str]:
         try:
-            dynamic_resp = self._call_ollama_chat(
-                prompt=f"User says: \"{goal}\". Reply helpfully, warmly, and concisely as Orbit (1-3 sentences).",
-                system="You are Orbit, an autonomous AI companion mascot for the database automation platform. Answer helpfully and naturally. Speak in 1-3 sentences max. Never output raw code or JSON."
+            with httpx.Client(timeout=timeout) as client:
+                res = client.get(f"{self.base_url}/api/tags")
+        except httpx.HTTPError as e:
+            raise ProviderUnavailableError(f"Ollama is not reachable at {self.base_url} ({type(e).__name__}).")
+        if res.status_code != 200:
+            raise ProviderUnavailableError(f"Ollama returned HTTP {res.status_code} when listing models.")
+        return [m.get("name", "") for m in res.json().get("models", [])]
+
+    def _assert_model_installed(self) -> None:
+        if getattr(self, "_model_verified", False):
+            return
+        models = self._installed_models()
+        wanted = self.model
+        found = any(
+            m == wanted or m == f"{wanted}:latest" or (wanted.endswith(":latest") and m == wanted[:-7])
+            for m in models
+        )
+        if not found:
+            installed = ", ".join(models) or "none"
+            raise ProviderUnavailableError(
+                f"Ollama model '{wanted}' is not installed (installed: {installed}). "
+                f"Run 'ollama pull {wanted}' or select an installed model in AI Providers."
             )
-            return {
-                "task_type": "GENERAL_CHAT",
-                "outcome": "CONVERSATIONAL_RESPONSE",
-                "extracted_slots": combined_slots,
-                "explanation": dynamic_resp,
-                "steps": []
-            }
-        except Exception:
-            pass
+        self._model_verified = True
 
-        # Fallback to structured tool planning if requested
-        return {
-            "task_type": "GENERAL_QUERY",
-            "outcome": "SUPPORTED_AND_SPECIFIED",
-            "extracted_slots": combined_slots,
-            "explanation": "Checking workspace status and active workflows.",
-            "steps": [
-                {
-                    "tool": "get_dashboard_summary",
-                    "label": "Retrieving Platform State",
-                    "args": {},
-                    "risk_level": "LOW",
-                    "requires_confirmation": False
-                }
-            ]
-        }
-
-    def _call_ollama_chat(self, prompt: str, system: str, max_tokens: int = 70) -> str:
+    def _stream_chat(self, payload: Dict[str, Any], ttft: float, idle: float, deadline: float) -> Dict[str, Any]:
         """
-        Fast direct conversational inference with Ollama.
-        Keeps system and prompt compact for fast CPU responses.
+        Stream a chat response. A watchdog closes the connection if the first token takes
+        longer than `ttft`, if no chunk arrives for `idle` seconds, or once `deadline`
+        (monotonic) passes. Closing the stream makes Ollama stop generating, so a timed-out
+        request never keeps the model busy for the next one.
         """
-        payload = {
-            "model": self.model,
-            "prompt": prompt,
-            "system": system,
-            "stream": False,
-            "options": {
-                "temperature": 0.35,
-                "num_predict": max_tokens,
-                "num_thread": 4,
-                "keep_alive": "30m"
-            }
-        }
-        with httpx.Client(timeout=90.0) as client:
-            res = client.post(f"{self.base_url}/api/generate", json=payload)
-            if res.status_code == 200:
-                text = res.json().get("response", "").strip()
-                if text:
-                    # Strip any accidental wrapping quotes
-                    if text.startswith('"') and text.endswith('"'):
-                        text = text[1:-1].strip()
-                    return text
-            raise RuntimeError(f"Ollama returned HTTP {res.status_code}")
+        state = {"first": None, "last": time.monotonic(), "reason": None, "done": False}
+        start = time.monotonic()
+        content_parts: List[str] = []
+        final: Dict[str, Any] = {}
 
-    def synthesize_agent_response(
+        def watchdog(response: httpx.Response) -> None:
+            while not state["done"]:
+                time.sleep(0.5)
+                now = time.monotonic()
+                if now >= deadline:
+                    state["reason"] = "deadline"
+                elif state["first"] is None and now - start > ttft:
+                    state["reason"] = "first_token"
+                elif state["first"] is not None and now - state["last"] > idle:
+                    state["reason"] = "idle"
+                if state["reason"]:
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
+                    return
+
+        try:
+            with httpx.Client(timeout=httpx.Timeout(connect=10.0, read=None, write=30.0, pool=30.0)) as client:
+                with client.stream("POST", f"{self.base_url}/api/chat", json=payload) as res:
+                    if res.status_code == 404:
+                        raise ProviderUnavailableError(f"Ollama model '{self.model}' was not found.")
+                    if res.status_code != 200:
+                        raise ProviderError(f"Ollama chat returned HTTP {res.status_code}.")
+                    dog = threading.Thread(target=watchdog, args=(res,), daemon=True)
+                    dog.start()
+                    try:
+                        for line in res.iter_lines():
+                            if not line:
+                                continue
+                            chunk = json.loads(line)
+                            piece = (chunk.get("message") or {}).get("content", "")
+                            now = time.monotonic()
+                            if piece:
+                                if state["first"] is None:
+                                    state["first"] = now
+                                content_parts.append(piece)
+                            state["last"] = now
+                            if chunk.get("done"):
+                                final = chunk
+                                break
+                    finally:
+                        state["done"] = True
+        except (ProviderError,):
+            raise
+        except (httpx.HTTPError, json.JSONDecodeError, RuntimeError) as e:
+            if not state["reason"]:
+                if isinstance(e, httpx.ConnectError):
+                    raise ProviderUnavailableError(f"Ollama is not reachable at {self.base_url}.")
+                raise ProviderError(f"Ollama stream failed ({type(e).__name__}).")
+
+        if state["reason"]:
+            waited = int(time.monotonic() - start)
+            raise ProviderTimeoutError({
+                "deadline": f"The local model did not finish within the time budget ({waited}s); the request was cancelled.",
+                "first_token": f"The local model did not start answering within {int(ttft)}s (it may be busy or the machine is overloaded).",
+                "idle": f"The local model stopped producing output for {int(idle)}s; the request was cancelled.",
+            }[state["reason"]])
+        final["content"] = "".join(content_parts)
+        return final
+
+    def chat_structured(
         self,
-        goal: str,
-        executed_steps: List[Dict[str, Any]],
-        final_status: str,
-        domain_data: Optional[Dict[str, Any]] = None
+        messages: List[Dict[str, str]],
+        json_schema: Dict[str, Any],
+        timeout: float = 120.0,
+        temperature: float = 0.2,
+        deadline: Optional[float] = None,
+        **_: Any,
     ) -> str:
-        """
-        Synthesizes a truthful, concise spoken summary based on verified tool executions.
-        """
-        system_prompt = (
-            "You are Orbit, the friendly voice-first AI assistant for the database automation portal.\n"
-            "Generate a concise, natural, truthful spoken response (1-2 sentences maximum) summarizing what was actually accomplished.\n"
-            "Rules:\n"
-            "- Speak naturally as a helpful partner.\n"
-            "- Be truthful: only claim success for steps that actually succeeded.\n"
-            "- Do not recite technical JSON or IDs.\n"
-            "- If a database was connected, mention the database name and that connectivity was verified.\n"
-            "- If an error occurred, explain the real problem clearly and concisely."
-        )
-
-        steps_summary = []
-        for s in executed_steps:
-            st = s.get("step", s.get("tool", "action"))
-            res = s.get("result", {})
-            succ = res.get("success", False)
-            summ = res.get("safe_summary", res.get("error", "Executed"))
-            steps_summary.append(f"- {st}: {'Succeeded' if succ else 'Failed'} ({summ})")
-
-        prompt = (
-            f"User Goal: \"{goal}\"\n"
-            f"Final Status: {final_status}\n"
-            f"Executed Steps & Outcomes:\n" + "\n".join(steps_summary) + "\n"
-            f"Domain Data: {json.dumps(domain_data or {})}"
-        )
-
+        self._assert_model_installed()
         payload = {
             "model": self.model,
-            "prompt": prompt,
-            "system": system_prompt,
-            "stream": False,
-            "options": {
-                "temperature": 0.6,
-                "num_predict": 60,
-                "keep_alive": "30m"
-            }
+            "messages": messages,
+            "format": json_schema,
+            "stream": True,
+            "keep_alive": "30m",
+            # Short JSON decisions; a smaller context lowers memory (and swap) pressure on CPU-only machines.
+            "options": {"temperature": temperature, "num_ctx": settings.AGENT_NUM_CTX, "num_predict": 256},
         }
-
-        try:
-            with httpx.Client(timeout=3.0) as client:
-                res = client.post(f"{self.base_url}/api/generate", json=payload)
-                if res.status_code == 200:
-                    text = res.json().get("response", "").strip()
-                    if text:
-                        return text
-        except Exception:
-            pass
-
-        if final_status in ["SUCCEEDED", "COMMITTED"]:
-            return f"I have successfully completed your request and verified the results in your portal."
-        elif final_status == "FAILED":
-            return f"I encountered an issue executing your request. Please check the activity timeline for details."
-        return f"Operation processed with status {final_status}."
-
-    def evaluate_correction(
-        self,
-        correction_text: str,
-        active_task_status: str,
-        current_step: Optional[str] = None,
-        active_plan: Optional[List[Dict[str, Any]]] = None,
-        target_resource_type: Optional[str] = None,
-        target_resource_id: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        """
-        Invokes local Ollama model to evaluate mid-turn user interruptions or parameter corrections.
-        """
-        system_prompt = (
-            "You are an expert AI agent state analyzer. A user is intervening during an autonomous database automation task.\n"
-            "Analyze the user's correction utterance and determine the exact required action:\n"
-            "- 'STOP': User explicitly wants to stop, cancel, halt, or abort execution.\n"
-            "- 'PAUSE': User asks to wait, hold on, or pause.\n"
-            "- 'RESUME': User asks to continue or proceed.\n"
-            "- 'CHANGE_PARAMETER': User wants to change a specific parameter (e.g. category, topic, frequency, host, port).\n"
-            "- 'REPLAN': User wants to redo or significantly change the workflow.\n\n"
-            "Respond ONLY with a JSON object:\n"
-            "{\n"
-            '  "action": "STOP" | "PAUSE" | "RESUME" | "CHANGE_PARAMETER" | "REPLAN",\n'
-            '  "revised_parameter": "category_name" | "topic_prompt" | "schedule_type" | null,\n'
-            '  "new_value": "parsed_new_value_or_null",\n'
-            '  "compensating_needed": true | false,\n'
-            '  "explanation": "brief natural explanation"\n'
-            "}"
-        )
-
-        user_prompt = (
-            f"Active Task Status: {active_task_status}\n"
-            f"Current Executing Step: {current_step or 'None'}\n"
-            f"User Correction Utterance: \"{correction_text}\""
-        )
-
-        payload = {
-            "model": self.model,
-            "prompt": f"{system_prompt}\n\nTask:\n{user_prompt}",
-            "stream": False,
-            "format": "json",
-            "options": {
-                "temperature": 0.1,
-                "top_p": 0.9,
-            }
-        }
-
-        try:
-            with httpx.Client(timeout=4.0) as client:
-                res = client.post(f"{self.base_url}/api/generate", json=payload)
-                if res.status_code == 200:
-                    raw_text = res.json().get("response", "").strip()
-                    cleaned = self._clean_json_output(raw_text)
-                    data = json.loads(cleaned)
-                    if isinstance(data, dict) and "action" in data:
-                        return data
-        except Exception:
-            pass
-
-        raise NotImplementedError("Ollama model unavailable for evaluate_correction")
-
+        deadline = deadline if deadline is not None else time.monotonic() + timeout
+        data = self._stream_chat(payload, ttft=settings.AGENT_FIRST_TOKEN_TIMEOUT,
+                                 idle=settings.AGENT_IDLE_TIMEOUT, deadline=deadline)
+        content = data.get("content", "")
+        if not content.strip():
+            raise ProviderError("Ollama returned an empty response.")
+        if data.get("done_reason") == "length":
+            raise ProviderError("Ollama response was cut off (context or token limit reached).")
+        return content
 
     @staticmethod
     def _clean_json_output(raw_text: str) -> str:

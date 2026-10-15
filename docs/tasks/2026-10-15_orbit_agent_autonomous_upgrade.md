@@ -1,5 +1,10 @@
 # Date: 2026-10-15 — Orbit Autonomous AI Agent Full Upgrade Plan
 
+> **Correction (2026-10-15, later session):** The "DONE" marks below were not accurate. A code audit
+> (`docs/orbit-agent/CURRENT_STATE_AUDIT.md`) found the planner was still a keyword router, there was
+> no observe→act loop, secrets were persisted in task plans, and the character was PNG swapping.
+> The items below are superseded by the "Orbit agent loop upgrade" phases at the bottom of this file.
+
 ## Overview
 This document serves as the persistent source of truth for the complete upgrade of the **Orbit AI Agent** across the React Frontend, Laravel Control Plane, and Python/FastAPI AI Microservice.
 
@@ -87,3 +92,18 @@ Even if chat context is reset, pruned, or restarted, all progress and pending it
 4. **Production Frontend Build (`npm run build`):**
    - **Clean TypeScript compilation (`tsc -b`) and Vite production bundle (0 errors, 0 warnings).**
 
+
+---
+
+## Orbit agent loop upgrade (current tracker)
+
+Plan: `/home/acquaint/.claude/plans/pasted-content-id-f623-master-compiled-sparrow.md` (approved).
+
+- [x] Phase 0 — Baseline + audit (`docs/orbit-agent/CURRENT_STATE_AUDIT.md`)
+- [x] Phase 1 — AI service decision protocol (`/v1/ai/agent/decide`), Ollama structured chat, keyword routers removed (ai_service/tests: 25 passed)
+- [x] Phase 2 — Laravel orchestrator loop, queued turns, registry metadata, SecretVault, policy gate (Laravel: 100 passed incl. 22 agent loop tests)
+- [x] Phase 3 — Frontend event-driven runtime, acknowledged UI bridge, semantic targets
+- [x] Phase 4 — Voice lifecycle, TTS queue, barge-in, secure capture
+- [x] Phase 5 — Layered SVG Orbit rig + behaviour state machine (frontend npm test: 24 passed)
+- [ ] Phase 6 — Product RAG doc + versioned indexing + hybrid retrieval (indexing/hybrid retrieval done in Phase 1; doc pending)
+- [ ] Phase 7 — Tests, docs, live acceptance

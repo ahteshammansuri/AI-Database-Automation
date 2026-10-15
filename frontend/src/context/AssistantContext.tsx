@@ -1,13 +1,15 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from "react";
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { api } from "../services/api";
 import { useLiveEvents } from "./LiveEventsContext";
 import { useToast } from "./ToastContext";
 import { CharacterState } from "../components/agent/AuraCoreCharacter";
-import { actionBridge } from "../services/actionBridge";
 import { redactSecretsFromUtterance } from "../services/secretRedactor";
 import { ttsAdapter } from "../services/ttsAdapter";
 import { pageStateService } from "../services/pageStateService";
+import { runUiAction } from "../services/orbitRuntime";
+import { orbitStage } from "../services/orbitStage";
 import soundManager from "../services/soundEffects";
+import { ACTIVE_TASK_STATUSES, TERMINAL_STATUSES, deriveCharacterState } from "../services/orbitBehavior";
 
 export interface AgentTimelineEvent {
   id: number;
@@ -19,30 +21,34 @@ export interface AgentTimelineEvent {
   created_at: string;
 }
 
+export type AgentTaskStatus =
+  | "QUEUED"
+  | "RUNNING"
+  | "WAITING_FOR_INPUT"
+  | "WAITING_FOR_APPROVAL"
+  | "PAUSE_REQUESTED"
+  | "PAUSED"
+  | "INTERRUPT_REQUESTED"
+  | "CANCELLED"
+  | "SUCCEEDED"
+  | "ANSWERED"
+  | "PARTIAL_SUCCESS"
+  | "FAILED"
+  | "SUPERSEDED"
+  | string;
+
 export interface AgentTask {
   id: number;
   task_type: string;
   goal: string;
-  status:
-    | "DRAFT"
-    | "READY"
-    | "QUEUED"
-    | "RUNNING"
-    | "WAITING_FOR_INPUT"
-    | "WAITING_FOR_PROVIDER"
-    | "WAITING_FOR_APPROVAL"
-    | "VALIDATING"
-    | "COMMITTING"
-    | "SUCCEEDED"
-    | "INTERRUPT_REQUESTED"
-    | "PAUSE_REQUESTED"
-    | "PAUSED"
-    | "CANCELLED"
-    | "PARTIAL_SUCCESS"
-    | "FAILED";
+  status: AgentTaskStatus;
+  stage?: string | null;
+  plan_version?: number;
   autonomy_level: "PREPARE_FOR_REVIEW" | "CONFIRM_CONSEQUENTIAL_CHANGES" | "AUTOMATIC_WITHIN_PERMISSIONS";
-  active_plan?: Array<{ tool: string; label: string; args: any }>;
+  active_plan?: Array<{ tool: string; label: string; args?: any }>;
   current_step_index: number;
+  pending_tool_call?: { name: string; args: any } | null;
+  last_decision?: any;
   target_resource_type?: string;
   target_resource_id?: string;
   error_message?: string;
@@ -58,19 +64,52 @@ export interface AgentMessage {
   tool_results?: any[];
   secure_input_type?: string | null;
   is_voice?: boolean;
+  meta?: any;
   created_at: string;
 }
+
+export type SpeechDelivery = "pending" | "speaking" | "spoken" | "failed" | "muted" | "cancelled";
+
+export interface OrbitSpeech {
+  messageId: number | null;
+  text: string;
+  emotion: string;
+  style: string;
+  source: "model" | "system";
+  isServiceError: boolean;
+  delivery: SpeechDelivery;
+  failureReason?: string;
+}
+
+/** Where a queued turn is waiting (from the server's real agent queue). */
+export interface QueueStatus {
+  position: number;
+  ahead: number;
+  running: number;
+  worker_alive: boolean;
+}
+
+export interface ToolActivity {
+  traceId: string;
+  tool: string;
+  label: string;
+  status: "running" | "succeeded" | "failed";
+  message?: string;
+}
+
+export { ACTIVE_TASK_STATUSES };
 
 interface AssistantContextType {
   isOpen: boolean;
   setIsOpen: (open: boolean) => void;
   toggleOpen: () => void;
-  // Deprecated drawer aliases preserved for compatibility
   isDrawerOpen: boolean;
   setIsDrawerOpen: (open: boolean) => void;
   toggleDrawer: () => void;
 
+  /** Derived from real runtime state (turn stage, task status, speech). */
   characterState: CharacterState;
+  /** Local, non-operational state only (e.g. listening). Ignored while Orbit is working. */
   setCharacterState: (st: CharacterState) => void;
 
   conversationId: number | null;
@@ -78,10 +117,18 @@ interface AssistantContextType {
   activeTask: AgentTask | null;
   timelineEvents: AgentTimelineEvent[];
   isLoading: boolean;
+  turnStage: string | null;
+  toolActivity: ToolActivity | null;
+  speech: OrbitSpeech | null;
+  narration: string | null;
+  isSpeaking: boolean;
+  secureInputRequest: { kind: string; taskId: number } | null;
+  queueStatus: QueueStatus | null;
+  awaitingConfirmation: { taskId: number; tool: string } | null;
   autonomyLevel: string;
   setAutonomyLevel: (lvl: string) => Promise<void>;
 
-  // Voice & Travel State
+  /** Kept for compatibility; travel is now driven by orbitStage events. */
   activeAnchor: string | null;
   setActiveAnchor: (anchor: string | null) => void;
   activeRoute: string | null;
@@ -92,10 +139,9 @@ interface AssistantContextType {
   setVoiceResponsesEnabled: (enabled: boolean) => void;
   toggleVoiceResponses: () => void;
 
-  // Actions
   sendMessage: (content: string, isVoice?: boolean, secureInputData?: any) => Promise<void>;
   handleVoiceTranscript: (transcript: string) => Promise<void>;
-  interruptTask: (action?: "STOP" | "PAUSE") => Promise<void>;
+  interruptTask: (action?: "STOP" | "PAUSE" | "RESUME") => Promise<void>;
   requestInterrupt: (action?: "STOP" | "PAUSE") => Promise<void>;
   requestPause: () => Promise<void>;
   correctTask: (correction: string) => Promise<void>;
@@ -106,481 +152,447 @@ interface AssistantContextType {
 
 const AssistantContext = createContext<AssistantContextType | undefined>(undefined);
 
+const SECURE_LABEL: Record<string, string> = { database_password: "database password", api_key: "API key" };
+
 export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [isOpen, setIsOpen] = useState<boolean>(false);
-  const [characterState, setCharacterState] = useState<CharacterState>("idle");
+  const [isOpen, setIsOpen] = useState(false);
+  const [localState, setLocalState] = useState<CharacterState>("idle");
   const [conversationId, setConversationId] = useState<number | null>(null);
   const conversationIdRef = useRef<number | null>(null);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [activeTask, setActiveTask] = useState<AgentTask | null>(null);
+  const activeTaskRef = useRef<AgentTask | null>(null);
   const [timelineEvents, setTimelineEvents] = useState<AgentTimelineEvent[]>([]);
-  const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [autonomyLevel, setAutonomyLevelState] = useState<string>("CONFIRM_CONSEQUENTIAL_CHANGES");
-
-  // Voice & Mascot Travel State
+  const [isLoading, setIsLoading] = useState(false);
+  const [turnStage, setTurnStage] = useState<string | null>(null);
+  const [toolActivity, setToolActivity] = useState<ToolActivity | null>(null);
+  const [speech, setSpeech] = useState<OrbitSpeech | null>(null);
+  const [narration, setNarration] = useState<string | null>(null);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [queueStatus, setQueueStatus] = useState<QueueStatus | null>(null);
+  const loadingConversation = useRef<Promise<number | null> | null>(null);
+  const [autonomyLevel, setAutonomyLevelState] = useState("CONFIRM_CONSEQUENTIAL_CHANGES");
   const [activeAnchor, setActiveAnchor] = useState<string | null>(null);
   const [activeRoute, setActiveRoute] = useState<string | null>(null);
-  const [lastSpokenSpeech, setLastSpokenSpeech] = useState<string>("");
-  const [voiceResponsesEnabled, setVoiceResponsesEnabled] = useState<boolean>(false);
+  const [voiceResponsesEnabled, setVoiceResponsesEnabled] = useState(true);
+  const voiceEnabledRef = useRef(true);
+  voiceEnabledRef.current = voiceResponsesEnabled;
+  const spokenMessageIds = useRef<Set<number>>(new Set());
+  const seenTimelineIds = useRef<Set<number>>(new Set());
 
-  const { addListener } = useLiveEvents();
+  const { addListener, setFastPolling, status: liveStatus } = useLiveEvents();
   const { toast } = useToast();
 
-  // Load existing conversation or create fresh one on init
-  const loadConversation = useCallback(async (): Promise<number | null> => {
-    const token = localStorage.getItem("auth_token");
-    if (!token) return null;
+  const setTask = useCallback((t: AgentTask | null) => {
+    activeTaskRef.current = t;
+    setActiveTask(t);
+  }, []);
 
+  const applyTimeline = useCallback((events: AgentTimelineEvent[]) => {
+    seenTimelineIds.current = new Set(events.map((e) => e.id));
+    setTimelineEvents(events);
+  }, []);
+
+  // ------------------------------------------------------------------
+  // Speech: one channel, only model/system text from the server, never canned.
+  // ------------------------------------------------------------------
+
+  useEffect(() => {
+    return ttsAdapter.subscribe((e) => {
+      if (e.type === "start") {
+        setIsSpeaking(true);
+        setSpeech((s) => (s && ttsAdapter.cleanSpokenText(s.text) === e.text ? { ...s, delivery: "speaking" } : s));
+      } else if (e.type === "end" || e.type === "cancelled" || e.type === "error") {
+        setIsSpeaking(false);
+        setSpeech((s) => {
+          if (!s || ttsAdapter.cleanSpokenText(s.text) !== e.text) return s;
+          if (e.type === "end") return { ...s, delivery: "spoken" };
+          if (e.type === "cancelled") return { ...s, delivery: "cancelled" };
+          return { ...s, delivery: "failed", failureReason: e.reason };
+        });
+      }
+    });
+  }, []);
+
+  const presentSpeech = useCallback((msg: AgentMessage | null, fallback?: Partial<OrbitSpeech>) => {
+    const text = msg?.content ?? fallback?.text ?? "";
+    if (!text) return;
+    const meta = msg?.meta || {};
+    const id = msg?.id ?? fallback?.messageId ?? null;
+    if (id !== null && spokenMessageIds.current.has(id)) return;
+    if (id !== null) spokenMessageIds.current.add(id);
+
+    const next: OrbitSpeech = {
+      messageId: id,
+      text,
+      emotion: meta.emotion_hint ?? fallback?.emotion ?? "neutral",
+      style: meta.response_style ?? fallback?.style ?? "conversational",
+      source: (meta.source ?? fallback?.source ?? "model") as "model" | "system",
+      isServiceError: Boolean(meta.is_service_error ?? fallback?.isServiceError),
+      delivery: voiceEnabledRef.current ? "pending" : "muted",
+    };
+    setSpeech(next);
+    setNarration(null);
+    if (voiceEnabledRef.current) void ttsAdapter.speak(text);
+  }, []);
+
+  // ------------------------------------------------------------------
+  // Loading persisted state (initial load, reconnect, after events)
+  // ------------------------------------------------------------------
+
+  const refreshConversation = useCallback(async (convId?: number | null) => {
+    const id = convId ?? conversationIdRef.current;
+    if (!id) return null;
+    try {
+      const res: any = await api.getAgentConversation(id);
+      const msgs: AgentMessage[] = res?.conversation?.messages || [];
+      setMessages(msgs);
+      const task: AgentTask | null = res?.active_task || null;
+      setTask(task);
+      setQueueStatus(res?.queue ?? null);
+      applyTimeline(task?.timeline_events || []);
+      setTurnStage(task && ACTIVE_TASK_STATUSES.includes(task.status) ? task.stage || "QUEUED" : null);
+      return { msgs, task };
+    } catch {
+      return null;
+    }
+  }, [applyTimeline, setTask]);
+
+  const loadConversation = useCallback((): Promise<number | null> => {
+    // Single flight: React StrictMode runs mount effects twice, which created duplicate conversations.
+    if (!loadingConversation.current) {
+      loadingConversation.current = loadConversationOnce().finally(() => {
+        loadingConversation.current = null;
+      });
+    }
+    return loadingConversation.current;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function loadConversationOnce(): Promise<number | null> {
+    if (!localStorage.getItem("auth_token")) return null;
     try {
       const listRes: any = await api.listAgentConversations();
       const list = listRes?.conversations || [];
       let targetId: number;
-
       if (list.length > 0) {
         targetId = list[0].id;
-        setConversationId(targetId);
-        conversationIdRef.current = targetId;
-        const detailRes: any = await api.getAgentConversation(targetId);
-        const msgs = detailRes?.conversation?.messages || [];
-        setMessages(msgs);
-        // Do NOT auto-speak on initial page load; keep assistant silent and let HUD display text
-        if (detailRes?.active_task) {
-          setActiveTask(detailRes.active_task);
-          setTimelineEvents(detailRes.active_task.timeline_events || []);
-        }
       } else {
-        const createRes: any = await api.createAgentConversation("Initial Consultation");
-        targetId = createRes.conversation.id;
-        setConversationId(targetId);
-        conversationIdRef.current = targetId;
-        setMessages([]);
+        const created: any = await api.createAgentConversation("Orbit");
+        targetId = created.conversation.id;
       }
+      setConversationId(targetId);
+      conversationIdRef.current = targetId;
+      const loaded = await refreshConversation(targetId);
+      // Never re-speak history on page load.
+      loaded?.msgs.forEach((m) => spokenMessageIds.current.add(m.id));
 
-      // Load user preferences
       const prefRes: any = await api.getAgentPreferences();
-      if (prefRes?.preferences?.autonomy_level) {
-        setAutonomyLevelState(prefRes.preferences.autonomy_level);
-      }
-      if (prefRes?.preferences?.voice_responses_enabled !== undefined) {
-        setVoiceResponsesEnabled(Boolean(prefRes.preferences.voice_responses_enabled));
-      }
-
+      const pref = prefRes?.preferences || {};
+      if (pref.autonomy_level) setAutonomyLevelState(pref.autonomy_level);
+      if (pref.voice_enabled !== undefined) setVoiceResponsesEnabled(Boolean(pref.voice_enabled));
       return targetId;
     } catch (e) {
-      console.warn("Failed to initialize agent conversation:", e);
+      console.warn("Failed to initialize Orbit conversation:", e);
       return null;
     }
-  }, []);
+  }
 
   useEffect(() => {
     loadConversation();
   }, [loadConversation]);
 
-  // Derive Character State from activeTask & loading state across the 17-state machine
+  // Reconcile with persisted server state whenever the live channel reconnects.
+  const prevLiveStatus = useRef(liveStatus);
   useEffect(() => {
-    if (isLoading) {
-      setCharacterState("thinking");
+    if (prevLiveStatus.current === "reconnecting" && liveStatus === "connected") {
+      void refreshConversation();
+    }
+    prevLiveStatus.current = liveStatus;
+  }, [liveStatus, refreshConversation]);
+
+  // Heartbeat: tells the server this page can perform visible UI actions.
+  useEffect(() => {
+    if (!localStorage.getItem("auth_token")) return;
+    const beat = () => api.agentHeartbeat().catch(() => {});
+    beat();
+    const t = setInterval(beat, 15000);
+    return () => clearInterval(t);
+  }, [conversationId]);
+
+  // While a turn waits in the queue, refresh its real position and worker liveness.
+  useEffect(() => {
+    if (activeTask?.status !== "QUEUED") {
+      setQueueStatus(null);
       return;
     }
+    const id = activeTask.id;
+    let stop = false;
+    const poll = async () => {
+      try {
+        const res: any = await api.getAgentTask(id);
+        if (stop) return;
+        setQueueStatus(res?.queue ?? null);
+        if (res?.task && res.task.status !== "QUEUED") {
+          setActiveTask((prev) => (prev && prev.id === id ? { ...prev, status: res.task.status, stage: res.task.stage } : prev));
+        }
+      } catch {
+        // keep last known status
+      }
+    };
+    poll();
+    const t = setInterval(poll, 4000);
+    return () => {
+      stop = true;
+      clearInterval(t);
+    };
+  }, [activeTask?.id, activeTask?.status]);
 
-    if (!activeTask) {
-      setCharacterState("idle");
-      return;
-    }
-
-    switch (activeTask.status) {
-      case "RUNNING":
-      case "COMMITTING":
-        setCharacterState("executing");
-        break;
-      case "WAITING_FOR_INPUT":
-        setCharacterState("waiting_for_user");
-        break;
-      case "WAITING_FOR_APPROVAL":
-        setCharacterState("needs_confirmation");
-        break;
-      case "WAITING_FOR_PROVIDER":
-        setCharacterState("interacting");
-        break;
-      case "INTERRUPT_REQUESTED":
-        setCharacterState("cancelled");
-        break;
-      case "PAUSED":
-      case "PAUSE_REQUESTED":
-        setCharacterState("paused");
-        break;
-      case "SUCCEEDED":
-        setCharacterState("success");
-        break;
-      case "PARTIAL_SUCCESS":
-        setCharacterState("success");
-        break;
-      case "FAILED":
-        setCharacterState("error");
-        break;
-      case "CANCELLED":
-        setCharacterState("cancelled");
-        break;
-      default:
-        setCharacterState("idle");
-        break;
-    }
-  }, [activeTask, isLoading]);
-
-  // Subscribe to real-time agent SSE events via LiveEventsContext
+  // Fast event polling only while a turn is in flight.
+  const working = isLoading || (activeTask ? ACTIVE_TASK_STATUSES.includes(activeTask.status) : false);
   useEffect(() => {
-    const unsubscribe = addListener((evt) => {
-      if (evt.event_name === "agent.timeline_event" && evt.payload) {
-        const p = evt.payload;
-        setTimelineEvents((prev) => [
-          ...prev,
-          {
-            id: Date.now(),
-            task_id: p.task_id,
-            step_name: p.step_name,
-            status: p.status,
-            message: p.message,
-            details: p.details,
-            created_at: p.created_at || new Date().toISOString(),
-          },
-        ]);
+    setFastPolling(working);
+  }, [working, setFastPolling]);
 
-        if (activeTask && activeTask.id === p.task_id) {
-          setActiveTask((prev) => (prev ? { ...prev, status: p.task_status || prev.status } : null));
-        }
-      } else if (evt.event_name === "agent.task_updated" && evt.payload) {
-        const p = evt.payload;
-        setActiveTask((prev) => {
-          if (!prev || prev.id !== p.task_id) return prev;
-          return {
-            ...prev,
-            status: p.status,
-            current_step_index: p.current_step_index,
-            error_message: p.error_message,
-          };
-        });
-      } else if (evt.event_name === "agent.action_requested" && evt.payload) {
-        const p = evt.payload;
-        if (p.action) {
-          actionBridge.dispatch(p.action, p.payload);
-        }
+  // ------------------------------------------------------------------
+  // Live agent events
+  // ------------------------------------------------------------------
+
+  useEffect(() => {
+    return addListener((evt) => {
+      const name = evt.event_name;
+      if (!name?.startsWith("agent.")) return;
+      const p = evt.payload || {};
+      const current = activeTaskRef.current;
+      const isCurrentTask = !current || current.id === p.task_id;
+
+      switch (name) {
+        case "agent.ui_action":
+          void runUiAction(p);
+          break;
+        case "agent.turn_stage":
+          if (isCurrentTask) setTurnStage(p.stage);
+          if (p.stage === "THINKING") setToolActivity(null);
+          break;
+        case "agent.narration":
+          if (isCurrentTask) {
+            setNarration(p.text);
+            if (voiceEnabledRef.current && !ttsAdapter.isSpeaking()) void ttsAdapter.speak(p.text);
+          }
+          break;
+        case "agent.tool_started":
+          setToolActivity({ traceId: p.trace_id, tool: p.tool, label: p.label, status: "running" });
+          break;
+        case "agent.tool_finished":
+          setToolActivity({
+            traceId: p.trace_id, tool: p.tool, label: p.label,
+            status: p.success ? "succeeded" : "failed", message: p.safe_message,
+          });
+          break;
+        case "agent.timeline_event":
+          if (p.id && seenTimelineIds.current.has(p.id)) break;
+          if (p.id) seenTimelineIds.current.add(p.id);
+          setTimelineEvents((prev) => [...prev, {
+            id: p.id ?? Date.now(), task_id: p.task_id, step_name: p.step_name, status: p.status,
+            message: p.message, details: p.details, created_at: p.created_at || new Date().toISOString(),
+          }]);
+          break;
+        case "agent.task_updated":
+          setActiveTask((prev) => {
+            const next = prev && prev.id === p.task_id
+              ? { ...prev, status: p.status, stage: p.stage, plan_version: p.plan_version, error_message: p.error_message,
+                  pending_tool_call: p.awaiting_confirmation_for ? { name: p.awaiting_confirmation_for, args: {} } : null }
+              : prev;
+            activeTaskRef.current = next;
+            return next;
+          });
+          if (TERMINAL_STATUSES.includes(p.status) || ["WAITING_FOR_INPUT", "WAITING_FOR_APPROVAL", "PAUSED"].includes(p.status)) {
+            setTurnStage(null);
+          }
+          break;
+        case "agent.speech":
+          void (async () => {
+            const loaded = await refreshConversation();
+            const msg = loaded?.msgs.find((m) => m.id === p.message_id) || null;
+            presentSpeech(msg, {
+              messageId: p.message_id, text: p.speech_text, emotion: p.emotion_hint, style: p.response_style,
+              source: p.source, isServiceError: p.is_service_error,
+            });
+            // Stay beside a field that still needs the user; otherwise return to the dock.
+            if (!(p.task_status === "WAITING_FOR_INPUT" && p.secure_input_type)) {
+              setTimeout(() => orbitStage.emit({ type: "return" }), 1500);
+            }
+          })();
+          break;
       }
     });
+  }, [addListener, presentSpeech, refreshConversation]);
 
-    return () => unsubscribe();
-  }, [addListener, activeTask]);
+  // ------------------------------------------------------------------
+  // Derived character state (never driven by timers for real work)
+  // ------------------------------------------------------------------
 
-  // Map semantic intent / task steps to application route & anchor
-  const mapIntentToNavigation = useCallback((task: AgentTask | null, goalPrompt: string) => {
-    const lower = (goalPrompt + " " + (task?.task_type || "")).toLowerCase();
+  const characterState = useMemo(() => deriveCharacterState({
+    taskStatus: activeTask?.status,
+    turnStage,
+    sending: isLoading,
+    speaking: isSpeaking,
+    runningTool: toolActivity?.status === "running" ? toolActivity.tool : null,
+    speechEmotion: speech?.emotion,
+    serviceError: speech?.isServiceError,
+    localState,
+  }) as CharacterState, [activeTask?.status, isLoading, turnStage, toolActivity, isSpeaking, speech, localState]);
 
-    if (
-      lower.includes("connect") ||
-      lower.includes("database") ||
-      lower.includes("mysql") ||
-      task?.task_type === "ADD_CONNECTION" ||
-      task?.task_type === "TEST_CONNECTION"
-    ) {
-      actionBridge.dispatch("navigation.navigate", { route: "/connections" });
-      setActiveRoute("/connections");
-      setActiveAnchor("connection-form-anchor");
-      actionBridge.dispatch("connections.open_create_form", {});
-      return;
-    }
+  const secureInputRequest = useMemo(() => {
+    if (!activeTask || activeTask.status !== "WAITING_FOR_INPUT") return null;
+    const kind = activeTask.last_decision?.secure_input_type
+      || [...messages].reverse().find((m) => m.role === "assistant")?.secure_input_type;
+    return kind ? { kind, taskId: activeTask.id } : null;
+  }, [activeTask, messages]);
 
-    if (
-      lower.includes("schema") ||
-      lower.includes("scan") ||
-      lower.includes("table") ||
-      lower.includes("column") ||
-      task?.task_type === "SCAN_SCHEMA"
-    ) {
-      actionBridge.dispatch("navigation.navigate", { route: "/explorer" });
-      setActiveRoute("/explorer");
-      setActiveAnchor("schema-explorer-anchor");
-      return;
-    }
+  const awaitingConfirmation = useMemo(() => {
+    if (!activeTask || activeTask.status !== "WAITING_FOR_APPROVAL") return null;
+    return { taskId: activeTask.id, tool: activeTask.pending_tool_call?.name || "the requested action" };
+  }, [activeTask]);
 
-    if (
-      lower.includes("automation") ||
-      lower.includes("blog") ||
-      lower.includes("schedule") ||
-      task?.task_type === "CREATE_AUTOMATION" ||
-      task?.task_type === "RUN_AUTOMATION"
-    ) {
-      actionBridge.dispatch("navigation.navigate", { route: "/automations/new" });
-      setActiveRoute("/automations/new");
-      setActiveAnchor("automation-builder-anchor");
-      return;
-    }
+  // ------------------------------------------------------------------
+  // Actions
+  // ------------------------------------------------------------------
 
-    if (
-      lower.includes("approval") ||
-      lower.includes("review") ||
-      lower.includes("reject") ||
-      task?.task_type === "REVIEW_APPROVALS"
-    ) {
-      actionBridge.dispatch("navigation.navigate", { route: "/approvals" });
-      setActiveRoute("/approvals");
-      setActiveAnchor("approvals-list-anchor");
-      return;
-    }
-
-    if (
-      lower.includes("execution") ||
-      lower.includes("history") ||
-      lower.includes("job") ||
-      task?.task_type === "LIST_EXECUTIONS"
-    ) {
-      actionBridge.dispatch("navigation.navigate", { route: "/executions" });
-      setActiveRoute("/executions");
-      setActiveAnchor("executions-history-anchor");
-      return;
-    }
-
-    if (lower.includes("knowledge") || lower.includes("rag") || lower.includes("document")) {
-      actionBridge.dispatch("navigation.navigate", { route: "/knowledge" });
-      setActiveRoute("/knowledge");
-      setActiveAnchor("knowledge-upload-anchor");
-      return;
-    }
-
-    if (lower.includes("provider") || lower.includes("model") || lower.includes("ollama")) {
-      actionBridge.dispatch("navigation.navigate", { route: "/ai-providers" });
-      setActiveRoute("/ai-providers");
-      setActiveAnchor("ai-provider-settings-anchor");
-      return;
-    }
-  }, []);
-
-  // Send message / speech request
   const sendMessage = async (content: string, isVoice = false, secureInputData?: any) => {
-    let convId = conversationIdRef.current || conversationId;
+    let convId = conversationIdRef.current;
+    if (!convId) convId = await loadConversation();
     if (!convId) {
-      convId = await loadConversation();
-    }
-    if (!convId) {
-      toast.error("Session Error", "Could not initialize consultation session. Please check your connection.");
+      toast.error("Orbit unavailable", "Could not start a session. Check that you are signed in.");
       return;
     }
 
-    // Apply client-side secret redaction: strip raw passwords from conversational content
+    // Secrets never enter the transcript or the model request: route them to the secure channel.
     const { redactedText, hasRedaction, extractedSecrets } = redactSecretsFromUtterance(content);
-    const finalContent = redactedText;
-    const mergedSecureInput = {
-      ...(hasRedaction ? extractedSecrets : {}),
-      ...(secureInputData || {}),
-    };
-    const finalSecureData = Object.keys(mergedSecureInput).length > 0 ? mergedSecureInput : undefined;
+    const secure: Record<string, any> = { ...(secureInputData || {}) };
+    if (hasRedaction) {
+      if (extractedSecrets.password) secure.password = extractedSecrets.password;
+      if (extractedSecrets.apiKey) secure.api_key = extractedSecrets.apiKey;
+      toast.info("Secret kept private", "A credential in your message was moved to the secure channel.");
+    }
 
-    // Optimistically add user message so user immediately sees what they said in chat
-    const optimisticUserMsg: AgentMessage = {
-      id: Date.now(),
-      role: "user",
-      content: finalContent,
-      is_voice: isVoice,
-      created_at: new Date().toISOString(),
-    };
-    setMessages((prev) => [...prev, optimisticUserMsg]);
-
+    ttsAdapter.stop();
+    setNarration(null);
+    setMessages((prev) => [...prev, {
+      id: -Date.now(), role: "user", content: redactedText, is_voice: isVoice, created_at: new Date().toISOString(),
+    }]);
     setIsLoading(true);
-    setCharacterState("thinking");
     setIsOpen(true);
     soundManager.playSoundForBehavior("thinking");
 
     try {
-      const pageContext = pageStateService.getSnapshot();
-      const res: any = await api.postAgentMessage(convId, finalContent, isVoice, finalSecureData, pageContext);
-
-      if (res.conversation?.messages) {
-        setMessages(res.conversation.messages);
-        const lastMsg = [...res.conversation.messages].reverse().find((m: any) => m.role === "assistant");
-        if (lastMsg) {
-          setLastSpokenSpeech(lastMsg.content);
+      const res: any = await api.postAgentMessage(
+        convId, redactedText, isVoice, Object.keys(secure).length ? secure : undefined, pageStateService.getSnapshot()
+      );
+      if (res?.conversation?.messages) setMessages(res.conversation.messages);
+      if (res?.task) {
+        setTask(res.task);
+        setQueueStatus(res.queue ?? null);
+        applyTimeline(res.task.timeline_events || []);
+        setTurnStage(ACTIVE_TASK_STATUSES.includes(res.task.status) ? res.task.stage || "QUEUED" : null);
+        // If the turn already finished (fast/sync worker), present its reply now.
+        if (!ACTIVE_TASK_STATUSES.includes(res.task.status)) {
+          const last = [...(res.conversation?.messages || [])].reverse().find((m: AgentMessage) => m.role === "assistant");
+          if (last && last.meta?.task_id === res.task.id) presentSpeech(last);
         }
-      } else if (res.message) {
-        setMessages((prev) => [...prev, res.message]);
-        setLastSpokenSpeech(res.message.content || "");
-      }
-
-      if (res.task) {
-        setActiveTask(res.task);
-        setTimelineEvents(res.task.timeline_events || []);
-        // Trigger semantic travel
-        mapIntentToNavigation(res.task, content);
-
-        // Immediate Action Bridge dispatch for visible UI execution
-        if (res.task.task_type === "ADD_CONNECTION") {
-          const slots = (res.task as any).slots || {};
-          const nonSecret = { ...slots };
-          delete nonSecret.password;
-          actionBridge.dispatch("connections.open_create_form", { slots: nonSecret });
-          if (Object.keys(nonSecret).length > 0) {
-            actionBridge.dispatch("connections.fill_fields", { fields: nonSecret });
-          }
-        } else if (res.task.task_type === "SCAN_SCHEMA") {
-          actionBridge.dispatch("navigation.navigate", { route: "/explorer" });
-        } else if (res.task.task_type === "CREATE_AUTOMATION") {
-          actionBridge.dispatch("navigation.navigate", { route: "/automations/new" });
-        }
-        setCharacterState(res.task.status === "SUCCEEDED" ? "success" : "executing");
-      } else {
-        mapIntentToNavigation(null, content);
-        setCharacterState("idle");
       }
     } catch (err: any) {
-      toast.error("Agent Error", err.message || "Failed to communicate with assistant.");
-      setCharacterState("error");
-      const errorMsg: AgentMessage = {
-        id: Date.now() + 1,
-        role: "assistant",
-        content: `⚠️ Sorry, I encountered an issue: ${err.message || "Could not reach agent service"}. Please try again or type directly in the box below.`,
-        created_at: new Date().toISOString(),
-      };
-      setMessages((prev) => [...prev, errorMsg]);
+      toast.error("Orbit could not take that request", err?.message || "The server did not accept the message.");
+      setSpeech({
+        messageId: null, text: `I couldn't send that: ${err?.message || "server unavailable"}.`, emotion: "concerned",
+        style: "error", source: "system", isServiceError: true, delivery: "muted",
+      });
     } finally {
       setIsLoading(false);
     }
   };
 
-  // Voice transcript handler with interrupt detection
   const handleVoiceTranscript = async (transcript: string) => {
     const clean = transcript.trim();
     if (!clean) return;
-
     setIsOpen(true);
-    const lower = clean.toLowerCase();
-
-    // Check for voice interruption commands
-    if (lower === "stop" || lower === "cancel" || lower === "halt" || lower.startsWith("stop ")) {
-      await interruptTask("STOP");
-      return;
-    }
-
-    if (lower === "pause" || lower === "wait" || lower.startsWith("pause ")) {
-      await interruptTask("PAUSE");
-      return;
-    }
-
-    const { redactedText, hasRedaction, extractedSecrets } = redactSecretsFromUtterance(clean);
-    if (hasRedaction) {
-      toast.info("Secure Redaction", "Credential detected and routed securely via isolated encrypted channel.");
-    } else {
-      toast.info("Voice Instruction", `"${clean}"`);
-    }
-    await sendMessage(redactedText, true, hasRedaction ? extractedSecrets : undefined);
+    await sendMessage(clean, true);
   };
 
-  // Submit in-context secure credentials
-  const submitSecureCredentials = async (data: any) => {
-    if (!activeTask) return;
-    setIsLoading(true);
-    setCharacterState("executing");
-    try {
-      await sendMessage("Provided secure connection credentials", false, data);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  // Instant Interrupt (Stop / Pause)
-  const interruptTask = async (action: "STOP" | "PAUSE" = "STOP") => {
+  const interruptTask = async (action: "STOP" | "PAUSE" | "RESUME" = "STOP") => {
     ttsAdapter.stop();
-    if (!activeTask) return;
+    const task = activeTaskRef.current;
+    if (!task) return;
     try {
-      const res: any = await api.interruptAgentTask(activeTask.id, action);
-      if (res.task) {
-        setActiveTask(res.task);
-        setTimelineEvents(res.task.timeline_events || []);
+      const res: any = await api.interruptAgentTask(task.id, action);
+      if (res?.task) {
+        setTask(res.task);
+        applyTimeline(res.task.timeline_events || []);
       }
-      setCharacterState(action === "PAUSE" ? "paused" : "cancelled");
-      setLastSpokenSpeech(action === "PAUSE" ? "Execution paused." : "Operation stopped by user.");
-      toast.info(action === "PAUSE" ? "Task Paused" : "Stop Requested", res.message || "Signaled agent to halt.");
+      if (action !== "RESUME") orbitStage.emit({ type: "return" });
+      toast.info(action === "STOP" ? "Stopping" : action === "PAUSE" ? "Pausing" : "Resuming", res?.message || "");
     } catch (err: any) {
-      toast.error("Interrupt Failed", err.message || "Could not halt agent task.");
+      toast.error("Could not reach Orbit", err?.message || "Interrupt failed.");
     }
   };
 
-  // Mid-task Correction
-  const correctTask = async (correction: string) => {
-    if (!activeTask) return;
-    setIsLoading(true);
-    setCharacterState("understanding");
-    try {
-      const res: any = await api.correctAgentTask(activeTask.id, correction);
-      if (res.conversation?.messages) {
-        setMessages(res.conversation.messages);
-      }
-      if (res.task) {
-        setActiveTask(res.task);
-        setTimelineEvents(res.task.timeline_events || []);
-        mapIntentToNavigation(res.task, correction);
-      }
-      setLastSpokenSpeech("Correction applied. Revising plan.");
-      toast.success("Correction Applied", "Assistant updated execution plan.");
-    } catch (err: any) {
-      toast.error("Correction Failed", err.message || "Could not apply correction.");
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  // Confirm Consequential Step
   const confirmTask = async () => {
-    if (!activeTask) return;
+    const task = activeTaskRef.current;
+    if (!task) return;
     setIsLoading(true);
-    setCharacterState("executing");
     try {
-      const res: any = await api.confirmAgentTask(activeTask.id);
-      if (res.conversation?.messages) {
-        setMessages(res.conversation.messages);
-      }
-      if (res.task) {
-        setActiveTask(res.task);
-        setTimelineEvents(res.task.timeline_events || []);
-      }
+      const res: any = await api.confirmAgentTask(task.id);
+      if (res?.task) setTask(res.task);
+      if (res?.conversation?.messages) setMessages(res.conversation.messages);
     } catch (err: any) {
-      toast.error("Confirmation Failed", err.message || "Could not confirm task step.");
+      toast.error("Confirmation failed", err?.message || "Could not confirm.");
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const submitSecureCredentials = async (data: { password?: string; api_key?: string }) => {
+    const kind = data.api_key ? "api_key" : "database_password";
+    await sendMessage(`I entered the ${SECURE_LABEL[kind]} in the secure field.`, false, data);
   };
 
   const updateAutonomyLevel = async (lvl: string) => {
     setAutonomyLevelState(lvl);
     try {
       await api.updateAgentPreferences({ autonomy_level: lvl });
-      toast.success("Autonomy Level Updated", `Operating mode set to: ${lvl}`);
+      toast.success("Autonomy updated", lvl.replace(/_/g, " ").toLowerCase());
     } catch (err) {
-      console.warn("Failed to update autonomy preferences:", err);
+      console.warn("Failed to update autonomy preference:", err);
     }
   };
 
   const toggleVoiceResponses = async () => {
-    const nextVal = !voiceResponsesEnabled;
-    setVoiceResponsesEnabled(nextVal);
+    const next = !voiceResponsesEnabled;
+    setVoiceResponsesEnabled(next);
+    if (!next) ttsAdapter.stop();
     try {
-      await api.updateAgentPreferences({ voice_enabled: nextVal });
+      await api.updateAgentPreferences({ voice_enabled: next });
     } catch {
-      // Local fallback
+      // local preference still applies
     }
   };
 
   const startNewConversation = async () => {
     try {
-      const createRes: any = await api.createAgentConversation("New Consultation");
-      setConversationId(createRes.conversation.id);
-      conversationIdRef.current = createRes.conversation.id;
+      ttsAdapter.stop();
+      const created: any = await api.createAgentConversation("Orbit");
+      setConversationId(created.conversation.id);
+      conversationIdRef.current = created.conversation.id;
       setMessages([]);
-      setActiveTask(null);
-      setTimelineEvents([]);
-      setActiveAnchor(null);
-      setActiveRoute(null);
-      setLastSpokenSpeech("");
-      setCharacterState("idle");
-      toast.info("New Thread", "Started fresh consultation thread.");
+      setTask(null);
+      applyTimeline([]);
+      setTurnStage(null);
+      setToolActivity(null);
+      setSpeech(null);
+      setNarration(null);
+      orbitStage.emit({ type: "return" });
     } catch (err: any) {
-      toast.error("Error", err.message || "Failed to start new conversation.");
+      toast.error("Error", err?.message || "Failed to start a new conversation.");
     }
   };
 
@@ -589,36 +601,42 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       value={{
         isOpen,
         setIsOpen,
-        toggleOpen: () => setIsOpen((prev) => !prev),
+        toggleOpen: () => setIsOpen((p) => !p),
         isDrawerOpen: isOpen,
         setIsDrawerOpen: setIsOpen,
-        toggleDrawer: () => setIsOpen((prev) => !prev),
+        toggleDrawer: () => setIsOpen((p) => !p),
         characterState,
-        setCharacterState,
+        setCharacterState: setLocalState,
         conversationId,
         messages,
         activeTask,
         timelineEvents,
         isLoading,
+        turnStage,
+        toolActivity,
+        speech,
+        narration,
+        isSpeaking,
+        secureInputRequest,
+        queueStatus,
+        awaitingConfirmation,
         autonomyLevel,
         setAutonomyLevel: updateAutonomyLevel,
-
         activeAnchor,
         setActiveAnchor,
         activeRoute,
         setActiveRoute,
-        lastSpokenSpeech,
-        setLastSpokenSpeech,
+        lastSpokenSpeech: speech?.text || "",
+        setLastSpokenSpeech: () => {},
         voiceResponsesEnabled,
         setVoiceResponsesEnabled,
         toggleVoiceResponses,
-
         sendMessage,
         handleVoiceTranscript,
         interruptTask,
-        requestInterrupt: interruptTask,
+        requestInterrupt: (a = "STOP") => interruptTask(a),
         requestPause: () => interruptTask("PAUSE"),
-        correctTask,
+        correctTask: (c: string) => sendMessage(c, false),
         confirmTask,
         submitSecureCredentials,
         startNewConversation,
@@ -631,8 +649,6 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
 export const useAssistant = () => {
   const ctx = useContext(AssistantContext);
-  if (!ctx) {
-    throw new Error("useAssistant must be used within an AssistantProvider");
-  }
+  if (!ctx) throw new Error("useAssistant must be used within an AssistantProvider");
   return ctx;
 };

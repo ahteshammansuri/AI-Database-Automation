@@ -1,4 +1,6 @@
 import React, { useEffect, useState } from "react";
+import { useOrbitSurface } from "../../hooks/useOrbitSurface";
+import { orbitTargets } from "../../services/orbitTargets";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   BrainCircuit,
@@ -51,6 +53,46 @@ export const ModelRolesSection: React.FC = () => {
   useEffect(() => {
     loadRoles();
   }, []);
+
+  // Orbit surface: per-role fields and actions (row = role key, e.g. "planner").
+  useOrbitSurface("providers.roles", () => {
+    const find = (row?: string) => roles.find((r) => r.role === row);
+    const save = async (row?: string) => {
+      const r = find(row);
+      if (!r) return { success: false, message: `No role '${row}'.` };
+      await handleSaveRole(r);
+      return { success: true, message: `Saved: ${r.role} now uses ${r.provider} / ${r.model_name}.` };
+    };
+    return {
+      describe: () => roles.map((r) => ({ id: r.role, label: r.label, provider: r.provider, model: r.model_name, probe: probeResults[r.role]?.message })),
+      fields: {
+        provider: {
+          get: (row) => find(row)?.provider,
+          set: (v, row) => { if (!find(row)) return `No role '${row}'.`; handleFieldChange(row!, "provider", String(v)); return null; },
+          options: () => ["ollama", "openai", "gemini", "anthropic", "mock"].map((v) => ({ value: v, label: v })),
+          target: (row) => `providers.roles.row.${row}`,
+        },
+        model_name: {
+          get: (row) => find(row)?.model_name,
+          set: (v, row) => { const t = String(v ?? "").trim(); if (!find(row)) return `No role '${row}'.`; if (!t) return "Model is required."; handleFieldChange(row!, "model_name", t); return null; },
+          target: (row) => `providers.roles.row.${row}`,
+        },
+      },
+      actions: {
+        probe: {
+          target: (row) => `providers.roles.row.${row}`,
+          run: async (row) => {
+            const r = find(row);
+            if (!r) return { success: false, message: `No role '${row}'.` };
+            const res = await api.probeModelRole({ provider: r.provider, model_name: r.model_name }).catch((e: any) => ({ available: false, message: e.message }));
+            setProbeResults((prev) => ({ ...prev, [r.role]: { available: res.available, latency_ms: res.latency_ms, message: res.message } }));
+            return { success: !!res.available, message: res.message || (res.available ? "Model is available." : "Model is not available.") };
+          },
+        },
+        save: { target: (row) => `providers.roles.row.${row}`, run: save },
+      },
+    };
+  });
 
   const handleFieldChange = (roleKey: string, field: keyof ModelRoleItem, value: any) => {
     setRoles((prev) =>
@@ -165,6 +207,9 @@ export const ModelRolesSection: React.FC = () => {
 
           return (
             <motion.div
+              ref={(el: HTMLDivElement | null) =>
+                el ? orbitTargets.register(`providers.roles.row.${r.role}`, el) : orbitTargets.unregister(`providers.roles.row.${r.role}`)
+              }
               key={r.role}
               whileHover={{ y: -2 }}
               className="bg-white rounded-2xl border border-slate-200 p-5 shadow-2xs space-y-4 flex flex-col justify-between"

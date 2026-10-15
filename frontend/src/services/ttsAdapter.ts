@@ -11,6 +11,14 @@
 
 export type TTSBackend = "browser" | "piper" | "kokoro" | "custom_http";
 
+/** Playback events: drive mouth/lip-sync and tell the UI whether text was really spoken. */
+export type TTSEvent =
+  | { type: "start"; text: string }
+  | { type: "boundary"; charIndex: number; word: string }
+  | { type: "end"; text: string }
+  | { type: "error"; text: string; reason: string }
+  | { type: "cancelled"; text: string };
+
 export interface TTSConfig {
   backend: TTSBackend;
   endpoint: string;
@@ -30,6 +38,23 @@ class TTSAdapterService {
   private activeAudio: HTMLAudioElement | null = null;
   private isSpeakingActive = false;
   private abortController: AbortController | null = null;
+  private listeners = new Set<(e: TTSEvent) => void>();
+  private currentText = "";
+
+  public subscribe(listener: (e: TTSEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private emit(e: TTSEvent): void {
+    this.listeners.forEach((l) => {
+      try {
+        l(e);
+      } catch {
+        // listener errors never break playback
+      }
+    });
+  }
 
   constructor() {
     // Load persisted settings from localStorage if available
@@ -64,6 +89,10 @@ class TTSAdapterService {
    * Instant Barge-In: immediately halts active audio playback and aborts pending network fetches.
    */
   public stop(): void {
+    if (this.isSpeakingActive && this.currentText) {
+      this.emit({ type: "cancelled", text: this.currentText });
+    }
+    this.currentText = "";
     // 1. Cancel browser speech synthesis
     if (typeof window !== "undefined" && window.speechSynthesis) {
       window.speechSynthesis.cancel();
@@ -113,9 +142,23 @@ class TTSAdapterService {
     const clean = this.cleanSpokenText(text);
     if (!clean) return;
 
-    // Instant barge-in: stop any currently active utterance or sound before starting
+    // Single speech channel: stop any current utterance before starting (no overlap).
     this.stop();
     this.isSpeakingActive = true;
+    this.currentText = clean;
+    const userStart = onStart;
+    const userEnd = onEnd;
+    onStart = () => {
+      this.emit({ type: "start", text: clean });
+      userStart?.();
+    };
+    onEnd = () => {
+      if (this.currentText === clean) {
+        this.currentText = "";
+        this.emit({ type: "end", text: clean });
+      }
+      userEnd?.();
+    };
 
     if (this.config.backend === "browser") {
       this.speakViaBrowser(clean, onStart, onEnd);
@@ -160,7 +203,9 @@ class TTSAdapterService {
         URL.revokeObjectURL(audioUrl);
         this.activeAudio = null;
         this.isSpeakingActive = false;
-        onEnd?.();
+        this.currentText = "";
+        this.emit({ type: "error", text: clean, reason: "audio playback failed" });
+        userEnd?.();
       };
 
       await audio.play();
@@ -184,7 +229,8 @@ class TTSAdapterService {
   ): void {
     if (typeof window === "undefined" || !window.speechSynthesis) {
       this.isSpeakingActive = false;
-      onEnd?.();
+      this.currentText = "";
+      this.emit({ type: "error", text, reason: "Speech synthesis is not available in this browser." });
       return;
     }
 
@@ -203,9 +249,16 @@ class TTSAdapterService {
       onEnd?.();
     };
 
-    utterance.onerror = () => {
+    utterance.onboundary = (ev: SpeechSynthesisEvent) => {
+      const word = text.slice(ev.charIndex, ev.charIndex + (ev.charLength || 0)) || text.slice(ev.charIndex).split(/\s/)[0];
+      this.emit({ type: "boundary", charIndex: ev.charIndex, word });
+    };
+
+    utterance.onerror = (ev: SpeechSynthesisErrorEvent) => {
       this.isSpeakingActive = false;
-      onEnd?.();
+      if (ev.error === "interrupted" || ev.error === "canceled") return; // barge-in, reported as cancelled
+      this.currentText = "";
+      this.emit({ type: "error", text, reason: ev.error || "speech failed" });
     };
 
     window.speechSynthesis.speak(utterance);

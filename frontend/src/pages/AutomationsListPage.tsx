@@ -6,7 +6,8 @@ import { api } from "../services/api";
 import { StatusPill } from "../components/common/StatusPill";
 import { SearchableSelect } from "../components/common/SearchableSelect";
 import { useToast } from "../context/ToastContext";
-import { actionBridge } from "../services/actionBridge";
+import { orbitTargets } from "../services/orbitTargets";
+import { useOrbitSurface } from "../hooks/useOrbitSurface";
 import { pageStateService } from "../services/pageStateService";
 
 export const AutomationsListPage: React.FC = () => {
@@ -39,24 +40,66 @@ export const AutomationsListPage: React.FC = () => {
     pageStateService.setRoute("/automations", "Automations List");
     loadData();
 
-    const unsubs = [
-      actionBridge.on("automations.navigate_create", () => {
-        navigate("/automations/new");
-        return { status: "ok" };
-      }),
-      actionBridge.on("automations.trigger_run", async (payload: any) => {
-        if (payload?.id) {
-          await handleTrigger(payload.id);
-          return { status: "ok" };
-        }
-        return { status: "validation_error", error: "Missing automation id" };
-      }),
-    ];
-
-    return () => {
-      unsubs.forEach((unsub) => unsub());
-    };
   }, [navigate]);
+
+  // ---- Orbit surface: the same API calls the row buttons make (row = automation id) ------------
+  useOrbitSurface("automations.list", () => {
+    const find = (row?: string) => automations.find((a: any) => String(a.id) === String(row));
+    return {
+      describe: () => automations.map((a: any) => ({
+        id: a.id, name: a.name, table: a.target_table, schedule: a.schedule_type,
+        active: a.is_active !== undefined ? !!a.is_active : a.status === "ACTIVE",
+        next_run: a.next_run_at ?? undefined,
+      })),
+      actions: {
+        run_now: {
+          target: (row) => `automations.row.${row}`,
+          run: async (row) => {
+            if (!find(row)) return { success: false, message: `No automation ${row} in the list.` };
+            try {
+              setRunningId(Number(row));
+              const res: any = await api.triggerAutomation(Number(row));
+              loadData();
+              return { success: true, message: res?.message || "Run queued.", resource: { type: "Automation", id: Number(row) } };
+            } catch (err: any) {
+              return { success: false, message: err.message || "Could not start the run." };
+            } finally {
+              setRunningId(null);
+            }
+          },
+        },
+        toggle: {
+          target: (row) => `automations.row.${row}`,
+          run: async (row) => {
+            const a: any = find(row);
+            if (!a) return { success: false, message: `No automation ${row} in the list.` };
+            const active = a.is_active !== undefined ? a.is_active : a.status === "ACTIVE";
+            try {
+              await api.updateAutomation(a.id, { is_active: !active, status: !active ? "ACTIVE" : "PAUSED" });
+              loadData();
+              return { success: true, message: `${a.name} is now ${!active ? "active" : "paused"}.`, resource: { type: "Automation", id: a.id } };
+            } catch (err: any) {
+              return { success: false, message: err.message || "Could not change the status." };
+            }
+          },
+        },
+        remove: {
+          target: (row) => `automations.row.${row}`,
+          run: async (row) => {
+            if (!find(row)) return { success: false, message: `No automation ${row} in the list.` };
+            try {
+              await api.deleteAutomation(Number(row));
+              loadData();
+              return { success: true, message: "Automation deleted." };
+            } catch (err: any) {
+              return { success: false, message: err.message || "Could not delete the automation." };
+            }
+          },
+        },
+        new: { run: () => { navigate("/automations/new"); return { success: true, message: "Automation builder opened." }; } },
+      },
+    };
+  });
 
   const handleTrigger = async (id: number) => {
     try {
@@ -186,6 +229,9 @@ export const AutomationsListPage: React.FC = () => {
             return (
               <motion.div
                 key={a.id}
+                ref={(el: HTMLDivElement | null) =>
+                  el ? orbitTargets.register(`automations.row.${a.id}`, el) : orbitTargets.unregister(`automations.row.${a.id}`)
+                }
                 whileHover={{ y: -3, transition: { duration: 0.2 } }}
                 className="bg-white border border-slate-200/90 hover:border-indigo-300 rounded-xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 transition shadow-xs hover:shadow-md hover:shadow-indigo-500/5 group"
               >

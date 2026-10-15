@@ -3,7 +3,7 @@ import re
 import time
 from typing import Dict, Any, List, Optional
 import httpx
-from ai_service.app.providers.base import BaseAIProvider
+from ai_service.app.providers.base import BaseAIProvider, ProviderError, ProviderUnavailableError
 from ai_service.app.providers.mock_provider import MockAIProvider
 
 
@@ -16,6 +16,34 @@ def _clean_json_output(raw_text: str) -> str:
     if start_idx != -1 and end_idx != -1 and end_idx >= start_idx:
         cleaned = cleaned[start_idx:end_idx + 1]
     return cleaned.strip()
+
+
+def _schema_instruction(json_schema: Dict[str, Any]) -> str:
+    return (
+        "\n\nRespond with ONLY one JSON object (no prose, no markdown) that validates against this JSON schema:\n"
+        + json.dumps(json_schema, separators=(",", ":"))
+    )
+
+
+def _split_system(messages: List[Dict[str, str]], json_schema: Dict[str, Any]):
+    system = "\n\n".join(m["content"] for m in messages if m["role"] == "system") + _schema_instruction(json_schema)
+    convo = [m for m in messages if m["role"] != "system"]
+    return system, convo
+
+
+def _post_json(url: str, headers: Dict[str, str], payload: Dict[str, Any], timeout: float, label: str) -> Dict[str, Any]:
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            res = client.post(url, headers=headers, json=payload)
+    except httpx.TimeoutException:
+        raise ProviderError(f"{label} did not answer within {int(timeout)}s.")
+    except httpx.HTTPError as e:
+        raise ProviderUnavailableError(f"{label} is not reachable ({type(e).__name__}).")
+    if res.status_code in (401, 403):
+        raise ProviderUnavailableError(f"{label} rejected the configured API key (HTTP {res.status_code}).")
+    if res.status_code != 200:
+        raise ProviderError(f"{label} returned HTTP {res.status_code}.")
+    return res.json()
 
 
 class OpenAIProvider(BaseAIProvider):
@@ -75,6 +103,27 @@ class OpenAIProvider(BaseAIProvider):
 
     def list_models(self) -> List[str]:
         return ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"]
+
+    def chat_structured(self, messages, json_schema, timeout: float = 120.0, temperature: float = 0.2, deadline=None, **_) -> str:
+        if deadline is not None:
+            timeout = max(5.0, min(timeout, deadline - time.monotonic()))
+        if not self.api_key:
+            raise ProviderUnavailableError("OpenAI API key is not configured for this workspace.")
+        system, convo = _split_system(messages, json_schema)
+        data = _post_json(
+            "https://api.openai.com/v1/chat/completions",
+            {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+            {
+                "model": self.model_name,
+                "response_format": {"type": "json_object"},
+                "messages": [{"role": "system", "content": system}] + convo,
+                "temperature": temperature,
+            },
+            timeout,
+            "OpenAI",
+        )
+        return _clean_json_output(data["choices"][0]["message"]["content"] or "")
+
 
     def generate_structured_data(
         self,
@@ -175,6 +224,31 @@ class GeminiProvider(BaseAIProvider):
 
     def list_models(self) -> List[str]:
         return ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.0-pro"]
+
+    def chat_structured(self, messages, json_schema, timeout: float = 120.0, temperature: float = 0.2, deadline=None, **_) -> str:
+        if deadline is not None:
+            timeout = max(5.0, min(timeout, deadline - time.monotonic()))
+        if not self.api_key:
+            raise ProviderUnavailableError("Gemini API key is not configured for this workspace.")
+        system, convo = _split_system(messages, json_schema)
+        contents = [
+            {"role": "model" if m["role"] == "assistant" else "user", "parts": [{"text": m["content"]}]}
+            for m in convo
+        ]
+        data = _post_json(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent",
+            {"Content-Type": "application/json", "x-goog-api-key": self.api_key},
+            {
+                "systemInstruction": {"parts": [{"text": system}]},
+                "contents": contents,
+                "generationConfig": {"responseMimeType": "application/json", "temperature": temperature},
+            },
+            timeout,
+            "Gemini",
+        )
+        parts = (data.get("candidates") or [{}])[0].get("content", {}).get("parts", [])
+        return _clean_json_output(parts[0].get("text", "") if parts else "")
+
 
     def generate_structured_data(
         self,
@@ -283,6 +357,23 @@ class ClaudeProvider(BaseAIProvider):
 
     def list_models(self) -> List[str]:
         return ["claude-3-5-sonnet-latest", "claude-3-5-haiku-latest", "claude-3-opus-latest"]
+
+    def chat_structured(self, messages, json_schema, timeout: float = 120.0, temperature: float = 0.2, deadline=None, **_) -> str:
+        if deadline is not None:
+            timeout = max(5.0, min(timeout, deadline - time.monotonic()))
+        if not self.api_key:
+            raise ProviderUnavailableError("Anthropic API key is not configured for this workspace.")
+        system, convo = _split_system(messages, json_schema)
+        data = _post_json(
+            "https://api.anthropic.com/v1/messages",
+            {"x-api-key": self.api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+            {"model": self.model_name, "max_tokens": 1024, "system": system, "messages": convo, "temperature": temperature},
+            timeout,
+            "Anthropic",
+        )
+        blocks = data.get("content", [])
+        return _clean_json_output(blocks[0].get("text", "") if blocks else "")
+
 
     def generate_structured_data(
         self,

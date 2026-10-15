@@ -1,6 +1,7 @@
 import React from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { motion } from "framer-motion";
+import { orbitTargets } from "../../services/orbitTargets";
 import {
   LayoutDashboard,
   Database,
@@ -77,6 +78,9 @@ export const Sidebar: React.FC<SidebarProps> = ({ pendingApprovalsCount = 0 }) =
               to={link.to}
               end={link.to === "/dashboard"}
               className="relative block"
+              ref={(el: HTMLAnchorElement | null) =>
+                el ? orbitTargets.register(`nav:${link.to}`, el) : orbitTargets.unregister(`nav:${link.to}`)
+              }
             >
               {isActive && (
                 <motion.div

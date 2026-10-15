@@ -1,5 +1,5 @@
 from typing import Optional
-from ai_service.app.providers.base import BaseAIProvider
+from ai_service.app.providers.base import BaseAIProvider, ProviderUnsupportedError
 from ai_service.app.providers.mock_provider import MockAIProvider
 from ai_service.app.providers.ollama_provider import OllamaProvider
 from ai_service.app.providers.cloud_providers import OpenAIProvider, GeminiProvider, ClaudeProvider
@@ -42,4 +42,4 @@ class AIProviderFactory:
                 model_name=model or "claude-3-5-haiku-latest"
             )
 
-        return MockAIProvider(model_name=f"custom-{name}")
+        raise ProviderUnsupportedError(f"Unknown AI provider '{name}'.")

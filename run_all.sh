@@ -41,10 +41,24 @@ echo "[+] Starting Laravel Queue Worker (Supervised)..."
 (
     cd "$DIR/laravel"
     while true; do
-        php artisan queue:work --sleep=2 --tries=3 --timeout=120
+        php artisan queue:work --queue=default --sleep=2 --tries=3 --timeout=120
         sleep 2
     done
 ) &
+
+# 3b. Orbit agent worker: one turn may take several model calls, so it runs on its
+# own queue with a longer timeout (job timeout 660s < worker 700s < retry_after 720s).
+# Two workers, so one long turn (slow CPU-only model) never leaves everyone else stuck in "Queued".
+echo "[+] Starting Orbit Agent Workers x2 (queue: agent)..."
+for n in 1 2; do
+(
+    cd "$DIR/laravel"
+    while true; do
+        php artisan queue:work --queue=agent --sleep=1 --tries=1 --timeout=700
+        sleep 2
+    done
+) &
+done
 
 # 4. Start Laravel Scheduler (background cron for durable schedules)
 echo "[+] Starting Laravel Scheduler (php artisan schedule:work)..."

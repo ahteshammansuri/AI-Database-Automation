@@ -18,11 +18,14 @@ import {
   Info,
   Sparkles,
 } from "lucide-react";
+import { useOrbitSurface } from "../hooks/useOrbitSurface";
+import { useOrbitTarget } from "../hooks/useOrbitTarget";
+import { orbitTargets } from "../services/orbitTargets";
+import { actionTarget, fieldTarget } from "../services/orbitSurfaces";
 import { api } from "../services/api";
 import { KnowledgeDocument } from "../types";
 import { StatusPill } from "../components/common/StatusPill";
 import { useToast } from "../context/ToastContext";
-import { actionBridge } from "../services/actionBridge";
 import { pageStateService } from "../services/pageStateService";
 
 export const KnowledgeBasePage: React.FC = () => {
@@ -59,18 +62,76 @@ export const KnowledgeBasePage: React.FC = () => {
     pageStateService.setRoute("/knowledge", "Knowledge Base");
     loadDocs();
 
-    const unsubs = [
-      actionBridge.on("knowledge.open_upload", (payload: any) => {
-        if (payload?.title) setUploadTitle(payload.title);
-        fileInputRef.current?.click();
-        return { status: "ok" };
-      }),
-    ];
-
-    return () => {
-      unsubs.forEach((u) => u());
-    };
   }, []);
+
+  // ---- Orbit surface (row = document id). The browser cannot pick a file for the user:
+  // Orbit opens the picker and the user chooses the file. ------------------------------------
+  const titleRef = useOrbitTarget<HTMLInputElement>(fieldTarget("knowledge.page", "title"));
+  const searchRef = useOrbitTarget<HTMLInputElement>(fieldTarget("knowledge.page", "search"));
+  const dropRef = useOrbitTarget<HTMLDivElement>(actionTarget("knowledge.page", "choose_file"));
+
+  useOrbitSurface("knowledge.page", () => ({
+    target: actionTarget("knowledge.page", "choose_file"),
+    describe: () => ({
+      documents: docs.map((d: any) => ({ id: d.id, title: d.title, type: d.file_type, status: d.status, chunks: d.chunk_count })),
+      last_search: searchResults.slice(0, 3).map((r: any) => String(r.text ?? r.chunk ?? "").slice(0, 160)),
+    }),
+    fields: {
+      title: { get: () => uploadTitle, set: (v) => { setUploadTitle(String(v ?? "").slice(0, 200)); return null; } },
+      file: { get: () => uploadFile?.name ?? "", set: () => "The user must choose the file themselves (press choose_file)." },
+      search: { get: () => searchQuery, set: (v) => { setSearchQuery(String(v ?? "")); return null; } },
+    },
+    actions: {
+      choose_file: { run: () => { fileInputRef.current?.click(); return { success: true, message: "File picker opened; waiting for the user to choose a .md, .txt or .pdf file." }; } },
+      upload: {
+        enabled: () => !!uploadFile && !isUploading,
+        run: async () => {
+          if (!uploadFile) return { success: false, message: "No file chosen yet; ask the user to choose one (choose_file)." };
+          try {
+            setIsUploading(true);
+            const res: any = await api.uploadKnowledge(uploadTitle || uploadFile.name, uploadFile);
+            setUploadTitle("");
+            setUploadFile(null);
+            if (fileInputRef.current) fileInputRef.current.value = "";
+            loadDocs();
+            return { success: true, message: res?.message || "Document indexed.", resource: res?.document?.id ? { type: "KnowledgeDocument", id: res.document.id } : undefined };
+          } catch (err: any) {
+            return { success: false, message: err.message || "Upload failed." };
+          } finally {
+            setIsUploading(false);
+          }
+        },
+      },
+      search: {
+        run: async () => {
+          if (!searchQuery.trim()) return { success: false, message: "Fill the search field first." };
+          try {
+            setIsSearching(true);
+            const res: any = await api.queryKnowledge(searchQuery, 3);
+            setSearchResults(res.matches || []);
+            return { success: true, message: `${(res.matches || []).length} matching passage(s).`, data: { matches: (res.matches || []).slice(0, 3).map((m: any) => String(m.text ?? "").slice(0, 300)) } };
+          } catch (err: any) {
+            return { success: false, message: err.message || "Search failed." };
+          } finally {
+            setIsSearching(false);
+          }
+        },
+      },
+      remove: {
+        target: (row) => `knowledge.row.${row}`,
+        run: async (row) => {
+          if (!docs.find((d: any) => String(d.id) === String(row))) return { success: false, message: `No document ${row} in the list.` };
+          try {
+            await api.deleteKnowledge(Number(row));
+            loadDocs();
+            return { success: true, message: "Document removed." };
+          } catch (err: any) {
+            return { success: false, message: err.message || "Could not remove the document." };
+          }
+        },
+      },
+    },
+  }));
 
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
@@ -244,6 +305,7 @@ export const KnowledgeBasePage: React.FC = () => {
                 type="text"
                 required
                 placeholder="e.g. Editorial Brand & Tone Guidelines"
+                ref={titleRef}
                 value={uploadTitle}
                 onChange={(e) => setUploadTitle(e.target.value)}
                 className="w-full bg-slate-50/50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 focus:bg-white transition"
@@ -256,6 +318,7 @@ export const KnowledgeBasePage: React.FC = () => {
                 File Attachment
               </label>
               <div
+                ref={dropRef}
                 onDragOver={handleDragOver}
                 onDragLeave={handleDragLeave}
                 onDrop={handleDrop}
@@ -382,6 +445,9 @@ export const KnowledgeBasePage: React.FC = () => {
                   {docs.map((d) => (
                     <motion.div
                       key={d.id}
+                      ref={(el: HTMLDivElement | null) =>
+                        el ? orbitTargets.register(`knowledge.row.${d.id}`, el) : orbitTargets.unregister(`knowledge.row.${d.id}`)
+                      }
                       variants={{
                         hidden: { opacity: 0, y: 8 },
                         visible: { opacity: 1, y: 0 }
@@ -505,6 +571,7 @@ export const KnowledgeBasePage: React.FC = () => {
             <Search className="w-4 h-4 absolute left-3.5 top-3 text-slate-400" />
             <input
               type="text"
+              ref={searchRef}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Enter a semantic query to test chunk similarity..."

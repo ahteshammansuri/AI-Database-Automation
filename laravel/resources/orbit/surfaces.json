@@ -1,0 +1,867 @@
+{
+  "version": 1,
+  "pages": [
+    {
+      "route": "/dashboard",
+      "title": "Dashboard"
+    },
+    {
+      "route": "/connections",
+      "title": "Database Connections"
+    },
+    {
+      "route": "/explorer",
+      "title": "Schema Explorer"
+    },
+    {
+      "route": "/automations",
+      "title": "Automations"
+    },
+    {
+      "route": "/automations/new",
+      "title": "New Automation (builder)"
+    },
+    {
+      "route": "/manual-schedule",
+      "title": "Manual Publishing"
+    },
+    {
+      "route": "/approvals",
+      "title": "Approvals"
+    },
+    {
+      "route": "/executions",
+      "title": "Execution History"
+    },
+    {
+      "route": "/knowledge",
+      "title": "Knowledge Base"
+    },
+    {
+      "route": "/ai-providers",
+      "title": "AI Providers & Model Roles"
+    },
+    {
+      "route": "/audit-logs",
+      "title": "Audit Logs"
+    }
+  ],
+  "surfaces": [
+    {
+      "id": "connections.form",
+      "route": "/connections",
+      "title": "Connect database form",
+      "purpose": "Create a new MySQL connection profile (or edit one). Fill the fields, ask the user to type the password in the form, Test, then Save.",
+      "openable": true,
+      "fields": [
+        {
+          "name": "name",
+          "label": "Connection display name",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "host",
+          "label": "Host / address",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "port",
+          "label": "Port",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "database_name",
+          "label": "Database name",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "username",
+          "label": "Username",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "password",
+          "label": "Password",
+          "type": "secret",
+          "required": true
+        },
+        {
+          "name": "ssl_mode",
+          "label": "SSL mode",
+          "type": "select",
+          "required": false,
+          "enum": [
+            "preferred",
+            "required",
+            "disabled"
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "id": "test",
+          "label": "Test Connection",
+          "consequential": false,
+          "timeout_s": 45
+        },
+        {
+          "id": "save",
+          "label": "Save Profile",
+          "consequential": false,
+          "timeout_s": 45,
+          "verifies": "DbConnection"
+        },
+        {
+          "id": "cancel",
+          "label": "Cancel / close the form",
+          "consequential": false,
+          "timeout_s": 10
+        }
+      ]
+    },
+    {
+      "id": "connections.list",
+      "route": "/connections",
+      "title": "Saved connections",
+      "purpose": "Cards for each saved connection with status. Row actions take the connection id as row.",
+      "openable": false,
+      "fields": [],
+      "actions": [
+        {
+          "id": "test",
+          "label": "Test this saved connection",
+          "row": true,
+          "consequential": false,
+          "timeout_s": 45,
+          "verifies": "DbConnection"
+        },
+        {
+          "id": "refresh_schema",
+          "label": "Rescan schema",
+          "row": true,
+          "consequential": false,
+          "timeout_s": 90,
+          "verifies": "DbConnection"
+        },
+        {
+          "id": "edit",
+          "label": "Open the edit form for this connection",
+          "row": true,
+          "consequential": false,
+          "timeout_s": 10
+        },
+        {
+          "id": "remove",
+          "label": "Remove this connection profile (does not touch the database)",
+          "row": true,
+          "consequential": true,
+          "timeout_s": 30
+        }
+      ]
+    },
+    {
+      "id": "explorer.browser",
+      "route": "/explorer",
+      "title": "Schema explorer",
+      "purpose": "Pick a connection and a table to inspect columns, safety tier and relations; add a note; rescan.",
+      "openable": false,
+      "fields": [
+        {
+          "name": "connection",
+          "label": "Target database connection",
+          "type": "searchable_select",
+          "required": true
+        },
+        {
+          "name": "table",
+          "label": "Table",
+          "type": "searchable_select",
+          "required": false
+        },
+        {
+          "name": "note",
+          "label": "Workspace note for the selected table",
+          "type": "textarea",
+          "required": false
+        }
+      ],
+      "actions": [
+        {
+          "id": "refresh",
+          "label": "Rescan schema",
+          "consequential": false,
+          "timeout_s": 90
+        },
+        {
+          "id": "save_note",
+          "label": "Save table note",
+          "consequential": false,
+          "timeout_s": 20
+        }
+      ]
+    },
+    {
+      "id": "automations.list",
+      "route": "/automations",
+      "title": "Automations",
+      "purpose": "Every automation with its schedule and status. Row actions take the automation id as row.",
+      "openable": false,
+      "fields": [],
+      "actions": [
+        {
+          "id": "run_now",
+          "label": "Run this automation now",
+          "row": true,
+          "consequential": true,
+          "timeout_s": 30,
+          "verifies": "Automation"
+        },
+        {
+          "id": "toggle",
+          "label": "Pause or activate this automation",
+          "row": true,
+          "consequential": true,
+          "timeout_s": 20,
+          "verifies": "Automation"
+        },
+        {
+          "id": "remove",
+          "label": "Delete this automation",
+          "row": true,
+          "consequential": true,
+          "timeout_s": 20
+        },
+        {
+          "id": "new",
+          "label": "Open the automation builder",
+          "consequential": false,
+          "timeout_s": 10
+        }
+      ]
+    },
+    {
+      "id": "builder.setup",
+      "route": "/automations/new",
+      "title": "Automation builder, step 1: connection and table",
+      "purpose": "Name the automation and choose the connection, target table, operation and mode. Then Next.",
+      "openable": false,
+      "fields": [
+        {
+          "name": "name",
+          "label": "Automation name",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "connection",
+          "label": "Target connection",
+          "type": "searchable_select",
+          "required": true
+        },
+        {
+          "name": "table",
+          "label": "Target table",
+          "type": "searchable_select",
+          "required": true
+        },
+        {
+          "name": "operation",
+          "label": "Operation",
+          "type": "select",
+          "required": true,
+          "enum": [
+            "INSERT",
+            "UPDATE"
+          ]
+        },
+        {
+          "name": "mode",
+          "label": "Content mode",
+          "type": "select",
+          "required": true,
+          "enum": [
+            "AI_GENERATED",
+            "MANUAL"
+          ]
+        },
+        {
+          "name": "plan_prompt",
+          "label": "Describe the automation in words (AI plan proposal)",
+          "type": "textarea",
+          "required": false
+        }
+      ],
+      "actions": [
+        {
+          "id": "propose_plan",
+          "label": "Let AI propose a plan from the description",
+          "consequential": false,
+          "timeout_s": 240
+        },
+        {
+          "id": "next",
+          "label": "Next step",
+          "consequential": false,
+          "timeout_s": 15
+        }
+      ]
+    },
+    {
+      "id": "builder.mappings",
+      "route": "/automations/new",
+      "title": "Automation builder, step 2: field mappings",
+      "purpose": "Review how each table column is filled. Then Next (or Back).",
+      "openable": false,
+      "fields": [],
+      "actions": [
+        {
+          "id": "back",
+          "label": "Previous step",
+          "consequential": false,
+          "timeout_s": 10
+        },
+        {
+          "id": "next",
+          "label": "Next step",
+          "consequential": false,
+          "timeout_s": 15
+        }
+      ]
+    },
+    {
+      "id": "builder.content",
+      "route": "/automations/new",
+      "title": "Automation builder, step 3: AI and context",
+      "purpose": "Choose the AI provider/model, topic brief, tone and knowledge documents. Then Next.",
+      "openable": false,
+      "fields": [
+        {
+          "name": "provider",
+          "label": "AI provider",
+          "type": "select",
+          "required": true
+        },
+        {
+          "name": "model",
+          "label": "Model",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "topic",
+          "label": "Topic and content brief",
+          "type": "textarea",
+          "required": true
+        },
+        {
+          "name": "tone",
+          "label": "Editorial tone",
+          "type": "text",
+          "required": false
+        }
+      ],
+      "actions": [
+        {
+          "id": "back",
+          "label": "Previous step",
+          "consequential": false,
+          "timeout_s": 10
+        },
+        {
+          "id": "next",
+          "label": "Next step",
+          "consequential": false,
+          "timeout_s": 15
+        }
+      ]
+    },
+    {
+      "id": "builder.schedule",
+      "route": "/automations/new",
+      "title": "Automation builder, step 4: schedule and approval",
+      "purpose": "Frequency, start date, generation and publication times, approval policy. Then Next.",
+      "openable": false,
+      "fields": [
+        {
+          "name": "frequency",
+          "label": "Schedule frequency",
+          "type": "select",
+          "required": true,
+          "enum": [
+            "DAILY",
+            "WEEKLY",
+            "ONE_TIME"
+          ]
+        },
+        {
+          "name": "start_date",
+          "label": "Starting date (YYYY-MM-DD)",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "generation_time",
+          "label": "Background generation time (HH:MM)",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "publication_time",
+          "label": "Publication time (HH:MM)",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "require_approval",
+          "label": "Require email approval",
+          "type": "select",
+          "required": false,
+          "enum": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "name": "reviewer_email",
+          "label": "Reviewer email",
+          "type": "text",
+          "required": false
+        }
+      ],
+      "actions": [
+        {
+          "id": "back",
+          "label": "Previous step",
+          "consequential": false,
+          "timeout_s": 10
+        },
+        {
+          "id": "next",
+          "label": "Next step",
+          "consequential": false,
+          "timeout_s": 15
+        }
+      ]
+    },
+    {
+      "id": "builder.review",
+      "route": "/automations/new",
+      "title": "Automation builder, step 5: preview and enable",
+      "purpose": "Optionally preview generated content, then create the automation.",
+      "openable": false,
+      "fields": [],
+      "actions": [
+        {
+          "id": "preview",
+          "label": "Generate a preview sample",
+          "consequential": false,
+          "timeout_s": 240
+        },
+        {
+          "id": "back",
+          "label": "Previous step",
+          "consequential": false,
+          "timeout_s": 10
+        },
+        {
+          "id": "create",
+          "label": "Create and enable the automation",
+          "consequential": true,
+          "timeout_s": 45,
+          "verifies": "Automation"
+        }
+      ]
+    },
+    {
+      "id": "manual.form",
+      "route": "/manual-schedule",
+      "title": "Manual publishing form",
+      "purpose": "Write and publish (or schedule) content without AI into a connected table. Choose the connection and table first; read_screen lists that table's columns, which you fill as col.<column_name>. Foreign-key columns are dropdowns (choose_option).",
+      "openable": false,
+      "fields": [
+        {
+          "name": "connection",
+          "label": "Target connection",
+          "type": "searchable_select",
+          "required": true
+        },
+        {
+          "name": "table",
+          "label": "Target table",
+          "type": "searchable_select",
+          "required": true
+        },
+        {
+          "name": "col.*",
+          "label": "Column value (col.<column_name>)",
+          "type": "text",
+          "required": false,
+          "dynamic": true
+        },
+        {
+          "name": "publish_mode",
+          "label": "Publish now or schedule",
+          "type": "select",
+          "required": true,
+          "enum": [
+            "NOW",
+            "SCHEDULED"
+          ]
+        },
+        {
+          "name": "scheduled_time",
+          "label": "Scheduled date and time (YYYY-MM-DDTHH:MM)",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "ai_topic",
+          "label": "Topic for the optional AI draft helper",
+          "type": "textarea",
+          "required": false
+        }
+      ],
+      "actions": [
+        {
+          "id": "ai_draft",
+          "label": "Fill the form with an AI draft from the topic",
+          "consequential": false,
+          "timeout_s": 240
+        },
+        {
+          "id": "publish",
+          "label": "Publish now or schedule the record",
+          "consequential": true,
+          "timeout_s": 60,
+          "verifies": "AutomationExecution"
+        }
+      ]
+    },
+    {
+      "id": "approvals.list",
+      "route": "/approvals",
+      "title": "Approvals",
+      "purpose": "AI drafts waiting for approval. Row actions take the draft id (from read_screen) as row.",
+      "openable": false,
+      "fields": [
+        {
+          "name": "reject_feedback",
+          "label": "Rejection feedback (used to regenerate)",
+          "type": "textarea",
+          "required": false
+        }
+      ],
+      "actions": [
+        {
+          "id": "open",
+          "label": "Open this draft for review",
+          "row": true,
+          "consequential": false,
+          "timeout_s": 10
+        },
+        {
+          "id": "approve",
+          "label": "Approve this draft and publish it now",
+          "row": true,
+          "consequential": true,
+          "timeout_s": 45,
+          "verifies": "ContentVersion"
+        },
+        {
+          "id": "reject",
+          "label": "Reject this draft with the feedback field",
+          "row": true,
+          "consequential": true,
+          "timeout_s": 45,
+          "verifies": "ContentVersion"
+        }
+      ]
+    },
+    {
+      "id": "executions.list",
+      "route": "/executions",
+      "title": "Execution history",
+      "purpose": "Automation runs with status. Row actions take the execution id as row.",
+      "openable": false,
+      "fields": [
+        {
+          "name": "status_filter",
+          "label": "Status filter",
+          "type": "select",
+          "required": false,
+          "enum": [
+            "",
+            "PENDING_APPROVAL",
+            "PUBLISHED",
+            "FAILED",
+            "REJECTED",
+            "CANCELLED",
+            "SCHEDULED"
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "id": "view",
+          "label": "Open run details",
+          "row": true,
+          "consequential": false,
+          "timeout_s": 15
+        },
+        {
+          "id": "retry",
+          "label": "Retry this failed run",
+          "row": true,
+          "consequential": true,
+          "timeout_s": 30,
+          "verifies": "AutomationExecution"
+        },
+        {
+          "id": "cancel",
+          "label": "Cancel this run",
+          "row": true,
+          "consequential": true,
+          "timeout_s": 30,
+          "verifies": "AutomationExecution"
+        },
+        {
+          "id": "pause",
+          "label": "Pause this run",
+          "row": true,
+          "consequential": true,
+          "timeout_s": 30,
+          "verifies": "AutomationExecution"
+        },
+        {
+          "id": "resume",
+          "label": "Resume this run",
+          "row": true,
+          "consequential": true,
+          "timeout_s": 30,
+          "verifies": "AutomationExecution"
+        },
+        {
+          "id": "publish_now",
+          "label": "Publish this approved run now",
+          "row": true,
+          "consequential": true,
+          "timeout_s": 45,
+          "verifies": "AutomationExecution"
+        }
+      ]
+    },
+    {
+      "id": "knowledge.page",
+      "route": "/knowledge",
+      "title": "Knowledge base",
+      "purpose": "Upload Markdown/TXT/PDF documents (the user picks the file; the browser cannot), search them, remove them. Row actions take the document id as row.",
+      "openable": false,
+      "fields": [
+        {
+          "name": "title",
+          "label": "Document title",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "file",
+          "label": "File to upload",
+          "type": "file",
+          "required": false
+        },
+        {
+          "name": "search",
+          "label": "Search query",
+          "type": "text",
+          "required": false
+        }
+      ],
+      "actions": [
+        {
+          "id": "choose_file",
+          "label": "Open the file picker for the user",
+          "consequential": false,
+          "timeout_s": 10
+        },
+        {
+          "id": "upload",
+          "label": "Upload the chosen file",
+          "consequential": false,
+          "timeout_s": 120,
+          "verifies": "KnowledgeDocument"
+        },
+        {
+          "id": "search",
+          "label": "Search the knowledge base",
+          "consequential": false,
+          "timeout_s": 60
+        },
+        {
+          "id": "remove",
+          "label": "Remove this document",
+          "row": true,
+          "consequential": true,
+          "timeout_s": 30
+        }
+      ]
+    },
+    {
+      "id": "providers.list",
+      "route": "/ai-providers",
+      "title": "AI providers",
+      "purpose": "Provider cards (ollama, openai, gemini, anthropic). Row is the provider id.",
+      "openable": false,
+      "fields": [],
+      "actions": [
+        {
+          "id": "test",
+          "label": "Test this provider",
+          "row": true,
+          "consequential": false,
+          "timeout_s": 60
+        },
+        {
+          "id": "configure",
+          "label": "Open the configuration form for this provider",
+          "row": true,
+          "consequential": false,
+          "timeout_s": 10
+        }
+      ]
+    },
+    {
+      "id": "providers.form",
+      "route": "/ai-providers",
+      "title": "AI provider configuration form",
+      "purpose": "Model name, base URL and API key for the provider being configured. Ask the user to type the key in the form, then Save.",
+      "openable": false,
+      "fields": [
+        {
+          "name": "model_name",
+          "label": "Model name",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "base_url",
+          "label": "Base URL",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "api_key",
+          "label": "API key",
+          "type": "secret",
+          "required": false
+        }
+      ],
+      "actions": [
+        {
+          "id": "save",
+          "label": "Save provider configuration",
+          "consequential": false,
+          "timeout_s": 45,
+          "verifies": "AiProvider"
+        },
+        {
+          "id": "cancel",
+          "label": "Close the form",
+          "consequential": false,
+          "timeout_s": 10
+        }
+      ]
+    },
+    {
+      "id": "providers.roles",
+      "route": "/ai-providers",
+      "title": "Model roles",
+      "purpose": "Which provider/model each role uses (planner drives Orbit). Row is the role key: planner, generator, classifier, summarizer.",
+      "openable": false,
+      "fields": [
+        {
+          "name": "provider",
+          "label": "Provider for the role",
+          "type": "select",
+          "required": true,
+          "row": true,
+          "enum": [
+            "ollama",
+            "openai",
+            "gemini",
+            "anthropic",
+            "mock"
+          ]
+        },
+        {
+          "name": "model_name",
+          "label": "Model for the role",
+          "type": "text",
+          "required": true,
+          "row": true
+        }
+      ],
+      "actions": [
+        {
+          "id": "probe",
+          "label": "Test this role's model",
+          "row": true,
+          "consequential": false,
+          "timeout_s": 60
+        },
+        {
+          "id": "save",
+          "label": "Save this role",
+          "row": true,
+          "consequential": false,
+          "timeout_s": 30
+        }
+      ]
+    },
+    {
+      "id": "dashboard.page",
+      "route": "/dashboard",
+      "title": "Dashboard",
+      "purpose": "Workspace overview and quick actions.",
+      "openable": false,
+      "fields": [],
+      "actions": [
+        {
+          "id": "run_now",
+          "label": "Run an automation now from the dashboard",
+          "row": true,
+          "consequential": true,
+          "timeout_s": 30,
+          "verifies": "Automation"
+        }
+      ]
+    },
+    {
+      "id": "audit.page",
+      "route": "/audit-logs",
+      "title": "Audit logs",
+      "purpose": "Security-relevant actions in this workspace.",
+      "openable": false,
+      "fields": [
+        {
+          "name": "action_filter",
+          "label": "Action filter",
+          "type": "select",
+          "required": false,
+          "enum": [
+            "ALL",
+            "CONNECTION",
+            "SCHEMA",
+            "AUTOMATION",
+            "APPROVAL"
+          ]
+        }
+      ],
+      "actions": []
+    }
+  ]
+}

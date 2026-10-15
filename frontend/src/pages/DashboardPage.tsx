@@ -27,6 +27,7 @@ import { api } from "../services/api";
 import { StatusPill } from "../components/common/StatusPill";
 import { useLiveEvents } from "../context/LiveEventsContext";
 import { useToast } from "../context/ToastContext";
+import { useOrbitSurface } from "../hooks/useOrbitSurface";
 
 export const DashboardPage: React.FC = () => {
   const [stats, setStats] = useState<any | null>(null);
@@ -89,6 +90,32 @@ export const DashboardPage: React.FC = () => {
       setTriggeringId(null);
     }
   };
+
+  // Orbit surface: workspace overview + run an automation (row = automation id).
+  useOrbitSurface("dashboard.page", () => ({
+    describe: () => ({
+      stats: stats ? { connections: stats.connections ?? stats.connected_databases, automations: stats.automations ?? stats.active_pipelines, pending_approvals: stats.pending_approvals } : null,
+      automations: automations.slice(0, 15).map((a: any) => ({ id: a.id, name: a.name, active: a.is_active })),
+      recent_runs: executions.slice(0, 8).map((e: any) => ({ id: e.id, status: e.status })),
+    }),
+    actions: {
+      run_now: {
+        run: async (row) => {
+          if (!automations.find((a: any) => String(a.id) === String(row))) return { success: false, message: `No automation ${row}.` };
+          try {
+            setTriggeringId(Number(row));
+            const res: any = await api.triggerAutomation(Number(row));
+            loadData(true);
+            return { success: true, message: res?.message || "Run queued.", resource: { type: "Automation", id: Number(row) } };
+          } catch (err: any) {
+            return { success: false, message: err.message || "Could not start the run." };
+          } finally {
+            setTriggeringId(null);
+          }
+        },
+      },
+    },
+  }));
 
   if (loading && !stats) {
     return (

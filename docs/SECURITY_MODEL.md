@@ -94,3 +94,14 @@ Tables matching any of the following patterns are classified as **Restricted** a
 - To prevent enterprise email filters (such as Microsoft Defender and Google Workspace) from automatically clicking links and approving content, email links navigate to a confirmation page:
   `http://localhost:5173/approvals/{token}`
 - The user must explicitly view the draft preview and click **Approve** or **Reject**, submitting an HTTP `POST` request.
+
+---
+
+## Orbit agent security
+
+- **Identity:** the user, workspace and every resource ID are checked server-side (`ToolPolicyGate`) right before each side effect. A model-supplied ID that belongs to another user returns `NOT_FOUND`.
+- **Only registered tools:** the model's tool name is constrained to the available registry (schema enum) and re-validated. Arguments are validated against the same schema (types, enums, no extra properties). No tool runs SQL, DDL or deletes against customer databases.
+- **Secrets:** passwords and API keys go to `SecretVault` (`agent_secure_inputs`, encrypted cast, per task and user, 30-minute TTL, consumed after a verified save). They come from the masked field, or are redacted out of utterances by both the browser and the server. They are injected into tool arguments only at execution time and scrubbed from tool output. They never appear in task plans or slots, messages, tool-call records, UI actions, timeline, live events or model requests; `AgentAutonomousActionTest::assertSecretNowhere` checks this.
+- **Confirmation:** `always_confirm` tools (profile/automation/document removal, published-record edits) always wait for an explicit user confirmation. A spoken "yes" counts only for the exact pending call and only after Orbit asked.
+- **Retrieved content is untrusted:** RAG passages and database text are delimited as reference data in the model request and cannot change policy. Retrieval is limited to product docs plus the requesting user's own partition.
+- **Browser actions** are allowlisted (`UiActionCoordinator::ALLOWED_ACTIONS`, registered routes only). The model cannot send code or selectors. Visible "press" actions never call the API themselves.

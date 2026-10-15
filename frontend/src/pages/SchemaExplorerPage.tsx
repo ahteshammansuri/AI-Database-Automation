@@ -26,7 +26,10 @@ import { api } from "../services/api";
 import { ConnectionProfile, SchemaResponse, SchemaTable } from "../types";
 import { StatusPill } from "../components/common/StatusPill";
 import { SearchableSelect } from "../components/common/SearchableSelect";
-import { actionBridge } from "../services/actionBridge";
+import { useOrbitTarget } from "../hooks/useOrbitTarget";
+import { useOrbitSurface } from "../hooks/useOrbitSurface";
+import { orbitTargets } from "../services/orbitTargets";
+import { fieldTarget } from "../services/orbitSurfaces";
 import { pageStateService } from "../services/pageStateService";
 
 export const SchemaExplorerPage: React.FC = () => {
@@ -35,6 +38,9 @@ export const SchemaExplorerPage: React.FC = () => {
 
   const [connections, setConnections] = useState<ConnectionProfile[]>([]);
   const [selectedConnId, setSelectedConnId] = useState<number | null>(null);
+  const connectionsRef = useRef<ConnectionProfile[]>([]);
+  connectionsRef.current = connections;
+  const connectionSelectRef = useOrbitTarget<HTMLDivElement>("explorer.connection_select");
   const [schema, setSchema] = useState<SchemaResponse | null>(null);
   const schemaRef = useRef<SchemaResponse | null>(null);
   schemaRef.current = schema;
@@ -95,33 +101,69 @@ export const SchemaExplorerPage: React.FC = () => {
 
     pageStateService.setRoute("/explorer", "Schema Explorer");
 
-    const unsubs = [
-      actionBridge.on("explorer.select_connection", async (payload: any) => {
-        if (payload?.connection_id) {
-          await handleConnectionChange(Number(payload.connection_id));
-          return { status: "ok" };
-        }
-        return { status: "validation_error", error: "Missing connection_id" };
-      }),
-      actionBridge.on("explorer.select_table", (payload: any) => {
-        const currentTables = schemaRef.current?.tables;
-        if (payload?.table_name && currentTables) {
-          const match = currentTables.find((t: any) => t.name.toLowerCase() === String(payload.table_name).toLowerCase());
-          if (match) {
-            setSelectedTable(match);
-            return { status: "ok" };
-          }
-          return { status: "validation_error", error: `Table '${payload.table_name}' not found` };
-        }
-        return { status: "validation_error", error: "Missing table_name or schema not loaded" };
-      }),
-    ];
-
     return () => {
       isMounted = false;
-      unsubs.forEach((u) => u());
     };
   }, [connParam]);
+
+  // ---- Orbit surface: pick connection/table from the real loaded options, note, rescan ---------
+  const noteRef = useOrbitTarget<HTMLInputElement>(fieldTarget("explorer.browser", "note"));
+  useOrbitSurface("explorer.browser", () => ({
+    target: "explorer.connection_select",
+    describe: () => ({
+      connection_id: selectedConnId,
+      tables: (schema?.tables || []).slice(0, 60).map((t: any) => ({ name: t.name, tier: t.category ?? t.tier, columns: t.columns?.length })),
+      selected_table: selectedTable ? {
+        name: selectedTable.name,
+        columns: (selectedTable.columns || []).slice(0, 40).map((c: any) => `${c.name}:${c.data_type ?? c.type}${c.is_nullable === false ? "*" : ""}`),
+      } : null,
+    }),
+    fields: {
+      connection: {
+        get: () => selectedConnId,
+        set: async (v) => {
+          const id = Number(v);
+          if (!connectionsRef.current.find((c) => c.id === id)) return `Connection ${v} is not in this workspace.`;
+          await handleConnectionChange(id);
+          return null;
+        },
+        options: () => connectionsRef.current.map((c: any) => ({ value: c.id, label: `${c.name} (${c.database_name || c.database || ""})` })),
+        target: () => "explorer.connection_select",
+      },
+      table: {
+        get: () => selectedTable?.name ?? null,
+        set: (v) => {
+          const match = (schemaRef.current?.tables || []).find((t: any) => t.name.toLowerCase() === String(v).toLowerCase());
+          if (!match) return `Table '${v}' is not in this schema.`;
+          setSelectedTable(match);
+          return null;
+        },
+        options: () => (schemaRef.current?.tables || []).map((t: any) => ({ value: t.name, label: t.name })),
+        target: () => (selectedTable ? `explorer.table.${selectedTable.name}` : "explorer.connection_select"),
+      },
+      note: { get: () => userNote, set: (v) => { setUserNote(String(v ?? "").slice(0, 2000)); return null; } },
+    },
+    actions: {
+      refresh: {
+        enabled: () => !!selectedConnId,
+        run: async () => {
+          try {
+            await handleRefreshSchema();
+            return { success: true, message: "Schema rescanned." };
+          } catch (err: any) {
+            return { success: false, message: err.message || "Rescan failed." };
+          }
+        },
+      },
+      save_note: {
+        enabled: () => !!selectedTable,
+        run: async () => {
+          await handleSaveUserNote();
+          return { success: true, message: `Note saved for ${selectedTable?.name}.` };
+        },
+      },
+    },
+  }));
 
   // Sync userNote when selectedTable changes
   useEffect(() => {
@@ -297,7 +339,7 @@ export const SchemaExplorerPage: React.FC = () => {
         {connections.length > 0 && (
           <div className="flex items-center gap-2">
             <span className="text-xs text-slate-500 font-medium shrink-0">Target DB:</span>
-            <div className="w-64">
+            <div className="w-64" ref={connectionSelectRef}>
               <SearchableSelect
                 value={selectedConnId}
                 onChange={(val) => handleConnectionChange(Number(val))}
@@ -501,6 +543,9 @@ export const SchemaExplorerPage: React.FC = () => {
                   return (
                     <motion.button
                       key={tableName}
+                      ref={(el: HTMLButtonElement | null) =>
+                        el ? orbitTargets.register(`explorer.table.${tableName}`, el) : orbitTargets.unregister(`explorer.table.${tableName}`)
+                      }
                       whileHover={{ x: 2 }}
                       transition={{ duration: 0.15 }}
                       onClick={() => setSelectedTable(t)}
@@ -643,6 +688,7 @@ export const SchemaExplorerPage: React.FC = () => {
                         <input
                           type="text"
                           placeholder="e.g. Primary marketing blog articles table, reviewed by Editorial Team"
+                          ref={noteRef}
                           value={userNote}
                           onChange={(e) => setUserNote(e.target.value)}
                           className="flex-1 px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600"

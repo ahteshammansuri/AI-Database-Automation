@@ -25,6 +25,8 @@ import {
 import { api } from "../services/api";
 import { StatusPill } from "../components/common/StatusPill";
 import { useToast } from "../context/ToastContext";
+import { useOrbitSurface } from "../hooks/useOrbitSurface";
+import { orbitTargets } from "../services/orbitTargets";
 
 interface PendingApprovalItem {
   id: number; // version id
@@ -100,6 +102,71 @@ export const ApprovalsPage: React.FC = () => {
   useEffect(() => {
     loadData();
   }, []);
+
+  // ---- Orbit surface: same API calls as the review modal (row = draft id) ---------------------
+  useOrbitSurface("approvals.list", () => {
+    const find = (row?: string) => approvals.find((a) => String(a.id) === String(row));
+    return {
+      describe: () => approvals.map((a: any) => ({
+        id: a.id, version: a.version_number, status: a.status, created_at: a.created_at,
+        automation: a.execution?.automation?.name ?? a.automation_name ?? undefined,
+        title: a.payload?.title ?? a.payload?.name ?? undefined,
+      })),
+      fields: {
+        reject_feedback: { get: () => rejectFeedback, set: (v) => { setRejectFeedback(String(v ?? "").slice(0, 2000)); return null; } },
+      },
+      actions: {
+        open: {
+          target: (row) => `approvals.row.${row}`,
+          run: (row) => {
+            const item = find(row);
+            if (!item) return { success: false, message: `No draft ${row} waiting for approval.` };
+            openReviewModal(item);
+            return { success: true, message: "Draft opened for review.", data: { payload: item.payload } };
+          },
+        },
+        approve: {
+          target: (row) => `approvals.row.${row}`,
+          run: async (row) => {
+            const item = find(row);
+            if (!item) return { success: false, message: `No draft ${row} waiting for approval.` };
+            try {
+              setIsPublishing(true);
+              const payload = selectedItem && String(selectedItem.id) === String(row) ? editPayload : item.payload;
+              const res: any = await api.portalApprove(item.id, { publish_now: true, payload });
+              setSelectedItem(null);
+              loadData();
+              return { success: true, message: res?.message || "Approved and published.", resource: { type: "ContentVersion", id: item.id } };
+            } catch (err: any) {
+              return { success: false, message: err.message || "Approval failed." };
+            } finally {
+              setIsPublishing(false);
+            }
+          },
+        },
+        reject: {
+          target: (row) => `approvals.row.${row}`,
+          run: async (row) => {
+            const item = find(row);
+            if (!item) return { success: false, message: `No draft ${row} waiting for approval.` };
+            try {
+              setIsRejecting(true);
+              const res: any = await api.portalReject(item.id, rejectFeedback || undefined);
+              setRejectFeedback("");
+              setShowRejectModal(false);
+              setSelectedItem(null);
+              loadData();
+              return { success: true, message: res?.message || "Rejected; a revised version is being generated.", resource: { type: "ContentVersion", id: item.id } };
+            } catch (err: any) {
+              return { success: false, message: err.message || "Rejection failed." };
+            } finally {
+              setIsRejecting(false);
+            }
+          },
+        },
+      },
+    };
+  });
 
   const openReviewModal = (item: PendingApprovalItem) => {
     setSelectedItem(item);
@@ -236,6 +303,9 @@ export const ApprovalsPage: React.FC = () => {
             return (
               <motion.div
                 key={item.id}
+                ref={(el: HTMLDivElement | null) =>
+                  el ? orbitTargets.register(`approvals.row.${item.id}`, el) : orbitTargets.unregister(`approvals.row.${item.id}`)
+                }
                 whileHover={{ y: -2, transition: { duration: 0.2 } }}
                 className="bg-white border border-amber-200 hover:border-amber-300 rounded-2xl p-5 shadow-xs space-y-4 transition-all"
               >

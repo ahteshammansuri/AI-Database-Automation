@@ -22,6 +22,7 @@ class AgentMessage extends Model
         'tool_results',
         'secure_input_type',
         'is_voice',
+        'meta',
         'created_at',
     ];
 
@@ -29,6 +30,7 @@ class AgentMessage extends Model
         'tool_calls' => 'array',
         'tool_results' => 'array',
         'is_voice' => 'boolean',
+        'meta' => 'array',
         'created_at' => 'datetime',
     ];
 

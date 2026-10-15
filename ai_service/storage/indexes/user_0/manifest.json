@@ -1,0 +1,9 @@
+{
+  "source": "docs/orbit-agent/product_context_rag.md",
+  "sha256": "c5efb44f4c7cb47254c10df0cea38db367e384c1b0c8dc25ae8f206a5c7a0b07",
+  "version": "c5efb44f4c7c",
+  "embedding_backend": "lexical-fallback",
+  "dimension": 256,
+  "chunks": 21,
+  "indexed_at": "2026-10-15T15:10:13Z"
+}

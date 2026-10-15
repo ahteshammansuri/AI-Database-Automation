@@ -39,7 +39,9 @@ return [
             'connection' => env('DB_QUEUE_CONNECTION'),
             'table' => env('DB_QUEUE_TABLE', 'jobs'),
             'queue' => env('DB_QUEUE', 'default'),
-            'retry_after' => (int) env('DB_QUEUE_RETRY_AFTER', 90),
+            // Must exceed the longest worker timeout (Orbit agent worker: 700s) so a running
+            // job is never handed to a second worker.
+            'retry_after' => (int) env('DB_QUEUE_RETRY_AFTER', 720),
             'after_commit' => false,
         ],
 

@@ -1,3 +1,4 @@
+import { useOrbitSurface } from "../hooks/useOrbitSurface";
 import React, { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { FileText, RefreshCw, ShieldCheck, Search, Filter, Eye, X } from "lucide-react";
@@ -8,6 +9,18 @@ export const AuditLogsPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [filterAction, setFilterAction] = useState<string>("ALL");
   const [selectedMeta, setSelectedMeta] = useState<any | null>(null);
+
+  // Orbit surface: filter and read the audit trail.
+  useOrbitSurface("audit.page", () => ({
+    describe: () => logs.slice(0, 20).map((l: any) => ({ id: l.id, action: l.action, resource: l.resource_type, at: l.created_at })),
+    fields: {
+      action_filter: {
+        get: () => filterAction,
+        set: (v) => { const f = String(v).toUpperCase(); if (!["ALL", "CONNECTION", "SCHEMA", "AUTOMATION", "APPROVAL"].includes(f)) return "Use ALL, CONNECTION, SCHEMA, AUTOMATION or APPROVAL."; setFilterAction(f); return null; },
+        options: () => ["ALL", "CONNECTION", "SCHEMA", "AUTOMATION", "APPROVAL"].map((v) => ({ value: v, label: v })),
+      },
+    },
+  }));
 
   const fetchLogs = async () => {
     try {

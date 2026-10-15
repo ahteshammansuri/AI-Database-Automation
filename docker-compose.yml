@@ -70,7 +70,43 @@ services:
       dockerfile: Dockerfile
     container_name: db_automation_queue
     restart: unless-stopped
-    command: php artisan queue:work --sleep=2 --tries=3 --timeout=120
+    command: php artisan queue:work --queue=default --sleep=2 --tries=3 --timeout=120
+    environment:
+      - APP_NAME=AI Database Automation
+      - APP_ENV=local
+      - APP_DEBUG=true
+      - APP_URL=http://localhost:8000
+      - DB_CONNECTION=sqlite
+      - DB_DATABASE=/app/database/database.sqlite
+      - AI_SERVICE_URL=http://ai-service:8001
+      - AI_SERVICE_KEY=platform_secret_internal_key_2026
+      - QUEUE_CONNECTION=database
+      - SESSION_DRIVER=database
+      - CACHE_STORE=file
+      - MAIL_MAILER=smtp
+      - MAIL_HOST=mailpit
+      - MAIL_PORT=1025
+      - MAIL_FROM_ADDRESS=notifications@database-automation.local
+      - MAIL_FROM_NAME=AI Database Automation
+    volumes:
+      - laravel_storage:/app/storage
+      - laravel_db:/app/database
+    depends_on:
+      laravel:
+        condition: service_healthy
+    networks:
+      - app-network
+
+  # ----------------------------------------------------------------------------
+  # 3b. Orbit Agent Worker (observe-act turns; longer timeout, own queue)
+  # ----------------------------------------------------------------------------
+  agent-worker:
+    build:
+      context: ./laravel
+      dockerfile: Dockerfile
+    container_name: db_automation_agent_worker
+    restart: unless-stopped
+    command: php artisan queue:work --queue=agent --sleep=1 --tries=1 --timeout=700
     environment:
       - APP_NAME=AI Database Automation
       - APP_ENV=local

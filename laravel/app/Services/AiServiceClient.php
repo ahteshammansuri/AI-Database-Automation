@@ -217,121 +217,32 @@ class AiServiceClient
     }
 
     /**
-     * Call AI microservice to plan agent task tools from user goal.
+     * One step of Orbit's observe-act loop. Never throws: transport failures come back
+     * as success=false with an error category so the caller can report them honestly.
      */
-    public function planAgentTask(
-        string $goalPrompt,
-        array $connections = [],
-        array $tables = [],
-        array $automations = [],
-        array $executions = [],
-        array $conversationHistory = [],
-        ?array $activeTask = null,
-        array $toolAvailability = [],
-        array $accumulatedSlots = [],
-        array $availableTools = [],
-        string $provider = 'mock',
-        ?string $model = null,
-        ?string $apiKey = null
-    ): ?array {
-        try {
-            $res = $this->agentClient(60)->post("{$this->baseUrl}/v1/ai/agent/plan", [
-                'goal_prompt' => $goalPrompt,
-                'has_connections' => !empty($connections),
-                'connections' => $connections,
-                'tables' => $tables,
-                'automations' => $automations,
-                'executions' => $executions,
-                'conversation_history' => $conversationHistory,
-                'active_task' => $activeTask,
-                'tool_availability' => empty($toolAvailability) ? (object) [] : $toolAvailability,
-                'accumulated_slots' => empty($accumulatedSlots) ? (object) [] : $accumulatedSlots,
-                'available_tools' => $availableTools,
-                'provider' => $provider,
-                'model' => $model,
-                'api_key' => $apiKey,
-            ]);
-
-            if ($res->successful()) {
-                $data = $res->json();
-                if (is_array($data) && isset($data['outcome'])) {
-                    return $data;
-                }
-            } else {
-                \Illuminate\Support\Facades\Log::warning("AiServiceClient planAgentTask HTTP {$res->status()}: " . $res->body());
-            }
-        } catch (\Throwable $e) {
-            \Illuminate\Support\Facades\Log::warning("AiServiceClient planAgentTask exception: " . $e->getMessage());
-        }
-
-        return null;
-    }
-
-    /**
-     * Synthesize contextual, truthful spoken natural language summary from verified outcome.
-     */
-    public function synthesizeResponse(
-        string $userGoal,
-        string $actionSummary,
-        string $resultStatus,
-        array $resultData = [],
-        string $provider = 'mock',
-        ?string $model = null,
-        ?string $apiKey = null
-    ): array {
-        try {
-            $res = $this->agentClient(30)->post("{$this->baseUrl}/v1/ai/agent/synthesize-response", [
-                'goal_prompt' => $userGoal,
-                'action_summary' => $actionSummary,
-                'final_status' => $resultStatus,
-                'domain_data' => empty($resultData) ? (object) [] : $resultData,
-                'provider' => $provider,
-                'model' => $model,
-                'api_key' => $apiKey,
-            ]);
-
-            if ($res->successful()) {
-                $data = $res->json();
-                $spoken = $data['spoken_text'] ?? $data['spoken_response'] ?? null;
-                if ($spoken) {
-                    return [
-                        'spoken_response' => $spoken,
-                        'display_summary' => $data['safe_summary'] ?? $actionSummary,
-                        'provider_used' => $provider,
-                    ];
-                }
-            }
-        } catch (\Throwable $e) {
-            \Illuminate\Support\Facades\Log::warning("AiServiceClient synthesizeResponse exception: " . $e->getMessage());
-        }
-
-        return [
-            'spoken_response' => "I have completed your request: {$actionSummary}.",
-            'display_summary' => $actionSummary,
-            'provider_used' => 'fallback',
-        ];
-    }
-
-    /**
-     * Evaluate mid-task correction via AI microservice.
-     */
-    public function evaluateAgentCorrection(string $correctionText, string $activeTaskStatus, ?string $currentStep = null): ?array
+    public function decide(array $payload, int $timeoutSeconds = 150): array
     {
         try {
-            $res = $this->agentClient(30)->post("{$this->baseUrl}/v1/ai/agent/evaluate-correction", [
-                'correction_text' => $correctionText,
-                'active_task_status' => $activeTaskStatus,
-                'current_step' => $currentStep,
-            ]);
-
-            if ($res->successful()) {
+            $res = $this->agentClient($timeoutSeconds)->post("{$this->baseUrl}/v1/ai/agent/decide", $payload);
+            if ($res->successful() && is_array($res->json())) {
                 return $res->json();
             }
-        } catch (\Throwable $e) {
-            // Falls back to Laravel deterministic handler
-        }
+            \Illuminate\Support\Facades\Log::warning("AiServiceClient decide HTTP {$res->status()}");
 
-        return null;
+            return [
+                'success' => false,
+                'error_category' => 'AI_SERVICE_ERROR',
+                'error_message' => "The AI service returned HTTP {$res->status()}.",
+            ];
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('AiServiceClient decide transport error: ' . get_class($e));
+
+            return [
+                'success' => false,
+                'error_category' => 'AI_SERVICE_UNAVAILABLE',
+                'error_message' => 'The AI service could not be reached.',
+            ];
+        }
     }
 
     /**

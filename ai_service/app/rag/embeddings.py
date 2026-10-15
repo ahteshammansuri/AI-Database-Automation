@@ -187,4 +187,5 @@ class EmbeddingService:
 
     @property
     def backend(self) -> str:
-        return "ollama" if self._ollama_ok else "hash_projection"
+        # "lexical-fallback" is token-hash retrieval, not semantic embeddings; report it honestly.
+        return f"ollama:{self._embed_model}" if self._ollama_ok else "lexical-fallback"

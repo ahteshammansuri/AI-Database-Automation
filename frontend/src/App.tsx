@@ -24,17 +24,42 @@ import { ExecutionsPage } from "./pages/ExecutionsPage";
 import { AuditLogsPage } from "./pages/AuditLogsPage";
 import { SecuritySettingsPage } from "./pages/SecuritySettingsPage";
 import { actionBridge } from "./services/actionBridge";
+import { orbitTargets } from "./services/orbitTargets";
+import { orbitSurfaces } from "./services/orbitSurfaces";
+import { api } from "./services/api";
+
+// The surface catalog is owned by the server; pages register handlers against it.
+orbitSurfaces.setLoader(() => api.getAgentSurfaces());
 import { useNavigate } from "react-router-dom";
+
+/** Portal routes Orbit may navigate to (mirrors the server allowlist). */
+const ORBIT_ROUTES = new Set([
+  "/dashboard", "/connections", "/explorer", "/automations", "/automations/new", "/approvals",
+  "/executions", "/knowledge", "/ai-providers", "/audit-logs", "/manual-schedule",
+]);
 
 const NavigationBridge: React.FC = () => {
   const navigate = useNavigate();
 
   React.useEffect(() => {
-    return actionBridge.on("navigation.navigate", (payload: { route: string }) => {
-      if (payload?.route) {
-        navigate(payload.route);
-      }
+    if (localStorage.getItem("auth_token")) void orbitSurfaces.loadCatalog();
+    const offNav = actionBridge.on("navigation.navigate", (payload: { route?: string }) => {
+      const route = payload?.route || "";
+      if (!ORBIT_ROUTES.has(route)) return { status: "error", error: `Route '${route}' is not registered.` };
+      navigate(route);
+      return { status: "ok" };
     });
+    const offFocus = actionBridge.on("ui.focus_target", async (payload: { target?: string }) => {
+      const el = payload?.target ? await orbitTargets.waitFor(payload.target, 1500) : null;
+      if (!el) return { status: "not_mounted", error: `Target '${payload?.target}' is not on screen.` };
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      if (typeof (el as HTMLInputElement).focus === "function") (el as HTMLInputElement).focus({ preventScroll: true });
+      return { status: "ok" };
+    });
+    return () => {
+      offNav();
+      offFocus();
+    };
   }, [navigate]);
 
   return null;

@@ -1,6 +1,6 @@
 import React from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { useAssistant } from "../../context/AssistantContext";
+import { useAssistant, ACTIVE_TASK_STATUSES } from "../../context/AssistantContext";
 import { OrbitalCoreCharacter } from "./OrbitalCoreCharacter";
 import { ShieldAlert, Square, Pause, ExternalLink } from "lucide-react";
 
@@ -16,13 +16,7 @@ export const ActiveTaskGuardBanner: React.FC = () => {
 
   if (!activeTask) return null;
 
-  const isWorking = [
-    "RUNNING",
-    "COMMITTING",
-    "PLANNING",
-    "THINKING",
-    "VALIDATING",
-  ].includes(activeTask.status);
+  const isWorking = ACTIVE_TASK_STATUSES.includes(activeTask.status);
 
   if (!isWorking) return null;
 

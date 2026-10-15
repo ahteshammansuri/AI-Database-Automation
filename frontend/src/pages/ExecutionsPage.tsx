@@ -36,6 +36,8 @@ import { StatusPill } from "../components/common/StatusPill";
 import { SearchableSelect } from "../components/common/SearchableSelect";
 import { useLiveEvents } from "../context/LiveEventsContext";
 import { useToast } from "../context/ToastContext";
+import { useOrbitSurface } from "../hooks/useOrbitSurface";
+import { orbitTargets } from "../services/orbitTargets";
 
 export const ExecutionsPage: React.FC = () => {
   const [executions, setExecutions] = useState<any[]>([]);
@@ -92,6 +94,56 @@ export const ExecutionsPage: React.FC = () => {
     });
     return unsubscribe;
   }, [addListener, page, selectedStatus]);
+
+  // ---- Orbit surface: the same API calls as the row buttons (row = execution id) --------------
+  useOrbitSurface("executions.list", () => {
+    const find = (row?: string) => executions.find((e: any) => String(e.id) === String(row));
+    const rowCall = (verb: string, call: (id: number) => Promise<any>) => ({
+      target: (row?: string) => `executions.row.${row}`,
+      run: async (row?: string) => {
+        if (!find(row)) return { success: false, message: `No run ${row} in the visible list (try the status filter or read_screen).` };
+        try {
+          setProcessingId(Number(row));
+          const res: any = await call(Number(row));
+          loadData(true);
+          return { success: true, message: res?.message || `${verb} done.`, resource: { type: "AutomationExecution", id: Number(row) } };
+        } catch (err: any) {
+          return { success: false, message: err.message || `${verb} failed.` };
+        } finally {
+          setProcessingId(null);
+        }
+      },
+    });
+    return {
+      describe: () => executions.map((e: any) => ({
+        id: e.id, automation: e.automation?.name ?? e.automation_name ?? e.automation_id, status: e.status,
+        created_at: e.created_at, error: e.error_message ? String(e.error_message).slice(0, 160) : undefined,
+      })),
+      fields: {
+        status_filter: {
+          get: () => selectedStatus,
+          set: (v) => { setSelectedStatus(String(v ?? "")); setPage(1); return null; },
+          options: () => ["", "PENDING_APPROVAL", "PUBLISHED", "FAILED", "REJECTED", "CANCELLED", "SCHEDULED"].map((v) => ({ value: v, label: v || "All" })),
+        },
+      },
+      actions: {
+        view: {
+          target: (row) => `executions.row.${row}`,
+          run: async (row) => {
+            const e = find(row);
+            if (!e) return { success: false, message: `No run ${row} in the visible list.` };
+            await handleViewExecution(e);
+            return { success: true, message: "Run details opened.", data: { status: e.status, error: e.error_message } };
+          },
+        },
+        retry: rowCall("Retry", (id) => api.retryExecution(id)),
+        cancel: rowCall("Cancel", (id) => api.cancelExecution(id)),
+        pause: rowCall("Pause", (id) => api.pauseExecution(id)),
+        resume: rowCall("Resume", (id) => api.resumeExecution(id)),
+        publish_now: rowCall("Publish", (id) => api.publishNow(id)),
+      },
+    };
+  });
 
   const handleViewExecution = async (execSummary: any) => {
     setSelectedExecution(execSummary);
@@ -312,7 +364,13 @@ export const ExecutionsPage: React.FC = () => {
                   const execDuration = e.execution_duration_ms ? `${(e.execution_duration_ms / 1000).toFixed(2)}s` : "-";
 
                   return (
-                    <tr key={e.id} className="hover:bg-slate-50/70 transition-colors font-mono">
+                    <tr
+                      key={e.id}
+                      ref={(el: HTMLTableRowElement | null) =>
+                        el ? orbitTargets.register(`executions.row.${e.id}`, el) : orbitTargets.unregister(`executions.row.${e.id}`)
+                      }
+                      className="hover:bg-slate-50/70 transition-colors font-mono"
+                    >
                       <td className="py-3 px-4 font-bold text-slate-900">#{e.id}</td>
                       <td className="py-3 px-4 font-sans text-slate-800 font-medium">
                         {e.automation?.name || `Automation #${e.automation_id}`}

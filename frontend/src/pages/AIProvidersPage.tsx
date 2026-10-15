@@ -18,7 +18,10 @@ import {
 import { api } from "../services/api";
 import { AIProviderInfo } from "../types";
 import { ModelRolesSection } from "../components/agent/ModelRolesSection";
-import { actionBridge } from "../services/actionBridge";
+import { useOrbitSurface } from "../hooks/useOrbitSurface";
+import { useOrbitTarget } from "../hooks/useOrbitTarget";
+import { orbitTargets } from "../services/orbitTargets";
+import { actionTarget, fieldTarget } from "../services/orbitSurfaces";
 import { pageStateService } from "../services/pageStateService";
 
 export const AIProvidersPage: React.FC = () => {
@@ -52,16 +55,6 @@ export const AIProvidersPage: React.FC = () => {
     pageStateService.setRoute("/ai-providers", "AI Providers & Model Roles");
     loadProviders();
 
-    const unsubs = [
-      actionBridge.on("providers.test_ollama", async () => {
-        await handleTestProvider("ollama");
-        return { status: "ok" };
-      }),
-    ];
-
-    return () => {
-      unsubs.forEach((u) => u());
-    };
   }, []);
 
   const handleTestProvider = async (providerId: string, modelName?: string) => {
@@ -78,6 +71,83 @@ export const AIProvidersPage: React.FC = () => {
       setTestingId(null);
     }
   };
+
+  // ---- Orbit surfaces ----------------------------------------------------------------------
+  const modelRef = useOrbitTarget<HTMLInputElement>(fieldTarget("providers.form", "model_name"));
+  const baseUrlRef = useOrbitTarget<HTMLInputElement>(fieldTarget("providers.form", "base_url"));
+  const apiKeyRef = useOrbitTarget<HTMLInputElement>(fieldTarget("providers.form", "api_key"));
+  const saveRef = useOrbitTarget<HTMLButtonElement>(actionTarget("providers.form", "save"));
+  const formBoxRef = useOrbitTarget<HTMLDivElement>("providers.form");
+
+  useOrbitSurface("providers.list", () => ({
+    describe: () => providers.map((p) => ({
+      id: p.provider_id, name: (p as any).name ?? p.provider_id, configured: (p as any).configured ?? undefined,
+      current_model: p.current_model, last_test: testResults[p.provider_id]?.message,
+    })),
+    actions: {
+      test: {
+        target: (row) => `providers.card.${row}`,
+        run: async (row) => {
+          const p = providers.find((x) => x.provider_id === row);
+          if (!p) return { success: false, message: `No provider '${row}' on this page.` };
+          setTestingId(p.provider_id);
+          try {
+            const res = await api.checkAIProviderHealth(p.provider_id, p.current_model);
+            setTestResults((prev) => ({ ...prev, [p.provider_id]: res }));
+            return { success: !!res.available, message: res.message || (res.available ? "Provider is available." : "Provider is not available.") };
+          } catch (err: any) {
+            setTestResults((prev) => ({ ...prev, [p.provider_id]: { available: false, message: err.message } }));
+            return { success: false, message: err.message || "Health check failed." };
+          } finally {
+            setTestingId(null);
+          }
+        },
+      },
+      configure: {
+        target: (row) => `providers.card.${row}`,
+        run: (row) => {
+          const p = providers.find((x) => x.provider_id === row);
+          if (!p) return { success: false, message: `No provider '${row}' on this page.` };
+          openConfigModal(p);
+          return { success: true, message: `Configuration form opened for ${p.provider_id}.` };
+        },
+      },
+    },
+  }));
+
+  useOrbitSurface("providers.form", () => ({
+    isOpen: () => !!editingProvider,
+    target: "providers.form",
+    fields: {
+      model_name: { get: () => modelName, set: (v) => { const t = String(v ?? "").trim(); if (!t) return "Model name is required."; setModelName(t); return null; } },
+      base_url: { get: () => baseUrl, set: (v) => { const t = String(v ?? "").trim(); if (t && !/^https?:\/\//.test(t)) return "Base URL must start with http:// or https://"; setBaseUrl(t); return null; } },
+      api_key: { get: () => apiKey, set: () => "The user must type the API key themselves." },
+    },
+    actions: {
+      save: {
+        enabled: () => !!editingProvider && !!modelName,
+        run: async () => {
+          if (!editingProvider) return { success: false, message: "No provider form is open." };
+          setIsSaving(true);
+          try {
+            const res: any = await api.saveAIProvider({
+              provider_type: editingProvider.provider_id, model_name: modelName,
+              api_key: apiKey || undefined, base_url: baseUrl || undefined,
+            });
+            setEditingProvider(null);
+            setApiKey("");
+            loadProviders();
+            return { success: true, message: res?.message || "Provider saved.", resource: res?.provider?.id ? { type: "AiProvider", id: res.provider.id } : undefined };
+          } catch (err: any) {
+            return { success: false, message: err.message || "Saving the provider failed." };
+          } finally {
+            setIsSaving(false);
+          }
+        },
+      },
+      cancel: { run: () => { setEditingProvider(null); return { success: true, message: "Form closed." }; } },
+    },
+  }));
 
   const openConfigModal = (p: AIProviderInfo) => {
     setEditingProvider(p);
@@ -203,6 +273,9 @@ export const AIProvidersPage: React.FC = () => {
           return (
             <motion.div
               key={p.provider_id}
+              ref={(el: HTMLDivElement | null) =>
+                el ? orbitTargets.register(`providers.card.${p.provider_id}`, el) : orbitTargets.unregister(`providers.card.${p.provider_id}`)
+              }
               variants={{
                 hidden: { opacity: 0, y: 12 },
                 visible: { opacity: 1, y: 0 }
@@ -327,6 +400,7 @@ export const AIProvidersPage: React.FC = () => {
             />
 
             <motion.div
+              ref={formBoxRef}
               initial={{ scale: 0.95, opacity: 0, y: 15 }}
               animate={{ scale: 1, opacity: 1, y: 0 }}
               exit={{ scale: 0.95, opacity: 0, y: 15 }}
@@ -372,6 +446,7 @@ export const AIProvidersPage: React.FC = () => {
                   <input
                     type="text"
                     required
+                    ref={modelRef}
                     value={modelName}
                     onChange={(e) => setModelName(e.target.value)}
                     placeholder={editingProvider.current_model || "e.g. llama3, gpt-4o, claude-3-5-sonnet"}
@@ -386,6 +461,7 @@ export const AIProvidersPage: React.FC = () => {
                     </label>
                     <input
                       type="text"
+                      ref={baseUrlRef}
                       value={baseUrl}
                       onChange={(e) => setBaseUrl(e.target.value)}
                       placeholder="http://localhost:11434"
@@ -404,6 +480,7 @@ export const AIProvidersPage: React.FC = () => {
                       </span>
                     </label>
                     <input
+                      ref={apiKeyRef}
                       type="password"
                       value={apiKey}
                       onChange={(e) => setApiKey(e.target.value)}
@@ -427,6 +504,7 @@ export const AIProvidersPage: React.FC = () => {
                     Cancel
                   </motion.button>
                   <motion.button
+                    ref={saveRef}
                     type="submit"
                     whileHover={{ scale: 1.02 }}
                     whileTap={{ scale: 0.98 }}

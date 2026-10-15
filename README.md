@@ -9,7 +9,7 @@
 
 A production-grade, self-service web application where users register, connect their own MySQL databases through an authenticated portal, inspect discovered schema, configure their own AI provider credentials (local Ollama or cloud LLMs), author RAG business context, and execute safe automated content pipelines with durable background workers and human-in-the-loop email approvals.
 
-The platform includes **Orbit** — an autonomous, voice-first companion mascot that actively operates the portal on the user's behalf using natural voice commands, dynamically discovered backend capabilities, and sub-second planning.
+The platform includes **Orbit**, a voice-first companion that operates the portal on your behalf. Your configured model chooses real registered tools, Laravel runs and verifies them, and Orbit reports what actually happened.
 
 ---
 
@@ -50,7 +50,7 @@ The application is engineered into three cleanly decoupled tiers, supervised by 
 |   - Safe Parameterized Target Executor (INSERT & Primary-Key Scoped UPDATE Only)      |
 |   - Supervised Queue Worker (`queue:work`) & Background Scheduler (`schedule:work`)    |
 |   - Signed Single-Use Approval Token & Mail Delivery Engine                           |
-|   - Dynamic Agent Tool Registry & Sub-Second Execution Pipeline                        |
+|   - Agent Tool Registry & Orbit Observe-Act Loop (queued, verified)                     |
 +------------------------------------------+--------------------------------------------+
                                            | Internal HTTP (X-Service-Token)
                                            v
@@ -133,7 +133,7 @@ If you prefer to run the components directly on your host machine without Docker
 - **Python 3.10+** (Python 3.12 recommended)
 - **Node.js 18+** & **npm**
 - **MySQL 8.0** (or Docker MySQL on port 3308/3309)
-- *(Optional)* **Ollama** installed locally (`ollama run llama3.2:1b`)
+- **Ollama** installed locally, with `qwen2.5:3b` and `nomic-embed-text` pulled (see section 5); optional cloud providers use your own API key
 
 ### Step 1: Environment Configuration
 ```bash
@@ -189,9 +189,10 @@ Run the supervised root startup script:
 This single command launches:
 1. Python AI Service on `http://127.0.0.1:8001`
 2. Laravel Control Plane on `http://127.0.0.1:8000` (8 workers)
-3. Laravel Supervised Queue Worker (`php artisan queue:work`)
-4. Laravel Background Scheduler (`php artisan schedule:work`)
-5. React Frontend on `http://localhost:5173`
+3. Laravel Supervised Queue Worker (`php artisan queue:work --queue=default`)
+4. Orbit Agent Worker (`php artisan queue:work --queue=agent --timeout=700`)
+5. Laravel Background Scheduler (`php artisan schedule:work`)
+6. React Frontend on `http://localhost:5173`
 
 Press `Ctrl+C` to gracefully terminate all services.
 
@@ -256,16 +257,38 @@ Follow this end-to-end walkthrough on a clean installation:
 
 ## 5. Orbit — Voice-First Website Operator
 
-The platform includes **Orbit**, an autonomous 3D companion mascot that floats in the bottom-right corner of authenticated routes.
+Orbit is the articulated companion in the bottom-right corner of the signed-in portal. It is an agent, not a script:
 
-### Capabilities:
-- **Natural Voice Control:** Speak directly to Orbit: *"Connect to my local MySQL database"*, *"Scan the schema"*, *"Create a blog automation"*, or *"What tables are restricted?"*.
-- **Sub-Second Latency:** Uses deterministic capability routing with local LLM synthesis, executing turns in under **0.5 seconds**.
-- **1-Click Quick Actions:** Includes visual chips for instant execution (`⚡ Connect MySQL`, `🔍 Scan Schema`, `📝 Create Blog Automation`).
-- **Interactive HUD:** Features live microphone visualization, waveform animations, sound effects, action status logs, and an integrated text input box.
-- **Hands-Free Barge-In:** Press `Escape` or the **Stop** button at any time to cancel active tasks immediately.
-- **Keyboard Shortcuts:** `Cmd+J` or `Ctrl+J` activates voice recording globally.
-- **Secure Password Handling:** For database passwords and provider API keys, Orbit presents an on-screen masked input card (`SecureCredentialCard.tsx`) rather than asking over audio.
+1. Every request you speak (or type) goes to **your configured model**, together with live context: current page and form, your connections, the current task, recent conversation, and relevant passages from the product guide and your knowledge base.
+2. The model picks a **real registered tool**. Laravel checks it (ownership, arguments, confirmation policy), runs it, verifies the result, and sends the result back to the model, which decides the next step.
+3. Orbit **visibly operates the page**: it flies to the real button or field, fills controlled form state, and presses controls. It then speaks only what actually happened.
+
+How it is built: [`docs/orbit-agent/ARCHITECTURE.md`](docs/orbit-agent/ARCHITECTURE.md). The pre-upgrade audit: [`docs/orbit-agent/CURRENT_STATE_AUDIT.md`](docs/orbit-agent/CURRENT_STATE_AUDIT.md).
+
+### Required local models (no paid API)
+
+```bash
+ollama pull qwen2.5:3b         # drives Orbit (choose it under AI Providers → Model Roles → Agent Planner)
+ollama pull nomic-embed-text   # embeddings for knowledge retrieval (without it, retrieval falls back to lexical matching)
+```
+
+On CPU-only machines a single model decision can take **20–90 s**, and longer under heavy load, so a multi-step task can take minutes. The work runs on a background queue, so you can keep using the portal or close the tab. Timeouts are configurable in `laravel/config/orbit.php`.
+
+### Using Orbit
+- **Talk:** hold Orbit (or the mic button) and speak; release to send. Or tap to start and stop. `Ctrl/Cmd+J` toggles listening. Speaking again interrupts Orbit's reply.
+- **It does the work on screen.** Ask "connect my database", "create a daily blog automation", "approve the pending draft" or "how do I add an OpenAI key?". Orbit goes to the page, opens the form, fills what it knows, asks only for what's missing, picks options from the real dropdowns, and presses the real buttons, while you watch. Changes that matter (deleting, publishing, running) wait for your OK.
+- **Passwords and API keys:** Orbit points at the form's own password/key box and you type it there yourself. Press Enter or "Continue with Orbit". The value goes only from that form to the portal's API; it never reaches the AI model, the chat or the logs.
+- **Type instead:** a small toggle in the panel, for accessibility or when voice is unavailable.
+- **Stop / Pause / Resume** control a running task. No new step starts after Stop; anything already committed is reported as committed.
+- **Memory:** Orbit remembers what you said earlier in the conversation, such as the connection name and earlier answers.
+- **Character:** Orbit is a real-time 3D character (Three.js) that reacts to what is really happening. With no WebGL it falls back to a vector version.
+- **Voice privacy:** browser speech recognition in Chrome/Edge may send audio to the browser vendor. Orbit tells you this the first time you use it.
+
+### Required background worker
+Orbit's turns run on the `agent` queue; `./run_all.sh` starts two dedicated workers (restart it after updating):
+```bash
+php artisan queue:work --queue=agent --sleep=1 --tries=1 --timeout=700
+```
 
 ---
 

@@ -1,886 +1,389 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  Mic,
-  MicOff,
-  Volume2,
-  VolumeX,
-  Square,
-  Pause,
-  Play,
-  CheckCircle2,
-  AlertTriangle,
-  ChevronDown,
-  Shield,
-  Loader2,
-  Radio,
-  Sparkles,
-  Keyboard,
-  Compass,
-  Layers,
-  Volume1,
-  RotateCcw,
+  AlertTriangle, CheckCircle2, ChevronDown, Circle, History, Keyboard, Loader2, Mic, MicOff, Pause, Play,
+  Shield, Sparkles, Square, Volume2, VolumeX, XCircle,
 } from "lucide-react";
-import { OrbitMascotCharacter, CharacterState, CharacterAngle } from "./OrbitMascotCharacter";
-import { AgentTask, AgentTimelineEvent, AgentMessage } from "../../context/AssistantContext";
+import { OrbitMascotCharacter, CharacterState } from "./OrbitMascotCharacter";
+import { SecureCredentialCard } from "./SecureCredentialCard";
+import { useAssistant, ACTIVE_TASK_STATUSES } from "../../context/AssistantContext";
+import { collapseTimeline } from "../../services/orbitBehavior";
 import { usePressAndHold } from "../../hooks/usePressAndHold";
 import soundManager from "../../services/soundEffects";
 
 export interface AgentOperationalHUDProps {
   isOpen: boolean;
   onClose: () => void;
-  messages?: AgentMessage[];
   characterState: CharacterState;
-  activeTask: AgentTask | null;
-  timelineEvents: AgentTimelineEvent[];
   isListening: boolean;
-  isSpeaking: boolean;
   transcript: string;
   interimTranscript: string;
-  lastSpokenText: string;
   voiceError: string | null;
-  voiceResponsesEnabled: boolean;
-  onToggleVoiceResponses: () => void;
+  audioLevel: number | null;
+  voiceSupported: boolean;
+  usesRemoteRecognition: boolean;
   onStartListening: () => void;
   onStopListening: () => void;
   onToggleListening: () => void;
-  onInterrupt: (action?: "STOP" | "PAUSE") => Promise<void>;
-  onConfirmTask: () => Promise<void>;
-  onSubmitSecureInput: (data: any) => Promise<void>;
-  onSendInstruction?: (text: string) => void;
-  onSelectBehavior?: (state: CharacterState) => void;
-  onSelectAngle?: (angle: CharacterAngle) => void;
-  isLoading: boolean;
 }
 
-const AVAILABLE_ANGLES: { id: CharacterAngle; label: string; deg: string }[] = [
-  { id: "front", label: "Front", deg: "0°" },
-  { id: "front_three_quarter", label: "3/4 View", deg: "45°" },
-  { id: "side", label: "Side", deg: "90°" },
-  { id: "rear_three_quarter", label: "Rear 3/4", deg: "135°" },
-  { id: "back", label: "Back", deg: "180°" },
-  { id: "left", label: "Left", deg: "270°" },
+const PREVIEW_STATES: CharacterState[] = [
+  "idle", "greeting", "listening", "thinking", "speaking", "moving", "pointing", "clicking", "typing",
+  "working", "validating", "waiting_for_user", "needs_confirmation", "success", "warning", "error", "paused", "offline",
 ];
 
-export interface BehaviorSpec {
-  id: CharacterState;
-  label: string;
-  category: "Actions" | "Expressions" | "Workflow" | "Alerts";
-  soundTitle: string;
-  soundDesc: string;
-  visualDesc: string;
+const DISCLOSURE_KEY = "orbit_stt_disclosure_ack";
+
+function stageText(stage: string | null, tool: string | null | undefined, status: string | undefined,
+  queue?: { ahead: number; worker_alive: boolean } | null): string {
+  if (status === "QUEUED" && queue) {
+    if (!queue.worker_alive) return "Waiting — no Orbit worker is running";
+    if (queue.ahead > 0) return `Waiting behind ${queue.ahead} other Orbit task${queue.ahead > 1 ? "s" : ""}`;
+    return "Starting now";
+  }
+  switch (stage) {
+    case "QUEUED":
+      return "Queued";
+    case "UNDERSTANDING":
+      return "Reading your request";
+    case "THINKING":
+      return "Thinking";
+    case "CALLING_TOOL":
+      return tool ? `Working: ${tool}` : "Working";
+  }
+  switch (status) {
+    case "WAITING_FOR_INPUT":
+      return "Waiting for your answer";
+    case "WAITING_FOR_APPROVAL":
+      return "Waiting for your confirmation";
+    case "PAUSED":
+      return "Paused";
+    case "SUCCEEDED":
+      return "Done — verified";
+    case "PARTIAL_SUCCESS":
+      return "Partly done";
+    case "FAILED":
+      return "Could not finish";
+    case "CANCELLED":
+      return "Stopped";
+    case "INTERRUPT_REQUESTED":
+      return "Stopping at the next safe step";
+    case "PAUSE_REQUESTED":
+      return "Pausing at the next safe step";
+  }
+  return "Ready";
 }
 
-const ALL_BEHAVIORS: BehaviorSpec[] = [
-  // Actions
-  {
-    id: "navigating",
-    label: "Navigating UI",
-    category: "Actions",
-    soundTitle: "Radar Blip (800→1200Hz)",
-    soundDesc: "High-definition interface ping",
-    visualDesc: "Levitates smoothly, points arm toward target menu/button",
-  },
-  {
-    id: "clicking",
-    label: "Clicking / Interacting",
-    category: "Actions",
-    soundTitle: "Cybernetic Snap (1400→400Hz)",
-    soundDesc: "Tactile mechanical-digital snap",
-    visualDesc: "Interactive tap with holographic concentric ripple wave",
-  },
-  {
-    id: "typing",
-    label: "Typing Data",
-    category: "Actions",
-    soundTitle: "Micro-Keyboard Chirps (950→1350Hz)",
-    soundDesc: "Rapid cybernetic key clatter",
-    visualDesc: "Enters data into forms on glowing holographic keyboard",
-  },
-  {
-    id: "processing",
-    label: "Processing Data",
-    category: "Actions",
-    soundTitle: "Orbital Rings Hum (440+444Hz)",
-    soundDesc: "Dual-oscillator gyroscopic binaural pulse",
-    visualDesc: "Analyzing database metadata with spinning orbital rings",
-  },
-  {
-    id: "flying",
-    label: "Flying / Jet",
-    category: "Actions",
-    soundTitle: "Aero Thruster Glide (180→360Hz)",
-    soundDesc: "Smooth propulsion frequency slide",
-    visualDesc: "High-speed levitation dash with glowing blue thruster trail",
-  },
-  {
-    id: "working",
-    label: "Executing",
-    category: "Actions",
-    soundTitle: "Task Execution Hum",
-    soundDesc: "Harmonic active computation tone",
-    visualDesc: "Performs validated, policy-governed database actions",
-  },
-
-  // Expressions
-  {
-    id: "idle",
-    label: "Idle / Waiting",
-    category: "Expressions",
-    soundTitle: "Ambient Hover",
-    soundDesc: "Subtle aerodynamic levitation tone",
-    visualDesc: "Calm levitation, natural blinking, friendly demeanor",
-  },
-  {
-    id: "listening",
-    label: "Listening",
-    category: "Expressions",
-    soundTitle: "Ping-Pong Chime (880→1174Hz)",
-    soundDesc: "Ascending two-tone welcoming ping",
-    visualDesc: "Antenna glowing cyan, attentive forward gaze",
-  },
-  {
-    id: "thinking",
-    label: "Thinking",
-    category: "Expressions",
-    soundTitle: "Curiosity Hum (260→320Hz)",
-    soundDesc: "Gentle rhythmic low-pass oscillation",
-    visualDesc: "Inquisitive eye shift, calculating next action",
-  },
-  {
-    id: "celebrate",
-    label: "Celebration",
-    category: "Expressions",
-    soundTitle: "Fanfare Arpeggio (523→1318Hz)",
-    soundDesc: "Ascending major pentatonic sparkle",
-    visualDesc: "Joyful celebratory leap with sparkle stars & cape flutter",
-  },
-
-  // Workflow
-  {
-    id: "understanding",
-    label: "Understanding",
-    category: "Workflow",
-    soundTitle: "Harmonic Fifth (440→659Hz)",
-    soundDesc: "Clean ascending fifth acknowledgment",
-    visualDesc: "Curious head tilt, recognizing voice intent",
-  },
-  {
-    id: "planning",
-    label: "Planning",
-    category: "Workflow",
-    soundTitle: "Projector Sweep (350→950Hz)",
-    soundDesc: "Holographic bandpass filter sweep",
-    visualDesc: "Interactive holographic blueprint tablet display",
-  },
-  {
-    id: "validating",
-    label: "Validating",
-    category: "Workflow",
-    soundTitle: "Octave Check (587→1174Hz)",
-    soundDesc: "High-precision constraint check ping",
-    visualDesc: "Scanning schema constraints, safety rules & unique indexes",
-  },
-  {
-    id: "success",
-    label: "Task Success",
-    category: "Workflow",
-    soundTitle: "Major Triad (C5-E5-G5)",
-    soundDesc: "Warm triumphal 523/659/784Hz bell chord",
-    visualDesc: "Task verified and complete with glowing green shield",
-  },
-
-  // Alerts
-  {
-    id: "warning",
-    label: "Warning / Oops",
-    category: "Alerts",
-    soundTitle: "Caution Chime (587→440Hz)",
-    soundDesc: "Gentle descending triangle wave",
-    visualDesc: "Puzzled shrug with soft amber warning glow",
-  },
-  {
-    id: "error",
-    label: "Alert / Error",
-    category: "Alerts",
-    soundTitle: "Alert Minor Chord (380→290Hz)",
-    soundDesc: "Descending minor alert with harmonic buzz",
-    visualDesc: "Vibrant red alert aura with determined >_< expression",
-  },
-  {
-    id: "interrupted",
-    label: "Interrupted",
-    category: "Alerts",
-    soundTitle: "Brake Pop (600→180Hz)",
-    soundDesc: "Instant acoustic damping brake",
-    visualDesc: "Halted action, directly looking at user for guidance",
-  },
-  {
-    id: "offline",
-    label: "Standby Mode",
-    category: "Alerts",
-    soundTitle: "Power Down Tone (440→110Hz)",
-    soundDesc: "Soft descending power-down decay",
-    visualDesc: "LED display dimmed into restful sleep mode",
-  },
-];
+const TimelineIcon: React.FC<{ status: string }> = ({ status }) => {
+  if (status === "succeeded") return <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />;
+  if (status === "failed") return <XCircle className="w-3 h-3 text-rose-400 shrink-0" />;
+  if (status === "running") return <Loader2 className="w-3 h-3 text-cyan-400 animate-spin shrink-0" />;
+  if (status === "waiting") return <Circle className="w-3 h-3 text-amber-400 shrink-0" />;
+  if (status === "cancelled" || status === "stopped") return <Square className="w-3 h-3 text-slate-400 shrink-0" />;
+  return <Circle className="w-3 h-3 text-slate-500 shrink-0" />;
+};
 
 export const AgentOperationalHUD: React.FC<AgentOperationalHUDProps> = ({
-  isOpen,
-  onClose,
-  messages = [],
-  characterState,
-  activeTask,
-  timelineEvents,
-  isListening,
-  isSpeaking,
-  transcript,
-  interimTranscript,
-  lastSpokenText,
-  voiceError,
-  voiceResponsesEnabled,
-  onToggleVoiceResponses,
-  onStartListening,
-  onStopListening,
-  onToggleListening,
-  onInterrupt,
-  onConfirmTask,
-  onSubmitSecureInput,
-  onSendInstruction,
-  onSelectBehavior,
-  onSelectAngle,
-  isLoading,
+  isOpen, onClose, characterState, isListening, transcript, interimTranscript, voiceError, audioLevel,
+  voiceSupported, usesRemoteRecognition, onStartListening, onStopListening, onToggleListening,
 }) => {
-  const [showKeyboardFallback, setShowKeyboardFallback] = useState(false);
-  const [showAngleStudio, setShowAngleStudio] = useState(false);
-  const [showBehaviorStudio, setShowBehaviorStudio] = useState(false);
-  const [inspectedAngle, setInspectedAngle] = useState<CharacterAngle>("front");
-  const [inspectedBehavior, setInspectedBehavior] = useState<CharacterState>("navigating");
-  const [behaviorCategory, setBehaviorCategory] = useState<string>("All");
-  const [isAudioMuted, setIsAudioMuted] = useState<boolean>(soundManager.isMuted());
-  const [accessibleText, setAccessibleText] = useState("");
+  const {
+    messages, activeTask, timelineEvents, speech, narration, turnStage, toolActivity, secureInputRequest, queueStatus,
+    awaitingConfirmation, voiceResponsesEnabled, toggleVoiceResponses, interruptTask, confirmTask,
+    submitSecureCredentials, sendMessage, isLoading, startNewConversation,
+  } = useAssistant();
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [showTyping, setShowTyping] = useState(!voiceSupported);
+  const [typed, setTyped] = useState("");
+  const [showHistory, setShowHistory] = useState(false);
+  const [showStudio, setShowStudio] = useState(false);
+  const [previewState, setPreviewState] = useState<CharacterState>("idle");
+  const [sfxMuted, setSfxMuted] = useState(soundManager.isMuted());
+  const [disclosureAck, setDisclosureAck] = useState(() => {
+    try {
+      return localStorage.getItem(DISCLOSURE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, isLoading, transcript, interimTranscript]);
+    if (!voiceSupported) setShowTyping(true);
+  }, [voiceSupported]);
 
-  // Press-and-Hold vs Tap hook for HUD voice button
-  const { isHolding, bind: voiceButtonBind } = usePressAndHold({
+  const { isHolding, bind: micBind } = usePressAndHold({
     startOnDown: true,
-    onHoldStart: () => {
-      if (!isListening) {
-        onStartListening();
-      }
-    },
-    onHoldEnd: () => {
-      onStopListening();
-    },
-    onTap: () => {
-      onToggleListening();
-    },
+    onHoldStart: () => !isListening && onStartListening(),
+    onHoldEnd: () => onStopListening(),
+    onTap: () => onToggleListening(),
     holdThresholdMs: 220,
   });
 
-  const isTaskRunning =
-    activeTask &&
-    ["RUNNING", "COMMITTING", "VALIDATING", "READY"].includes(activeTask.status);
+  const status = activeTask?.status;
+  const working = status ? ACTIVE_TASK_STATUSES.includes(status) : false;
+  const lastUser = useMemo(() => [...messages].reverse().find((m) => m.role === "user"), [messages]);
+  const recentTimeline = collapseTimeline(
+    timelineEvents.filter((e) => !activeTask || e.task_id === activeTask.id),
+    working,
+  ).slice(-6);
 
-  const isPaused = activeTask?.status === "PAUSED";
-  const needsConfirmation =
-    activeTask?.status === "WAITING_FOR_APPROVAL" ||
-    characterState.toLowerCase() === "needs_confirmation";
-
-  const isWaitingInput =
-    activeTask?.status === "WAITING_FOR_INPUT" ||
-    characterState.toLowerCase() === "waiting_for_user";
-
-  const currentStep =
-    activeTask?.active_plan && activeTask.active_plan.length > 0
-      ? activeTask.active_plan[activeTask.current_step_index] ||
-        activeTask.active_plan[0]
-      : null;
-
-  const totalSteps = activeTask?.active_plan?.length || 0;
-  const currentStepNum = Math.min((activeTask?.current_step_index || 0) + 1, totalSteps);
-
-  const handleSelectBehavior = (bId: CharacterState) => {
-    setInspectedBehavior(bId);
-    soundManager.playSoundForBehavior(bId);
-    onSelectBehavior?.(bId);
+  const ackDisclosure = () => {
+    setDisclosureAck(true);
+    try {
+      localStorage.setItem(DISCLOSURE_KEY, "1");
+    } catch {
+      // ignore
+    }
   };
-
-  const handleSelectAngle = (angId: CharacterAngle) => {
-    setInspectedAngle(angId);
-    onSelectAngle?.(angId);
-  };
-
-  const handleToggleSoundMute = () => {
-    const next = soundManager.toggleMute();
-    setIsAudioMuted(next);
-  };
-
-  const filteredBehaviors = behaviorCategory === "All"
-    ? ALL_BEHAVIORS
-    : ALL_BEHAVIORS.filter((b) => b.category === behaviorCategory);
-
-  const currentBehaviorSpec = ALL_BEHAVIORS.find((b) => b.id === inspectedBehavior) || ALL_BEHAVIORS[0];
 
   return (
     <AnimatePresence>
       {isOpen && (
-        <motion.div
-          initial={{ opacity: 0, y: 24, scale: 0.94 }}
+        <motion.section
+          role="dialog"
+          aria-label="Orbit assistant"
+          initial={{ opacity: 0, y: 24, scale: 0.96 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}
-          exit={{ opacity: 0, y: 16, scale: 0.95 }}
-          transition={{ type: "spring", damping: 25, stiffness: 300 }}
-          className="fixed bottom-24 right-6 z-50 w-[92vw] sm:w-[460px] max-h-[85vh] overflow-y-auto bg-slate-900/95 backdrop-blur-2xl border border-slate-800 rounded-3xl shadow-2xl text-slate-100 flex flex-col font-sans"
-          style={{ boxShadow: "0 20px 45px -12px rgba(0, 0, 0, 0.8), 0 0 35px -8px rgba(6, 182, 212, 0.3)" }}
+          exit={{ opacity: 0, y: 16, scale: 0.96 }}
+          transition={{ type: "spring", damping: 26, stiffness: 300 }}
+          className="fixed bottom-24 right-4 sm:right-6 z-50 w-[calc(100vw-2rem)] sm:w-[420px] max-h-[82vh] overflow-y-auto bg-slate-900/95 backdrop-blur-2xl border border-slate-800 rounded-3xl shadow-2xl text-slate-100 flex flex-col"
         >
-          {/* Companion Header */}
-          <div className="p-4 border-b border-slate-800/80 flex items-center justify-between bg-slate-950/60 rounded-t-3xl">
-            <div className="flex items-center space-x-3">
-              <OrbitMascotCharacter
-                state={showBehaviorStudio ? inspectedBehavior : characterState}
-                angle={showAngleStudio ? inspectedAngle : undefined}
-                size="sm"
-              />
-              <div>
-                <div className="flex items-center space-x-2">
-                  <span className="font-bold text-sm tracking-tight text-white">
-                    Orbit
-                  </span>
-                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-mono font-medium">
-                    Autonomous AI
-                  </span>
-                </div>
-                <p className="text-[11px] text-slate-400 capitalize">
-                  {showBehaviorStudio ? `${currentBehaviorSpec.label}` : characterState.replace(/_/g, " ")}
+          {/* Header */}
+          <header className="p-3.5 border-b border-slate-800/80 flex items-center justify-between bg-slate-950/60 rounded-t-3xl">
+            <div className="flex items-center gap-3 min-w-0">
+              <OrbitMascotCharacter state={characterState} size="sm" />
+              <div className="min-w-0">
+                <div className="font-bold text-sm text-white">Orbit</div>
+                <p className="text-[11px] text-slate-400 truncate" aria-live="polite">
+                  {isListening ? "Listening" : stageText(turnStage, toolActivity?.status === "running" ? toolActivity.label : null, status, queueStatus)}
                 </p>
               </div>
             </div>
-
-            <div className="flex items-center space-x-1.5">
-              {/* Behaviors & Sounds Studio Toggle */}
-              <button
-                type="button"
-                onClick={() => {
-                  setShowBehaviorStudio(!showBehaviorStudio);
-                  if (showAngleStudio) setShowAngleStudio(false);
-                }}
-                title="Toggle Live Behaviors & Sounds Studio"
-                className={`p-1.5 rounded-xl border transition-all ${
-                  showBehaviorStudio
-                    ? "bg-indigo-500/25 text-indigo-300 border-indigo-400/50 shadow-md shadow-indigo-500/20"
-                    : "bg-slate-800 text-slate-400 border-slate-700 hover:text-white"
-                }`}
-              >
+            <div className="flex items-center gap-1.5">
+              <button type="button" onClick={toggleVoiceResponses}
+                title={voiceResponsesEnabled ? "Orbit speaks replies (click to mute voice)" : "Voice replies off (click to enable)"}
+                className={`p-1.5 rounded-xl border ${voiceResponsesEnabled ? "bg-slate-800 text-cyan-300 border-cyan-500/30" : "bg-rose-500/15 text-rose-300 border-rose-500/40"}`}>
+                {voiceResponsesEnabled ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
+              </button>
+              <button type="button" onClick={() => setSfxMuted(soundManager.toggleMute())}
+                title={sfxMuted ? "Sound effects off" : "Sound effects on"}
+                className="p-1.5 rounded-xl border bg-slate-800 border-slate-700 text-slate-400 hover:text-white text-[10px] font-mono w-7">
+                {sfxMuted ? "fx̶" : "fx"}
+              </button>
+              <button type="button" onClick={() => setShowStudio((s) => !s)} title="Preview Orbit's poses (does not affect the live assistant)"
+                className={`p-1.5 rounded-xl border ${showStudio ? "bg-indigo-500/25 text-indigo-300 border-indigo-400/50" : "bg-slate-800 text-slate-400 border-slate-700 hover:text-white"}`}>
                 <Sparkles className="w-3.5 h-3.5" />
               </button>
-
-              {/* 360° Angle Studio Toggle */}
-              <button
-                type="button"
-                onClick={() => {
-                  setShowAngleStudio(!showAngleStudio);
-                  if (showBehaviorStudio) setShowBehaviorStudio(false);
-                }}
-                title="Toggle 360° Angle Turnaround Studio"
-                className={`p-1.5 rounded-xl border transition-all ${
-                  showAngleStudio
-                    ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/40 shadow-md shadow-cyan-500/20"
-                    : "bg-slate-800 text-slate-400 border-slate-700 hover:text-white"
-                }`}
-              >
-                <Compass className="w-3.5 h-3.5" />
-              </button>
-
-              {/* Procedural Sound Effects Mute Toggle */}
-              <button
-                type="button"
-                onClick={handleToggleSoundMute}
-                title={isAudioMuted ? "Sound effects muted (click to enable)" : "Sound effects active (click to mute)"}
-                className={`p-1.5 rounded-xl border transition-all ${
-                  !isAudioMuted
-                    ? "bg-slate-800 text-cyan-300 border-cyan-500/30 hover:border-cyan-400"
-                    : "bg-rose-500/15 text-rose-300 border-rose-500/40"
-                }`}
-              >
-                {!isAudioMuted ? (
-                  <Volume2 className="w-3.5 h-3.5" />
-                ) : (
-                  <VolumeX className="w-3.5 h-3.5" />
-                )}
-              </button>
-
-              {/* Minimize / Close HUD */}
-              <button
-                type="button"
-                onClick={onClose}
-                title="Minimize Companion"
-                className="p-1.5 rounded-xl bg-slate-800 text-slate-400 border border-slate-700 hover:text-white hover:bg-slate-700 transition-colors"
-              >
+              <button type="button" onClick={onClose} title="Minimize" className="p-1.5 rounded-xl bg-slate-800 text-slate-400 border border-slate-700 hover:text-white">
                 <ChevronDown className="w-3.5 h-3.5" />
               </button>
             </div>
-          </div>
+          </header>
 
-          {/* Interactive Live Behaviors & Sounds Studio Drawer */}
-          {showBehaviorStudio && (
-            <motion.div
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: "auto", opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              className="px-4 py-3 bg-slate-950/95 border-b border-indigo-500/30 space-y-3"
-            >
-              <div className="flex items-center justify-between">
-                <span className="font-semibold text-xs text-indigo-300 flex items-center space-x-1.5">
-                  <Sparkles className="w-3.5 h-3.5 mr-1 text-indigo-400" />
-                  Live Behaviors & Distinct Sound Studio
-                </span>
-                <span className="text-[10px] text-slate-400 font-mono">
-                  {ALL_BEHAVIORS.length} Verified HD States
-                </span>
-              </div>
-
-              {/* Category Filter Tabs */}
-              <div className="flex items-center space-x-1 overflow-x-auto pb-1 text-[10px]">
-                {["All", "Actions", "Expressions", "Workflow", "Alerts"].map((cat) => (
-                  <button
-                    key={cat}
-                    type="button"
-                    onClick={() => setBehaviorCategory(cat)}
-                    className={`px-2 py-0.5 rounded-lg border transition-all whitespace-nowrap ${
-                      behaviorCategory === cat
-                        ? "bg-indigo-500/30 border-indigo-400 text-white font-semibold"
-                        : "bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200"
-                    }`}
-                  >
-                    {cat}
-                  </button>
-                ))}
-              </div>
-
-              {/* Active Hero Behavior Card */}
-              <div className="flex items-center space-x-3.5 p-3 rounded-2xl bg-gradient-to-r from-slate-900/90 to-indigo-950/40 border border-indigo-500/30 shadow-lg">
-                <div className="shrink-0 flex items-center justify-center p-1 bg-slate-950/80 rounded-2xl border border-indigo-500/30 shadow-inner">
-                  <OrbitMascotCharacter
-                    state={inspectedBehavior}
-                    size="md"
-                  />
-                </div>
-                <div className="flex-1 min-w-0 space-y-1">
-                  <div className="flex items-center space-x-2">
-                    <span className="font-bold text-xs text-white">
-                      {currentBehaviorSpec.label}
-                    </span>
-                    <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                      {currentBehaviorSpec.category}
-                    </span>
-                  </div>
-                  <p className="text-[10px] text-slate-300 leading-snug line-clamp-2">
-                    {currentBehaviorSpec.visualDesc}
-                  </p>
-                  <div className="pt-1 flex items-center space-x-2">
-                    <button
-                      type="button"
-                      onClick={() => soundManager.playSoundForBehavior(currentBehaviorSpec.id)}
-                      className="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-xl bg-indigo-500/25 hover:bg-indigo-500/40 border border-indigo-400/50 text-[10px] font-semibold text-cyan-200 transition-all shadow-sm shadow-indigo-500/20"
-                    >
-                      <Volume2 className="w-3 h-3 text-cyan-400" />
-                      <span>{currentBehaviorSpec.soundTitle}</span>
+          {showStudio && (
+            <div className="px-4 py-3 bg-slate-950/90 border-b border-indigo-500/30 space-y-2">
+              <p className="text-[10px] text-slate-400">Pose preview only. The live Orbit always reflects real activity.</p>
+              <div className="flex items-center gap-3">
+                <OrbitMascotCharacter state={previewState} size="md" />
+                <div className="flex flex-wrap gap-1">
+                  {PREVIEW_STATES.map((s) => (
+                    <button key={s} type="button" onClick={() => setPreviewState(s)}
+                      className={`text-[10px] px-1.5 py-0.5 rounded-md border ${previewState === s ? "bg-indigo-500/30 border-indigo-400 text-white" : "bg-slate-900 border-slate-800 text-slate-400"}`}>
+                      {s.replace(/_/g, " ")}
                     </button>
-                  </div>
+                  ))}
                 </div>
-              </div>
-
-              {/* Grid of Behavior Chips */}
-              <div className="grid grid-cols-3 sm:grid-cols-3 gap-1.5 max-h-44 overflow-y-auto pr-1">
-                {filteredBehaviors.map((b) => (
-                  <button
-                    key={b.id}
-                    type="button"
-                    onClick={() => handleSelectBehavior(b.id)}
-                    className={`flex items-center space-x-1.5 px-2 py-1.5 rounded-xl border text-left transition-all ${
-                      inspectedBehavior === b.id
-                        ? "bg-indigo-500/30 border-indigo-400 text-white shadow-md shadow-indigo-500/20"
-                        : "bg-slate-900/90 border-slate-800 text-slate-300 hover:text-white hover:border-slate-700"
-                    }`}
-                  >
-                    <span className="text-[11px] leading-tight font-medium truncate flex-1">
-                      {b.label}
-                    </span>
-                    <Volume1 className="w-2.5 h-2.5 text-slate-400 shrink-0" />
-                  </button>
-                ))}
-              </div>
-            </motion.div>
-          )}
-
-          {/* Interactive 360° Angle Turnaround Studio Bar */}
-          {showAngleStudio && (
-            <motion.div
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: "auto", opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              className="px-4 py-2.5 bg-slate-950/90 border-b border-slate-800/80 space-y-2"
-            >
-              <div className="flex items-center justify-between text-[11px]">
-                <span className="font-semibold text-cyan-300 flex items-center space-x-1">
-                  <Compass className="w-3 h-3 mr-1" />
-                  360° Turnaround Angles
-                </span>
-                <span className="text-[10px] text-slate-400 font-mono">
-                  Inspecting: {inspectedAngle.replace(/_/g, " ")}
-                </span>
-              </div>
-              <div className="grid grid-cols-6 gap-1.5 pt-1">
-                {AVAILABLE_ANGLES.map((ang) => (
-                  <button
-                    key={ang.id}
-                    type="button"
-                    onClick={() => handleSelectAngle(ang.id)}
-                    className={`flex flex-col items-center py-1.5 px-1 rounded-xl border transition-all text-center ${
-                      inspectedAngle === ang.id
-                        ? "bg-cyan-500/25 border-cyan-400 text-white shadow-md shadow-cyan-500/20"
-                        : "bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700"
-                    }`}
-                  >
-                    <span className="text-[10px] font-bold font-mono">{ang.deg}</span>
-                    <span className="text-[9px] leading-tight truncate">{ang.label}</span>
-                  </button>
-                ))}
-              </div>
-            </motion.div>
-          )}
-
-          {/* Companion Body */}
-          <div className="p-4 space-y-3.5">
-            {/* 1. Spoken Transcript & Interactive Conversation Feed */}
-            <div className="bg-slate-950/80 rounded-2xl p-3 border border-slate-800/90 shadow-inner space-y-2.5">
-              {/* Active Audio Waveform when speaking or holding */}
-              {isHolding ? (
-                <div className="flex items-center space-x-2 text-cyan-400 bg-cyan-950/40 border border-cyan-800/40 rounded-xl px-3 py-2">
-                  <div className="flex space-x-1 items-center">
-                    <span className="w-1 h-3 bg-cyan-400 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
-                    <span className="w-1 h-5 bg-cyan-300 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
-                    <span className="w-1 h-4 bg-cyan-400 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
-                    <span className="w-1 h-6 bg-cyan-200 rounded-full animate-bounce" style={{ animationDelay: "450ms" }} />
-                    <span className="w-1 h-3 bg-cyan-400 rounded-full animate-bounce" style={{ animationDelay: "600ms" }} />
-                  </div>
-                  <span className="text-[11px] font-semibold tracking-wide text-cyan-300">
-                    Recording voice... Speak now, release to execute
-                  </span>
-                </div>
-              ) : isListening ? (
-                <div className="flex items-center space-x-2 text-cyan-400 bg-cyan-950/30 border border-cyan-800/30 rounded-xl px-3 py-1.5">
-                  <Radio className="w-3.5 h-3.5 animate-pulse text-cyan-400" />
-                  <span className="text-[11px] font-medium tracking-wide uppercase">
-                    Listening to your voice... Tap mic to stop
-                  </span>
-                </div>
-              ) : null}
-
-              {/* Live Voice Hearing Transcript (While speaking or right after button release) */}
-              {(interimTranscript || (isListening && transcript)) && (
-                <div className="text-xs text-cyan-200 bg-cyan-950/40 px-3 py-2 rounded-xl border border-cyan-800/60 flex items-start space-x-2 animate-pulse">
-                  <Mic className="w-3.5 h-3.5 text-cyan-400 mt-0.5 shrink-0" />
-                  <p className="italic font-mono text-[11px]">
-                    "{interimTranscript || transcript}"
-                  </p>
-                </div>
-              )}
-
-              {/* Scrollable Conversation Thread */}
-              <div className="max-h-56 overflow-y-auto space-y-2.5 pr-1 text-xs">
-                {messages.length === 0 ? (
-                  <div className="py-2 px-1 text-center space-y-2">
-                    <div className="flex items-center justify-center space-x-2 text-slate-300">
-                      <OrbitMascotCharacter state="idle" size="xs" />
-                      <span className="font-semibold text-xs text-cyan-300">Orbit Voice-First Assistant</span>
-                    </div>
-                    <p className="text-[11px] text-slate-400 leading-relaxed">
-                      Hold the mic button or speak naturally. Say "Hi", ask Orbit to scan schemas, check database health, or create automations.
-                    </p>
-                    {/* Quick Starter Chips */}
-                    <div className="flex flex-wrap gap-1.5 justify-center pt-1">
-                      {[
-                        { label: "💬 Say Hello", prompt: "Hello Orbit!" },
-                        { label: "🔍 Scan Database", prompt: "Scan the database schema and show me tables" },
-                        { label: "🔌 Check Connections", prompt: "Check database connection status" },
-                        { label: "🤖 Run Automation", prompt: "What automations are ready to run?" },
-                      ].map((chip) => (
-                        <button
-                          key={chip.label}
-                          type="button"
-                          onClick={() => onSendInstruction?.(chip.prompt)}
-                          className="text-[10px] px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 hover:text-cyan-300 hover:border-cyan-500/40 transition-colors cursor-pointer"
-                        >
-                          {chip.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ) : (
-                  messages.map((msg, i) => {
-                    const isUser = msg.role === "user";
-                    return (
-                      <div
-                        key={msg.id || i}
-                        className={`flex flex-col ${isUser ? "items-end" : "items-start"} space-y-1`}
-                      >
-                        <div
-                          className={`max-w-[88%] rounded-2xl px-3.5 py-2 leading-relaxed shadow-sm ${
-                            isUser
-                              ? "bg-gradient-to-r from-cyan-900/60 to-indigo-900/60 border border-cyan-700/50 text-slate-100 rounded-tr-xs"
-                              : "bg-slate-900/90 border border-slate-800 text-slate-200 rounded-tl-xs"
-                          }`}
-                        >
-                          <div className="flex items-center space-x-1.5 mb-1 text-[10px] font-medium">
-                            {isUser ? (
-                              <>
-                                {msg.is_voice && <Mic className="w-2.5 h-2.5 text-cyan-400" />}
-                                <span className="text-cyan-300">You {msg.is_voice ? "(Voice)" : ""}</span>
-                              </>
-                            ) : (
-                              <div className="flex items-center space-x-1 text-indigo-300">
-                                <Sparkles className="w-2.5 h-2.5 text-indigo-400" />
-                                <span className="font-semibold text-indigo-300">Orbit</span>
-                              </div>
-                            )}
-                          </div>
-                          <div className="text-xs break-words whitespace-pre-wrap font-normal">
-                            {msg.content}
-                          </div>
-
-                          {/* Executed Tools Badge */}
-                          {msg.tool_calls && msg.tool_calls.length > 0 && (
-                            <div className="mt-1.5 pt-1 border-t border-slate-800/80 flex flex-wrap gap-1">
-                              {msg.tool_calls.map((tc: any, tIdx: number) => (
-                                <span
-                                  key={tIdx}
-                                  className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-emerald-950/60 text-emerald-300 border border-emerald-800/50"
-                                >
-                                  ⚡ {tc.tool || tc.name || "Tool"} executed
-                                </span>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })
-                )}
-
-                {/* Orbit Thinking Card while formulating response */}
-                {isLoading && (
-                  <div className="flex items-start space-x-2 pt-1 animate-fadeIn">
-                    <div className="shrink-0 pt-0.5">
-                      <OrbitMascotCharacter state="thinking" size="xs" />
-                    </div>
-                    <div className="bg-indigo-950/50 border border-indigo-700/40 rounded-2xl rounded-tl-xs px-3.5 py-2.5 text-indigo-200 space-y-1.5 shadow-md">
-                      <div className="flex items-center space-x-2 text-[11px] font-semibold text-indigo-300">
-                        <span className="w-2 h-2 rounded-full bg-violet-400 animate-ping" />
-                        <span>Orbit is thinking & analyzing context...</span>
-                      </div>
-                      <p className="text-[10px] text-indigo-300/80 italic">
-                        Formulating autonomous plan, checking permissions & target schema...
-                      </p>
-                    </div>
-                  </div>
-                )}
-
-                {/* Voice Error notice if microphone denied or unavailable */}
-                {voiceError && (
-                  <div className="text-[11px] text-amber-300 bg-amber-500/10 px-2.5 py-1.5 rounded-xl border border-amber-500/20 flex items-center space-x-1.5">
-                    <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                    <span>{voiceError}</span>
-                  </div>
-                )}
-
-                <div ref={messagesEndRef} />
               </div>
             </div>
+          )}
 
-            {/* 2. Active Operation Status Card */}
-            {activeTask && (
-              <div className="bg-slate-950/60 border border-slate-800 rounded-2xl p-3.5 space-y-2.5">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center space-x-2">
-                    <span
-                      className={`w-2 h-2 rounded-full ${
-                        isTaskRunning
-                          ? "bg-cyan-400 animate-ping"
-                          : isPaused
-                          ? "bg-amber-400"
-                          : activeTask.status === "SUCCEEDED"
-                          ? "bg-emerald-400"
-                          : "bg-rose-400"
-                      }`}
-                    />
-                    <span className="text-xs font-semibold text-slate-200">
-                      {activeTask.goal}
-                    </span>
-                  </div>
-                  <span className="text-[10px] font-mono text-slate-400">
-                    Step {currentStepNum} of {totalSteps || 1}
-                  </span>
-                </div>
-
-                {currentStep && (
-                  <div className="text-[11px] text-slate-300 bg-slate-900/80 p-2 rounded-xl border border-slate-800/80 flex items-center justify-between">
-                    <span>{currentStep.label}</span>
-                    <span className="text-[9px] uppercase px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-mono">
-                      {currentStep.tool}
-                    </span>
-                  </div>
-                )}
-
-                {/* Progress bar */}
-                <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
-                  <div
-                    className="bg-gradient-to-r from-cyan-500 to-indigo-500 h-full transition-all duration-300"
-                    style={{
-                      width: `${totalSteps > 0 ? (currentStepNum / totalSteps) * 100 : 0}%`,
-                    }}
-                  />
-                </div>
+          <div className="p-3.5 space-y-3">
+            {usesRemoteRecognition && !disclosureAck && (
+              <div className="text-[11px] text-amber-200 bg-amber-500/10 border border-amber-500/30 rounded-xl p-2.5 space-y-1.5">
+                <p>
+                  Voice input uses your browser's speech recognition, which may send audio to the browser vendor's speech
+                  service. Never say passwords or API keys out loud — Orbit asks for them in a secure field.
+                </p>
+                <button type="button" onClick={ackDisclosure} className="text-amber-100 underline">Got it</button>
               </div>
             )}
 
-            {/* 3. Action Confirmation Card (If Consequential) */}
-            {needsConfirmation && (
+            {status === "QUEUED" && queueStatus && !queueStatus.worker_alive && (
+              <div className="text-[11px] text-amber-200 bg-amber-500/10 border border-amber-500/30 rounded-xl p-2.5">
+                Your request is saved, but no Orbit background worker is running, so nothing will process it yet.
+                Start the services with <span className="font-mono">./run_all.sh</span> (it runs the agent worker).
+              </div>
+            )}
+
+            {/* Caption: what you said, what Orbit said */}
+            <div className="bg-slate-950/80 rounded-2xl p-3 border border-slate-800/90 space-y-2" aria-live="polite">
+              {(isListening || isHolding) && (
+                <div className="flex items-center gap-2 text-cyan-300 text-[11px]">
+                  <MicOff className="w-3.5 h-3.5 animate-pulse" />
+                  <span>{isHolding ? "Listening — release to send" : "Listening — tap to send"}</span>
+                  {audioLevel !== null && (
+                    <span className="flex-1 h-1.5 bg-slate-800 rounded-full overflow-hidden" aria-hidden>
+                      <span className="block h-full bg-cyan-400 transition-[width] duration-75" style={{ width: `${Math.round(audioLevel * 100)}%` }} />
+                    </span>
+                  )}
+                </div>
+              )}
+              {(interimTranscript || (isListening && transcript)) && (
+                <p className="text-[11px] italic text-cyan-200">“{interimTranscript || transcript}”</p>
+              )}
+              {!isListening && lastUser && (
+                <p className="text-[11px] text-slate-400"><span className="text-cyan-400">You:</span> {lastUser.content}</p>
+              )}
+              {working && narration && <p className="text-[11px] italic text-indigo-300">{narration}</p>}
+              {speech && (
+                <div className="space-y-1">
+                  <p className={`text-xs leading-relaxed ${speech.isServiceError ? "text-amber-200" : "text-slate-100"}`}>
+                    <span className="text-indigo-300 font-semibold">Orbit:</span> {speech.text}
+                  </p>
+                  <div className="flex flex-wrap gap-1.5 text-[9px] font-mono">
+                    {speech.source === "system" && (
+                      <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                        {speech.isServiceError ? "service notice" : "status (not AI-generated)"}
+                      </span>
+                    )}
+                    {speech.delivery === "speaking" && <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300">speaking</span>}
+                    {speech.delivery === "failed" && <span className="px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300">not spoken: {speech.failureReason}</span>}
+                    {speech.delivery === "muted" && <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">voice off — text only</span>}
+                    {speech.delivery === "cancelled" && <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">interrupted</span>}
+                  </div>
+                </div>
+              )}
+              {!speech && !lastUser && !isListening && (
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  Hold the mic (or Orbit) and talk. Ask about the portal, check a connection, or have Orbit connect a database for you.
+                </p>
+              )}
+              {voiceError && (
+                <p className="text-[11px] text-amber-300 flex items-center gap-1.5">
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" /> {voiceError}
+                </p>
+              )}
+              {messages.length > 2 && (
+                <button type="button" onClick={() => setShowHistory((h) => !h)} className="text-[10px] text-slate-500 hover:text-slate-300 flex items-center gap-1">
+                  <History className="w-3 h-3" /> {showHistory ? "Hide history" : "Show history"}
+                </button>
+              )}
+              {showHistory && (
+                <ul className="max-h-40 overflow-y-auto space-y-1 border-t border-slate-800 pt-2">
+                  {messages.slice(-12).map((m) => (
+                    <li key={m.id} className="text-[10px] text-slate-400">
+                      <span className={m.role === "user" ? "text-cyan-400" : "text-indigo-300"}>{m.role === "user" ? "You" : "Orbit"}:</span> {m.content}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            {/* Real operation timeline */}
+            {activeTask && recentTimeline.length > 0 && (
+              <div className="bg-slate-950/60 border border-slate-800 rounded-2xl p-3 space-y-1.5">
+                <div className="flex items-center justify-between text-[10px] text-slate-400">
+                  <span className="font-semibold text-slate-300">What Orbit actually did</span>
+                  {(activeTask.plan_version ?? 1) > 1 && <span className="font-mono">plan v{activeTask.plan_version}</span>}
+                </div>
+                <ol className="space-y-1">
+                  {recentTimeline.map((e) => (
+                    <li key={e.id} className="flex items-start gap-1.5 text-[11px] text-slate-300">
+                      <TimelineIcon status={e.status} />
+                      <span className="min-w-0 break-words">{e.message}</span>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            )}
+
+            {secureInputRequest && (
+              <SecureCredentialCard kind={secureInputRequest.kind} onSubmit={submitSecureCredentials} disabled={isLoading}
+                onCancel={() => interruptTask("STOP")} />
+            )}
+
+            {awaitingConfirmation && (
               <div className="bg-amber-950/30 border border-amber-800/40 rounded-2xl p-3 space-y-2">
-                <div className="flex items-center space-x-2 text-amber-300 text-xs font-medium">
+                <p className="text-xs text-amber-200 flex items-center gap-2">
                   <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
-                  <span>Confirmation requested for step: {currentStep?.label}</span>
-                </div>
-                <div className="flex items-center gap-2 pt-1">
-                  <button
-                    type="button"
-                    onClick={onConfirmTask}
-                    disabled={isLoading}
-                    className="flex-1 py-1.5 px-3 bg-amber-500 hover:bg-amber-600 text-slate-950 font-semibold rounded-xl text-xs transition-colors flex items-center justify-center space-x-1 shadow-md shadow-amber-500/20"
-                  >
-                    <CheckCircle2 className="w-3.5 h-3.5 mr-1" />
-                    Confirm Action
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onInterrupt("STOP")}
-                    className="py-1.5 px-3 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs transition-colors"
-                  >
-                    Cancel
-                  </button>
+                  Orbit is waiting for your OK to run <span className="font-mono">{awaitingConfirmation.tool}</span>.
+                </p>
+                <div className="flex gap-2">
+                  <button type="button" onClick={confirmTask} disabled={isLoading}
+                    className="flex-1 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold rounded-xl text-xs">Confirm</button>
+                  <button type="button" onClick={() => interruptTask("STOP")} className="px-3 py-1.5 bg-slate-800 text-slate-300 rounded-xl text-xs">Cancel</button>
                 </div>
               </div>
             )}
 
-            {/* 6. Master Voice & Interruption Control Bar */}
-            <div className="pt-1 flex items-center gap-2">
-              {/* Primary Voice Action (Press & Hold or Tap to Speak) */}
-              <button
-                type="button"
-                {...voiceButtonBind}
-                className={`flex-1 flex items-center justify-center space-x-2 py-3 px-4 rounded-2xl font-semibold text-xs transition-all shadow-lg select-none touch-none ${
-                  isHolding || isListening
-                    ? "bg-cyan-500 text-slate-950 shadow-cyan-500/30 ring-4 ring-cyan-500/20 active:scale-[0.98]"
-                    : "bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white shadow-cyan-600/30"
-                }`}
-              >
-                {isHolding ? (
-                  <>
-                    <MicOff className="w-4 h-4 text-slate-950 animate-pulse" />
-                    <span>Recording... Release to Send</span>
-                  </>
-                ) : isListening ? (
-                  <>
-                    <MicOff className="w-4 h-4 text-slate-950 animate-pulse" />
-                    <span>Listening... Tap to Stop</span>
-                  </>
-                ) : (
-                  <>
-                    <Mic className="w-4 h-4" />
-                    <span>Tap (or Hold) to Speak to Orbit</span>
-                  </>
-                )}
+            {/* Voice-first controls */}
+            <div className="flex items-center gap-2">
+              <button type="button" {...micBind} disabled={!voiceSupported}
+                aria-pressed={isListening}
+                className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-2xl font-semibold text-xs select-none touch-none transition-all ${
+                  isHolding || isListening ? "bg-cyan-500 text-slate-950 ring-4 ring-cyan-500/20" : "bg-gradient-to-r from-cyan-600 to-indigo-600 text-white hover:from-cyan-500 hover:to-indigo-500"
+                } disabled:opacity-40`}>
+                {isListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                <span>{isHolding ? "Release to send" : isListening ? "Tap to send" : "Hold or tap to talk"}</span>
               </button>
-
-              {/* Instant Pause/Resume Button if task is active */}
-              {activeTask && isTaskRunning && (
-                <button
-                  type="button"
-                  onClick={() => onInterrupt("PAUSE")}
-                  title="Pause active execution"
-                  className="p-3 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-2xl transition-colors"
-                >
+              {activeTask && working && (
+                <button type="button" onClick={() => interruptTask("PAUSE")} title="Pause at the next safe step"
+                  className="p-3 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-2xl">
                   <Pause className="w-4 h-4" />
                 </button>
               )}
-
-              {activeTask && isPaused && (
-                <button
-                  type="button"
-                  onClick={onConfirmTask}
-                  title="Resume execution"
-                  className="p-3 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 rounded-2xl transition-colors"
-                >
+              {activeTask && status === "PAUSED" && (
+                <button type="button" onClick={() => interruptTask("RESUME")} title="Resume"
+                  className="p-3 bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 rounded-2xl">
                   <Play className="w-4 h-4" />
                 </button>
               )}
-
-              {/* Instant Stop / Cancel Button */}
-              {activeTask && (isTaskRunning || isPaused) && (
-                <button
-                  type="button"
-                  onClick={() => onInterrupt("STOP")}
-                  title="Stop and cancel operation immediately"
-                  className="p-3 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 rounded-2xl transition-colors"
-                >
+              {activeTask && (working || status === "PAUSED" || status === "WAITING_FOR_INPUT") && (
+                <button type="button" onClick={() => interruptTask("STOP")} title="Stop: no new steps start"
+                  className="p-3 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 rounded-2xl">
                   <Square className="w-4 h-4" />
                 </button>
               )}
             </div>
 
-            {/* 7. Always-Available Instruction Input (Type or Voice Fallback) */}
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                if (accessibleText.trim() && !isLoading) {
-                  onSendInstruction?.(accessibleText.trim());
-                  setAccessibleText("");
-                }
-              }}
-              className="pt-1 flex items-center gap-1.5"
-            >
-              <input
-                type="text"
-                value={accessibleText}
-                onChange={(e) => setAccessibleText(e.target.value)}
-                placeholder="Type instruction or speak to Orbit..."
-                disabled={isLoading}
-                className="flex-1 bg-slate-950/80 border border-slate-700/80 rounded-xl px-3.5 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-500 shadow-inner"
-              />
-              <button
-                type="submit"
-                disabled={!accessibleText.trim() || isLoading}
-                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-xs font-semibold text-cyan-300 border border-cyan-500/30 hover:border-cyan-400 rounded-xl transition-all shadow-sm flex items-center space-x-1"
-              >
-                <span>Send</span>
+            <div className="flex items-center justify-between">
+              <button type="button" onClick={() => setShowTyping((s) => !s)} className="text-[11px] text-slate-400 hover:text-slate-200 flex items-center gap-1">
+                <Keyboard className="w-3.5 h-3.5" /> {showTyping ? "Hide typing" : "Type instead"}
               </button>
-            </form>
+              <button type="button" onClick={startNewConversation} className="text-[11px] text-slate-500 hover:text-slate-300">New conversation</button>
+            </div>
+            {showTyping && (
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const t = typed.trim();
+                  if (t && !isLoading) {
+                    void sendMessage(t, false);
+                    setTyped("");
+                  }
+                }}
+                className="flex items-center gap-1.5"
+              >
+                <input
+                  type="text"
+                  value={typed}
+                  onChange={(e) => setTyped(e.target.value)}
+                  placeholder="Type to Orbit (never type passwords here)"
+                  aria-label="Type a message to Orbit"
+                  disabled={isLoading}
+                  className="flex-1 min-w-0 bg-slate-950/80 border border-slate-700/80 rounded-xl px-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-500"
+                />
+                <button type="submit" disabled={!typed.trim() || isLoading}
+                  className="px-3 py-2 bg-slate-800 disabled:opacity-40 text-xs text-cyan-300 border border-cyan-500/30 rounded-xl">Send</button>
+              </form>
+            )}
           </div>
 
-          {/* Footer Security Policy */}
-          <div className="px-4 py-2.5 bg-slate-950/80 border-t border-slate-800/80 rounded-b-3xl flex items-center justify-between text-[10px] text-slate-500">
-            <div className="flex items-center space-x-1.5">
-              <Shield className="w-3 h-3 text-cyan-400/80" />
-              <span>Orbit Guarded Execution: Zero Raw SQL</span>
-            </div>
-            <span className="font-mono">v2.2-orbit-360</span>
-          </div>
-        </motion.div>
+          <footer className="px-4 py-2 bg-slate-950/80 border-t border-slate-800/80 rounded-b-3xl flex items-center gap-1.5 text-[10px] text-slate-500">
+            <Shield className="w-3 h-3 text-cyan-400/80" />
+            <span>Orbit uses registered portal tools only — no raw SQL, no deletes on your database.</span>
+          </footer>
+        </motion.section>
       )}
     </AnimatePresence>
   );

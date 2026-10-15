@@ -28,8 +28,10 @@ import { StatusPill } from "../components/common/StatusPill";
 import { SearchableSelect } from "../components/common/SearchableSelect";
 import { useLiveEvents } from "../context/LiveEventsContext";
 import { useToast } from "../context/ToastContext";
-import { useAssistant } from "../context/AssistantContext";
-import { actionBridge } from "../services/actionBridge";
+import { orbitTargets } from "../services/orbitTargets";
+import { useOrbitTarget } from "../hooks/useOrbitTarget";
+import { useOrbitSurface } from "../hooks/useOrbitSurface";
+import { actionTarget, fieldTarget } from "../services/orbitSurfaces";
 import { pageStateService } from "../services/pageStateService";
 
 interface SupportedEngine {
@@ -107,13 +109,28 @@ export const ConnectionsPage: React.FC = () => {
 
   const { addListener } = useLiveEvents();
   const { toast, showAlert } = useToast();
-  const { activeAnchor } = useAssistant();
 
-  useEffect(() => {
-    if (activeAnchor === "connection-form-anchor" && !showModal) {
-      setShowModal(true);
-    }
-  }, [activeAnchor, showModal]);
+  // Fields the user (or Orbit) actually entered, as opposed to untouched defaults.
+  const [touched, setTouched] = useState<Record<string, boolean>>({});
+  // Orbit pressed Test/Save: the backend runs the real operation; this page shows its result.
+  const [agentPending, setAgentPending] = useState<"test" | "save" | null>(null);
+
+  const updateField = (name: keyof typeof form, value: any) => {
+    setForm((prev) => ({ ...prev, [name]: value }));
+    setTouched((prev) => ({ ...prev, [name]: true }));
+  };
+
+  // Semantic targets Orbit flies to (keys follow orbitSurfaces' fieldTarget/actionTarget naming).
+  const addButtonRef = useOrbitTarget<HTMLButtonElement>("connections.add");
+  const formRef = useOrbitTarget<HTMLDivElement>("connections.form");
+  const nameRef = useOrbitTarget<HTMLInputElement>(fieldTarget("connections.form", "name"));
+  const hostRef = useOrbitTarget<HTMLInputElement>(fieldTarget("connections.form", "host"));
+  const portRef = useOrbitTarget<HTMLInputElement>(fieldTarget("connections.form", "port"));
+  const dbRef = useOrbitTarget<HTMLInputElement>(fieldTarget("connections.form", "database_name"));
+  const userRef = useOrbitTarget<HTMLInputElement>(fieldTarget("connections.form", "username"));
+  const passwordRef = useOrbitTarget<HTMLInputElement>(fieldTarget("connections.form", "password"));
+  const testButtonRef = useOrbitTarget<HTMLButtonElement>(actionTarget("connections.form", "test"));
+  const saveButtonRef = useOrbitTarget<HTMLButtonElement>(actionTarget("connections.form", "save"));
 
   const loadConnections = async (silent = false) => {
     try {
@@ -256,83 +273,168 @@ export const ConnectionsPage: React.FC = () => {
     }
   };
 
-  // Wire typed ActionBridge for autonomous website operations
   useEffect(() => {
     pageStateService.setRoute("/connections", "Database Connections");
-    const unsubs = [
-      actionBridge.on("connections.open_create_form", (payload) => {
-        setShowModal(true);
-        if (payload?.slots) {
-          setForm((prev) => ({
-            ...prev,
-            name: payload.slots.name || prev.name || "Production Target",
-            host: payload.slots.host || prev.host,
-            port: payload.slots.port ? Number(payload.slots.port) : prev.port,
-            database_name: payload.slots.database || payload.slots.database_name || prev.database_name,
-            username: payload.slots.username || prev.username,
-          }));
-        }
-      }),
+  }, []);
 
-      actionBridge.on("connections.fill_fields", (payload) => {
-        setShowModal(true);
-        if (payload?.fields) {
-          const f = payload.fields;
-          setForm((prev) => ({
-            ...prev,
-            name: f.name || prev.name,
-            host: f.host || prev.host,
-            port: f.port ? Number(f.port) : prev.port,
-            database_name: f.database || f.database_name || prev.database_name,
-            username: f.username || prev.username,
-          }));
-        }
-      }),
+  // ---- Orbit surfaces: the same state and API calls a user's typing and clicks use ----------
 
-      actionBridge.on("connections.trigger_test", async (payload) => {
-        setShowModal(true);
-        if (payload) {
-          setForm((prev) => ({
-            ...prev,
-            host: payload.host || prev.host,
-            port: payload.port ? Number(payload.port) : prev.port,
-            database_name: payload.database || payload.database_name || prev.database_name,
-            username: payload.username || prev.username,
-          }));
-        }
-        await handleTestAdHoc();
-      }),
+  const validators: Record<string, (v: any) => [string | null, any]> = {
+    name: (v) => { const t = String(v ?? "").trim(); return !t || t.length > 120 ? ["Name must be 1-120 characters.", null] : [null, t]; },
+    host: (v) => { const t = String(v ?? "").trim(); return /^[A-Za-z0-9.\-_:]{1,253}$/.test(t) ? [null, t] : ["Host must be a hostname or IP address.", null]; },
+    port: (v) => { const n = Number(v); return Number.isInteger(n) && n >= 1 && n <= 65535 ? [null, n] : ["Port must be 1-65535.", null]; },
+    database_name: (v) => { const t = String(v ?? "").trim(); return /^[A-Za-z0-9_$\-]{1,64}$/.test(t) ? [null, t] : ["Database name has invalid characters.", null]; },
+    username: (v) => { const t = String(v ?? "").trim(); return !t || t.length > 80 ? ["Username must be 1-80 characters.", null] : [null, t]; },
+    ssl_mode: (v) => { const t = String(v ?? ""); return ["preferred", "required", "disabled"].includes(t) ? [null, t] : ["Choose preferred, required or disabled.", null]; },
+  };
 
-      actionBridge.on("connections.submit_save", async (payload) => {
-        setShowModal(true);
-        if (payload?.name) {
-          setForm((prev) => ({ ...prev, name: payload.name }));
-        }
-        await handleSaveConnection({ preventDefault: () => {} } as any);
-      }),
+  const formPayload = () => ({
+    db_type: selectedEngine, mode: "manual", name: form.name, host: form.host, port: form.port,
+    database_name: form.database_name, username: form.username, password: form.password,
+    ssl_mode: form.ssl_mode, connection_timeout: form.connection_timeout,
+  });
 
-      actionBridge.on("connections.scan_schema", () => {
-        loadConnections(true);
-      }),
-    ];
+  useOrbitSurface("connections.form", () => ({
+    isOpen: () => showModal,
+    open: () => openCreateModal(),
+    openTarget: "connections.add",
+    target: "connections.form",
+    fields: {
+      ...Object.fromEntries(["name", "host", "port", "database_name", "username", "ssl_mode"].map((name) => [name, {
+        get: () => (form as any)[name],
+        set: (v: any) => {
+          const [err, clean] = validators[name](v);
+          if (err) return err;
+          setConnectionMode("manual");
+          updateField(name as keyof typeof form, clean);
+          return null;
+        },
+        ...(name === "ssl_mode" ? { options: () => [
+          { value: "preferred", label: "Preferred" }, { value: "required", label: "Required" }, { value: "disabled", label: "Disabled" },
+        ] } : {}),
+      }])),
+      // The password is typed by the user; Orbit never reads or sets it.
+      password: { get: () => form.password, set: () => "The user must type the password themselves." },
+    },
+    actions: {
+      test: {
+        enabled: () => !!form.host && !!form.database_name && !!form.username,
+        run: async () => {
+          setAgentPending("test");
+          setTestResult(null);
+          try {
+            const res = await api.testAdHocConnection(formPayload());
+            setTestResult(res);
+            return { success: !!res.success, message: res.success
+              ? `Connection works (MySQL ${res.server_version || ""}, ${res.latency_ms ?? "?"} ms).`
+              : (res.message || "Connection test failed.") };
+          } catch (err: any) {
+            setTestResult({ success: false, message: err.message });
+            return { success: false, message: err.message || "Connection test failed." };
+          } finally {
+            setAgentPending(null);
+          }
+        },
+      },
+      save: {
+        enabled: () => !!form.name && !!form.host && !!form.database_name && !!form.username && (!!form.password || !!editingId),
+        run: async () => {
+          setAgentPending("save");
+          try {
+            const payload = { ...formPayload(), password: form.password || undefined };
+            const res: any = editingId ? await api.updateConnection(editingId, payload) : await api.createConnection(payload);
+            const conn = res?.connection;
+            setShowModal(false);
+            setEditingId(null);
+            resetForm();
+            loadConnections(true);
+            return { success: true, message: res?.message || "Connection profile saved.", resource: conn?.id ? { type: "DbConnection", id: conn.id } : undefined };
+          } catch (err: any) {
+            return { success: false, message: err.message || "Saving the connection failed." };
+          } finally {
+            setAgentPending(null);
+          }
+        },
+      },
+      cancel: { run: () => { setShowModal(false); return { success: true, message: "Form closed." }; } },
+    },
+  }));
 
-    return () => {
-      unsubs.forEach((unsub) => unsub());
-    };
-  }, [handleTestAdHoc, handleSaveConnection]);
+  useOrbitSurface("connections.list", () => ({
+    target: "connections.add",
+    describe: () => connections.map((c: any) => ({
+      id: c.id, name: c.name, host: c.host, port: c.port, database: c.database_name || c.database,
+      username: c.username, status: c.status || "untested", last_tested_at: c.last_tested_at,
+    })),
+    actions: {
+      test: {
+        target: (row) => `connections.card.${row}`,
+        run: async (row) => {
+          try {
+            setTestingId(Number(row));
+            const res = await api.testConnection(Number(row));
+            loadConnections(true);
+            return { success: !!res.success, message: res.success ? `Reachable (MySQL ${res.server_version || ""}, ${res.latency_ms ?? "?"} ms).` : (res.message || "Not reachable."), resource: { type: "DbConnection", id: Number(row) } };
+          } catch (err: any) {
+            loadConnections(true);
+            return { success: false, message: err.message || "Connection test failed." };
+          } finally {
+            setTestingId(null);
+          }
+        },
+      },
+      refresh_schema: {
+        target: (row) => `connections.card.${row}`,
+        run: async (row) => {
+          try {
+            setRefreshingSchemaId(Number(row));
+            const res: any = await api.refreshSchema(Number(row));
+            loadConnections(true);
+            return { success: true, message: `Schema rescanned: ${res?.tables_discovered ?? "?"} tables.`, resource: { type: "DbConnection", id: Number(row) } };
+          } catch (err: any) {
+            return { success: false, message: err.message || "Schema rescan failed." };
+          } finally {
+            setRefreshingSchemaId(null);
+          }
+        },
+      },
+      edit: {
+        target: (row) => `connections.card.${row}`,
+        run: (row) => {
+          const c = connections.find((x: any) => String(x.id) === String(row));
+          if (!c) return { success: false, message: "No such connection on screen." };
+          openEditModal(c);
+          return { success: true, message: `Edit form opened for ${c.name}.` };
+        },
+      },
+      remove: {
+        target: (row) => `connections.card.${row}`,
+        run: async (row) => {
+          try {
+            const res: any = await api.deleteConnection(Number(row));
+            loadConnections(true);
+            return { success: true, message: res?.message || "Connection profile removed." };
+          } catch (err: any) {
+            return { success: false, message: err.message || "Could not remove the connection." };
+          }
+        },
+      },
+    },
+  }));
 
+  // Structured, non-secret page state for Orbit's runtime context.
   useEffect(() => {
     pageStateService.setActiveModal(showModal ? "connection_modal" : null);
     if (showModal) {
-      pageStateService.registerForm("connection_modal", "Database Connection Form");
-      pageStateService.updateFormField("connection_modal", "name", form.name);
-      pageStateService.updateFormField("connection_modal", "host", form.host);
-      pageStateService.updateFormField("connection_modal", "port", form.port);
-      pageStateService.updateFormField("connection_modal", "database_name", form.database_name);
-      pageStateService.updateFormField("connection_modal", "username", form.username);
+      pageStateService.registerForm("connection_modal", editingId ? "Edit Database Connection" : "New Database Connection");
+      (["name", "host", "port", "database_name", "username"] as const).forEach((field) => {
+        pageStateService.updateFormField("connection_modal", field, form[field], { isDefault: !touched[field] });
+      });
       pageStateService.updateFormField("connection_modal", "password", form.password, { isSecret: true });
+    } else {
+      pageStateService.unregisterForm("connection_modal");
     }
-  }, [showModal, form]);
+  }, [showModal, form, touched, editingId]);
 
   const resetForm = () => {
     setForm({
@@ -350,6 +452,8 @@ export const ConnectionsPage: React.FC = () => {
     setConnectionMode("manual");
     setSelectedEngine("mysql");
     setShowAdvanced(false);
+    setTouched({});
+    setAgentPending(null);
   };
 
   const openCreateModal = () => {
@@ -374,6 +478,7 @@ export const ConnectionsPage: React.FC = () => {
       connection_timeout: c.connection_timeout || 10,
     });
     setTestResult(null);
+    setTouched({ name: true, host: true, port: true, database_name: true, username: true });
     setShowModal(true);
   };
 
@@ -414,6 +519,7 @@ export const ConnectionsPage: React.FC = () => {
           </p>
         </div>
         <motion.button
+          ref={addButtonRef}
           id="connection-form-anchor"
           whileHover={{ scale: 1.02 }}
           whileTap={{ scale: 0.98 }}
@@ -491,7 +597,7 @@ export const ConnectionsPage: React.FC = () => {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
           {connections.map((c) => {
             const dbName = (c as any).database_name || c.database || "";
-            const currentStatus = (c as any).status || c.last_status || "connected";
+            const currentStatus = (c as any).status || c.last_status || "untested";
             const isItemTesting = testingId === c.id;
             const isRefreshingSchema = refreshingSchemaId === c.id;
             const lastTested = (c as any).last_tested_at;
@@ -501,6 +607,9 @@ export const ConnectionsPage: React.FC = () => {
             return (
               <motion.div
                 key={c.id}
+                ref={(el: HTMLDivElement | null) =>
+                  el ? orbitTargets.register(`connections.card.${c.id}`, el) : orbitTargets.unregister(`connections.card.${c.id}`)
+                }
                 whileHover={{ y: -3, transition: { duration: 0.2 } }}
                 className="bg-white border border-slate-200 hover:border-indigo-300 rounded-xl p-5 flex flex-col justify-between transition-all shadow-xs hover:shadow-md hover:shadow-indigo-500/5 group"
               >
@@ -625,6 +734,7 @@ export const ConnectionsPage: React.FC = () => {
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 10 }}
               transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+              ref={formRef}
               className="bg-white border border-slate-200 rounded-2xl max-w-xl w-full p-6 shadow-2xl space-y-4 my-8"
             >
               {/* Modal Header */}
@@ -717,11 +827,12 @@ export const ConnectionsPage: React.FC = () => {
                 <div>
                   <label className="block text-slate-700 font-semibold mb-1">Connection Display Name</label>
                   <input
+                    ref={nameRef}
                     type="text"
                     required
                     placeholder="e.g. Primary Production CMS"
                     value={form.name}
-                    onChange={(e) => setForm({ ...form, name: e.target.value })}
+                    onChange={(e) => updateField("name", e.target.value)}
                     className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600"
                   />
                 </div>
@@ -747,22 +858,24 @@ export const ConnectionsPage: React.FC = () => {
                       <div className="col-span-2">
                         <label className="block text-slate-700 font-semibold mb-1">Host / Address</label>
                         <input
+                    ref={hostRef}
                           type="text"
                           required
                           placeholder="127.0.0.1 or db.example.com"
                           value={form.host}
-                          onChange={(e) => setForm({ ...form, host: e.target.value })}
+                          onChange={(e) => updateField("host", e.target.value)}
                           className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-slate-900 placeholder:text-slate-400 font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600"
                         />
                       </div>
                       <div>
                         <label className="block text-slate-700 font-semibold mb-1">Port</label>
                         <input
+                    ref={portRef}
                           type="number"
                           required
                           placeholder="3306"
                           value={form.port}
-                          onChange={(e) => setForm({ ...form, port: parseInt(e.target.value) || 3306 })}
+                          onChange={(e) => updateField("port", parseInt(e.target.value) || 3306)}
                           className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-slate-900 font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600"
                         />
                       </div>
@@ -771,11 +884,12 @@ export const ConnectionsPage: React.FC = () => {
                     <div>
                       <label className="block text-slate-700 font-semibold mb-1">Database / Schema Name</label>
                       <input
+                    ref={dbRef}
                         type="text"
                         required
                         placeholder="e.g. demo_blog_cms"
                         value={form.database_name}
-                        onChange={(e) => setForm({ ...form, database_name: e.target.value })}
+                        onChange={(e) => updateField("database_name", e.target.value)}
                         className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-slate-900 placeholder:text-slate-400 font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600"
                       />
                     </div>
@@ -784,11 +898,12 @@ export const ConnectionsPage: React.FC = () => {
                       <div>
                         <label className="block text-slate-700 font-semibold mb-1">Username</label>
                         <input
+                    ref={userRef}
                           type="text"
                           required
                           placeholder="e.g. root"
                           value={form.username}
-                          onChange={(e) => setForm({ ...form, username: e.target.value })}
+                          onChange={(e) => updateField("username", e.target.value)}
                           className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-slate-900 placeholder:text-slate-400 font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600"
                         />
                       </div>
@@ -799,10 +914,11 @@ export const ConnectionsPage: React.FC = () => {
                         </label>
                         <div className="relative">
                           <input
+                            ref={passwordRef}
                             type={showPassword ? "text" : "password"}
                             placeholder={editingId ? "Leave blank to keep existing" : "Database password"}
                             value={form.password}
-                            onChange={(e) => setForm({ ...form, password: e.target.value })}
+                            onChange={(e) => updateField("password", e.target.value)}
                             className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 pr-9 text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600"
                           />
                           <button
@@ -904,7 +1020,10 @@ export const ConnectionsPage: React.FC = () => {
                         ) : (
                           <AlertCircle className="w-4 h-4 text-rose-600" />
                         )}
-                        <span>{testResult.success ? "Connection Verified Successfully" : "Connection Verification Failed"}</span>
+                        <span>
+                          {testResult.success ? "Connection Verified Successfully" : "Connection Verification Failed"}
+                          {testResult.via === "orbit" && <span className="ml-1.5 font-normal text-[10px] text-indigo-600">(server result of Orbit's run)</span>}
+                        </span>
                       </div>
                       {testResult.latency_ms && (
                         <span className="font-mono text-[11px] font-semibold text-slate-500">
@@ -938,13 +1057,14 @@ export const ConnectionsPage: React.FC = () => {
                 {/* Modal Footer Controls */}
                 <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
                   <button
+                    ref={testButtonRef}
                     type="button"
                     onClick={handleTestAdHoc}
-                    disabled={isTestingAdHoc}
+                    disabled={isTestingAdHoc || agentPending !== null}
                     className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-lg transition flex items-center gap-1.5 shadow-2xs"
                   >
-                    <RefreshCw className={`w-3.5 h-3.5 ${isTestingAdHoc ? "animate-spin text-indigo-600" : ""}`} />
-                    <span>{isTestingAdHoc ? "Testing..." : "Test Connection"}</span>
+                    <RefreshCw className={`w-3.5 h-3.5 ${isTestingAdHoc || agentPending === "test" ? "animate-spin text-indigo-600" : ""}`} />
+                    <span>{isTestingAdHoc ? "Testing..." : agentPending === "test" ? "Orbit is testing…" : "Test Connection"}</span>
                   </button>
                   <div className="flex gap-2">
                     <button
@@ -955,10 +1075,12 @@ export const ConnectionsPage: React.FC = () => {
                       Cancel
                     </button>
                     <button
+                      ref={saveButtonRef}
                       type="submit"
-                      className="btn-primary-gradient px-4 py-2 text-white font-semibold rounded-lg shadow-xs"
+                      disabled={agentPending !== null}
+                      className="btn-primary-gradient px-4 py-2 text-white font-semibold rounded-lg shadow-xs disabled:opacity-60"
                     >
-                      {editingId ? "Update Profile" : "Save Profile"}
+                      {agentPending === "save" ? "Orbit is saving…" : editingId ? "Update Profile" : "Save Profile"}
                     </button>
                   </div>
                 </div>

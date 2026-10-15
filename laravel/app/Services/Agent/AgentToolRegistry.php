@@ -26,7 +26,51 @@ class AgentToolRegistry
     /**
      * Complete definitions of registered tools with rich capability metadata.
      */
+    /** Names of the generic on-screen tools (executed by the browser, checked against SurfaceCatalog). */
+    public const UI_TOOLS = ['go_to_page', 'open_form', 'read_screen', 'fill_fields', 'choose_option', 'press', 'ask_secret_in_form', 'show_me'];
+
+    /**
+     * Generic tools that let Orbit operate any catalogued page like a person, visibly:
+     * navigate, open forms, type into fields, pick options, press buttons.
+     */
+    public static function uiToolDefinitions(): array
+    {
+        $routes = SurfaceCatalog::routes();
+        $surfaces = SurfaceCatalog::surfaceIds();
+        $openable = SurfaceCatalog::surfaceIds(fn ($s) => !empty($s['openable']));
+        $ui = fn (string $name, string $label, string $description, array $properties, array $required = []) => [
+            'name' => $name, 'label' => $label, 'description' => $description, 'outcome' => 'Visible action in the portal, acknowledged by the browser.',
+            'scope' => 'tenant_user', 'read_only' => $name === 'read_screen', 'side_effects' => 'Operates the portal UI on screen.',
+            'risk_level' => 'LOW', 'requires_confirmation' => false, 'idempotent' => false, 'retryable' => true, 'audit_required' => false,
+            'parameters' => array_filter(['type' => 'object', 'properties' => $properties, 'required' => $required ?: null]),
+            'output_schema' => ['type' => 'object'],
+        ];
+
+        return [
+            $ui('go_to_page', 'Go to a page', 'Visibly navigate the portal to a page (Orbit taps the sidebar item). Returns which surfaces are now on screen.',
+                ['page' => ['type' => 'string', 'enum' => $routes]], ['page']),
+            $ui('open_form', 'Open a form', 'Navigate if needed and open a form (Orbit taps its opener, e.g. "Connect Database"). Returns its fields, current values and which required fields are still missing.',
+                ['surface' => ['type' => 'string', 'enum' => $openable]], ['surface']),
+            $ui('read_screen', 'Read the screen', 'Read what is on screen now: surfaces with their non-secret field values, errors, list rows (with their ids) and available actions.', []),
+            $ui('fill_fields', 'Fill form fields', 'Type values into fields of an on-screen surface (Orbit types them visibly). values is an object of field name to value. Never for secret or file fields. Returns per-field acceptance or validation errors and fields still missing.',
+                ['surface' => ['type' => 'string', 'enum' => $surfaces], 'values' => ['type' => 'object'], 'row' => ['type' => 'string']], ['surface', 'values']),
+            $ui('choose_option', 'Choose a dropdown option', 'Pick an option in a select field using the real loaded options, by option id or visible label. Returns the chosen option, or the candidates if ambiguous.',
+                ['surface' => ['type' => 'string', 'enum' => $surfaces], 'field' => ['type' => 'string'], 'choice' => ['type' => 'string'], 'row' => ['type' => 'string']], ['surface', 'field', 'choice']),
+            $ui('press', 'Press a button', 'Press a button on an on-screen surface; the page does exactly what a user click does and the real result is returned. Row actions need row (the item id). Actions marked consequential need the user to confirm first.',
+                ['surface' => ['type' => 'string', 'enum' => $surfaces], 'action' => ['type' => 'string'], 'row' => ['type' => 'string']], ['surface', 'action']),
+            $ui('ask_secret_in_form', 'Ask for a secret in the form', 'Point at a password or API-key box in the form and let the user type it there themselves. Then WAIT_FOR_USER; you will be told when they have entered it. You never see the value.',
+                ['surface' => ['type' => 'string', 'enum' => $surfaces], 'field' => ['type' => 'string']], ['surface', 'field']),
+            $ui('show_me', 'Show the user something', 'Point at and highlight a field, button or the surface itself with a short caption, to guide the user.',
+                ['surface' => ['type' => 'string', 'enum' => $surfaces], 'element' => ['type' => 'string'], 'caption' => ['type' => 'string', 'maxLength' => 160]], ['surface', 'caption']),
+        ];
+    }
+
     public static function getToolDefinitions(): array
+    {
+        return array_merge(self::uiToolDefinitions(), self::backendToolDefinitions());
+    }
+
+    public static function backendToolDefinitions(): array
     {
         return [
             // =================================================================
@@ -1008,6 +1052,134 @@ class AgentToolRegistry
     }
 
     /**
+     * Agent-loop metadata layered over the definitions above. Anything not listed
+     * gets defaults derived from the definition (read_only => side_effect_class "read").
+     *
+     * - secret_params: arguments filled from SecretVault at execution time; hidden from the model.
+     * - always_confirm: needs explicit user confirmation regardless of autonomy level.
+     * - postcondition: authoritative check run after a successful call.
+     */
+    public const TOOL_META = [
+        'test_database_connection' => [
+            'version' => 2,
+            'side_effect_class' => 'platform_metadata',
+            'secret_params' => ['password' => 'database_password'],
+            'requires_confirmation' => false,
+            'description' => 'Check whether a database is reachable. Pass connection_id to check the live status of a SAVED connection (updates its stored status). Or pass host, port, database and username to test NEW details before saving; the password is supplied securely by the app, never by you.',
+        ],
+        'save_database_connection' => [
+            'version' => 2,
+            'side_effect_class' => 'write',
+            'secret_params' => ['password' => 'database_password'],
+            // The user explicitly asked to connect; the handler re-tests before saving and the
+            // profile is platform-only and removable, so no extra confirmation by default.
+            'requires_confirmation' => false,
+            'postcondition' => 'connection_persisted',
+            'description' => 'Save a new MySQL connection profile for the user. Re-tests connectivity first and refuses to save if the test fails. Requires name, host, database, username (port defaults to 3306). The password is supplied securely by the app.',
+        ],
+        'update_database_connection' => ['side_effect_class' => 'write', 'secret_params' => ['password' => 'database_password']],
+        'disconnect_database_connection' => ['side_effect_class' => 'write', 'always_confirm' => true],
+        'scan_database_schema' => ['side_effect_class' => 'platform_metadata', 'postcondition' => 'schema_snapshot_exists'],
+        'get_schema_scan_status' => ['side_effect_class' => 'platform_metadata'],
+        'create_automation_draft' => ['side_effect_class' => 'write', 'postcondition' => 'automation_persisted'],
+        'update_automation' => ['side_effect_class' => 'write'],
+        'remove_automation' => ['side_effect_class' => 'write', 'always_confirm' => true],
+        'run_automation_now' => ['side_effect_class' => 'external'],
+        'update_published_record' => ['side_effect_class' => 'external', 'always_confirm' => true],
+        'approve_content_version' => ['side_effect_class' => 'external', 'postcondition' => 'version_approved'],
+        'reject_content_version' => ['side_effect_class' => 'write'],
+        'retry_execution' => ['side_effect_class' => 'write'],
+        'request_execution_interrupt' => ['side_effect_class' => 'write'],
+        'test_ai_provider' => ['secret_params' => ['api_key' => 'api_key']],
+        'save_ai_provider' => ['side_effect_class' => 'write', 'secret_params' => ['api_key' => 'api_key']],
+        'remove_knowledge_document' => ['side_effect_class' => 'write', 'always_confirm' => true],
+    ];
+
+    /**
+     * Full definition for one tool, merged with agent-loop metadata. Null for unknown tools.
+     */
+    public static function definition(string $name): ?array
+    {
+        $def = collect(self::getToolDefinitions())->firstWhere('name', $name);
+        if (!$def) {
+            return null;
+        }
+        $meta = self::TOOL_META[$name] ?? [];
+
+        $isUi = in_array($name, self::UI_TOOLS, true);
+
+        return array_merge($def, [
+            'version' => $meta['version'] ?? 1,
+            'side_effect_class' => $isUi ? 'ui' : ($meta['side_effect_class'] ?? (($def['read_only'] ?? false) ? 'read' : 'write')),
+            'secret_params' => $meta['secret_params'] ?? [],
+            'always_confirm' => $meta['always_confirm'] ?? false,
+            'requires_confirmation' => $meta['requires_confirmation'] ?? ($def['requires_confirmation'] ?? false),
+            'postcondition' => $meta['postcondition'] ?? null,
+            'description' => $meta['description'] ?? $def['description'],
+        ]);
+    }
+
+    /**
+     * Parameter schema the model is allowed to fill: secret params removed, no extra properties.
+     */
+    public static function modelParameterSchema(array $def): array
+    {
+        $params = $def['parameters'] ?? ['type' => 'object', 'properties' => []];
+        $secret = array_keys($def['secret_params'] ?? []);
+        $props = array_diff_key($params['properties'] ?? [], array_flip($secret));
+        $required = array_values(array_diff($params['required'] ?? [], $secret));
+
+        $schema = ['type' => 'object', 'properties' => (object) $props, 'additionalProperties' => false];
+        if ($required) {
+            $schema['required'] = $required;
+        }
+
+        return $schema;
+    }
+
+    /**
+     * Tool schemas sent to the model, generated from the same definitions the executor
+     * validates against, with live availability for this user.
+     */
+    public static function modelVisibleSchemas(User $user, string $autonomyLevel = 'CONFIRM_CONSEQUENTIAL_CHANGES'): array
+    {
+        $availability = self::getDynamicToolAvailability($user);
+        $out = [];
+        foreach (self::getToolDefinitions() as $raw) {
+            $def = self::definition($raw['name']);
+            $out[] = [
+                'name' => $def['name'],
+                'description' => $def['description'],
+                'parameters' => self::modelParameterSchema($def),
+                'side_effect_class' => $def['side_effect_class'],
+                'requires_confirmation' => self::needsConfirmation($def, $autonomyLevel),
+                'available' => $availability[$def['name']]['available'] ?? true,
+                'unavailable_reason' => $availability[$def['name']]['reason'] ?? null,
+            ];
+        }
+
+        return $out;
+    }
+
+    /**
+     * Confirmation policy: always for always_confirm tools; otherwise by autonomy level.
+     */
+    public static function needsConfirmation(array $def, string $autonomyLevel): bool
+    {
+        if ($def['always_confirm'] ?? false) {
+            return true;
+        }
+        // UI tools are gated per catalog action (consequential => confirm) in ToolPolicyGate.
+        $mutates = !in_array($def['side_effect_class'] ?? 'read', ['read', 'platform_metadata', 'ui'], true);
+
+        return match ($autonomyLevel) {
+            'PREPARE_FOR_REVIEW' => $mutates,
+            'AUTOMATIC_WITHIN_PERMISSIONS' => false,
+            default => $mutates && ($def['requires_confirmation'] ?? false),
+        };
+    }
+
+    /**
      * Determine dynamic availability for every tool based on live user context.
      */
     public static function getDynamicToolAvailability(User $user): array
@@ -1021,10 +1193,16 @@ class AgentToolRegistry
 
         $availability = [];
 
+        $browser = UiActionCoordinator::clientPresent($user->id);
         foreach (self::getToolDefinitions() as $tool) {
             $name = $tool['name'];
             $available = true;
             $reason = null;
+
+            if (in_array($name, self::UI_TOOLS, true) && !$browser) {
+                $available = false;
+                $reason = 'Orbit can only operate the screen while the portal is open in a browser (NO_BROWSER).';
+            }
 
             // Connection-dependent tools
             if (in_array($name, ['scan_database_schema', 'get_schema_scan_status', 'lookup_table_values'])) {
@@ -1278,18 +1456,52 @@ class AgentToolRegistry
             $latency = round((microtime(true) - $start) * 1000, 2);
             unset($pdo);
 
+            if (isset($conn)) {
+                self::recordConnectionStatus($user, $conn, true, $serverVersion, $latency, null);
+            }
+
             return [
                 'success' => true,
-                'message' => "Connection successful (Server: {$serverVersion}, Latency: {$latency}ms).",
+                'message' => isset($conn)
+                    ? "Saved connection '{$conn->name}' is reachable (MySQL {$serverVersion}, {$latency}ms)."
+                    : "Connection successful (Server: {$serverVersion}, Latency: {$latency}ms).",
+                'connection_id' => isset($conn) ? $conn->id : null,
+                'connection_name' => isset($conn) ? $conn->name : null,
+                'status' => 'connected',
                 'server_version' => $serverVersion,
                 'latency_ms' => $latency,
             ];
         } catch (\Throwable $e) {
+            $error = 'Connection test failed: ' . $e->getMessage();
+            if (isset($conn)) {
+                self::recordConnectionStatus($user, $conn, false, null, null, $error);
+            }
+
             return [
                 'success' => false,
-                'error' => 'Connection test failed: ' . $e->getMessage(),
+                'error' => $error,
+                'connection_id' => isset($conn) ? $conn->id : null,
+                'status' => 'connection_error',
             ];
         }
+    }
+
+    protected static function recordConnectionStatus(User $user, DbConnection $conn, bool $ok, ?string $version, ?float $latency, ?string $error): void
+    {
+        $conn->update([
+            'status' => $ok ? 'connected' : 'connection_error',
+            'last_tested_at' => now(),
+            'server_version' => $version ?? $conn->server_version,
+            'latency_ms' => $latency,
+            'error_message' => $ok ? null : $error,
+        ]);
+        LiveEventService::publish($user->id, 'connection.tested', [
+            'id' => $conn->id,
+            'status' => $conn->status,
+            'latency_ms' => $conn->latency_ms,
+            'server_version' => $conn->server_version,
+            'last_tested_at' => $conn->last_tested_at?->toIso8601String(),
+        ], 'DbConnection', (string) $conn->id);
     }
 
     protected static function saveDatabaseConnection(User $user, array $args): array
@@ -1306,6 +1518,19 @@ class AgentToolRegistry
             return [
                 'success' => false,
                 'error' => 'All connection parameters (name, host, database, username, password) are required.',
+            ];
+        }
+
+        $existing = DbConnection::where('user_id', $user->id)
+            ->where('host', $host)->where('port', $port)
+            ->where('database_name', $dbName)->where('username', $username)
+            ->first();
+        if ($existing) {
+            return [
+                'success' => false,
+                'error_category' => 'CONFLICT',
+                'error' => "A saved connection for {$username}@{$host}:{$port}/{$dbName} already exists ('{$existing->name}', id {$existing->id}). Test that connection_id instead of saving a duplicate.",
+                'connection_id' => $existing->id,
             ];
         }
 
@@ -1343,7 +1568,7 @@ class AgentToolRegistry
             'username' => $username,
             'encrypted_password' => $password, // Auto-encrypted by Model cast
             'ssl_mode' => $sslMode,
-            'status' => 'CONNECTED',
+            'status' => 'connected',
             'server_version' => $testResult['server_version'] ?? 'MySQL 8.0',
             'latency_ms' => $testResult['latency_ms'] ?? 10.0,
             'last_tested_at' => now(),
@@ -1948,7 +2173,7 @@ class AgentToolRegistry
 
     protected static function approveContentVersion(User $user, array $args): array
     {
-        $version = ContentVersion::find($args['version_id'] ?? 0);
+        $version = ContentVersion::where('user_id', $user->id)->find($args['version_id'] ?? 0);
         if (!$version) {
             return ['success' => false, 'error' => 'Draft version not found.'];
         }
@@ -1958,7 +2183,8 @@ class AgentToolRegistry
             return ['success' => false, 'error' => 'Unauthorized or invalid execution.'];
         }
 
-        $version->update(['is_approved' => true]);
+        // Same persisted state as the email approval flow (EmailApprovalService).
+        $version->update(['status' => 'APPROVED']);
         $execution->update(['status' => 'APPROVED']);
 
         PublishApprovedExecution::dispatch($execution->id, $version->id);
@@ -1973,7 +2199,7 @@ class AgentToolRegistry
 
     protected static function rejectContentVersion(User $user, array $args): array
     {
-        $version = ContentVersion::find($args['version_id'] ?? 0);
+        $version = ContentVersion::where('user_id', $user->id)->find($args['version_id'] ?? 0);
         if (!$version) {
             return ['success' => false, 'error' => 'Draft version not found.'];
         }
@@ -1985,7 +2211,7 @@ class AgentToolRegistry
 
         $feedback = trim($args['feedback'] ?? 'Please revise the draft.');
         $version->update([
-            'is_approved' => false,
+            'status' => 'REJECTED',
             'rejection_feedback' => $feedback,
         ]);
 

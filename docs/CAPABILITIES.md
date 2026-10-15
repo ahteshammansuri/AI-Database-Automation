@@ -16,53 +16,53 @@ This catalog documents the complete set of tools, security boundaries, and featu
 
 ## 2. Core Tool Registry (`AgentToolRegistry.php`)
 
-### Database Connection Management
-- `list_database_connections`: List all connected databases for the authenticated user.
-- `test_database_connection`: Tests network reachability, SSRF safety, and MySQL handshake.
-- `save_database_connection`: Persists an encrypted database profile with tenant ownership.
-- `delete_database_connection`: Safely removes a connection profile (does NOT drop customer DB).
+Generated from the live registry. UI tools (side effect `ui`) operate the portal on screen through the surface catalog (`laravel/resources/orbit/surfaces.json`); their confirmation comes from each catalog action's `consequential` flag. Backend tools follow the default-autonomy policy shown here.
 
-### Schema Intelligence & Discovery
-- `scan_database_schema`: Triggers live introspection of tables, columns, constraints, and foreign keys.
-- `get_schema_details`: Retrieves table profiles, data types, nullability, and primary/foreign keys.
-- `annotate_table_profile`: Annotates workspace notes and eligibility tier overrides for a table.
-- `detect_schema_drift`: Compares live customer database against latest stored baseline snapshot (`FEATURE_SCHEMA_DRIFT`).
+| Tool | Side effect | Confirm | Secret params (from vault) | Postcondition | Description |
+|---|---|---|---|---|---|
+| `go_to_page` | ui | per catalog | — | — | Visibly navigate the portal to a page (Orbit taps the sidebar item). Returns which surfaces are now on screen. |
+| `open_form` | ui | per catalog | — | — | Navigate if needed and open a form (Orbit taps its opener, e.g. "Connect Database"). Returns its fields, current values and which required fields are still missing. |
+| `read_screen` | ui | per catalog | — | — | Read what is on screen now: surfaces with their non-secret field values, errors, list rows (with their ids) and available actions. |
+| `fill_fields` | ui | per catalog | — | — | Type values into fields of an on-screen surface (Orbit types them visibly). values is an object of field name to value. Never for secret or file fields. Returns per-field acceptance or validation errors and fields still missing. |
+| `choose_option` | ui | per catalog | — | — | Pick an option in a select field using the real loaded options, by option id or visible label. Returns the chosen option, or the candidates if ambiguous. |
+| `press` | ui | per catalog | — | — | Press a button on an on-screen surface; the page does exactly what a user click does and the real result is returned. Row actions need row (the item id). Actions marked consequential need the user to confirm first. |
+| `ask_secret_in_form` | ui | per catalog | — | — | Point at a password or API-key box in the form and let the user type it there themselves. Then WAIT_FOR_USER; you will be told when they have entered it. You never see the value. |
+| `show_me` | ui | per catalog | — | — | Point at and highlight a field, button or the surface itself with a short caption, to guide the user. |
+| `list_database_connections` | read | no | — | — | List all connected databases for the authenticated user. |
+| `test_database_connection` | platform_metadata | no | password | — | Check whether a database is reachable. Pass connection_id to check the live status of a SAVED connection (updates its stored status). Or pass host, port, database and username to test NEW details before saving; the password is supplied securely by the app, never by you. |
+| `save_database_connection` | write | no | password | connection_persisted | Save a new MySQL connection profile for the user. Re-tests connectivity first and refuses to save if the test fails. Requires name, host, database, username (port defaults to 3306). The password is supplied securely by the app. |
+| `update_database_connection` | write | yes | password | — | Update connection metadata or credentials for an existing database profile. |
+| `disconnect_database_connection` | write | always | — | — | Remove a saved platform database connection profile. Target customer database is completely untouched. |
+| `scan_database_schema` | platform_metadata | no | — | schema_snapshot_exists | Introspect database schema and discover eligible tables for content automation. |
+| `get_schema_scan_status` | platform_metadata | no | — | — | Retrieve table eligibility classifications and foreign key relationships. |
+| `lookup_table_values` | read | no | — | — | Query allowable sample values or lookup references in an eligible target table (e.g. categories, tags, authors). |
+| `list_automations` | read | no | — | — | List all configured content generation and publishing workflows for the user. |
+| `get_automation_details` | read | no | — | — | Retrieve complete configuration, prompts, schedule, and field mappings of an automation. |
+| `create_automation_draft` | write | yes | — | automation_persisted | Configure and persist a new AI content automation workflow with lead-time enforcement. |
+| `update_automation` | write | yes | — | — | Update schedule, prompt context, active status, or settings of an existing automation. |
+| `remove_automation` | write | always | — | — | Delete an automation configuration record from the platform database. |
+| `run_automation_now` | external | yes | — | — | Immediately trigger a scheduled automation execution through the background queue. |
+| `preview_automation_content` | read | no | — | — | Generate an ephemeral content preview using the configured AI model without scheduling or inserting into the database. |
+| `list_executions` | read | no | — | — | List recent automation executions with status, date, and target table. |
+| `get_execution_status` | read | no | — | — | Check detailed status, timeline events, and output of an automation run. |
+| `retry_execution` | write | no | — | — | Re-dispatch a failed execution job to background workers. |
+| `request_execution_interrupt` | write | no | — | — | Request immediate pause or cancellation of a queued or running execution. |
+| `explain_execution_failure` | read | no | — | — | Analyze the latest failed execution and explain the root cause and safe fix. |
+| `update_published_record` | external | always | — | — | Perform an audited, scoped UPDATE to a single target customer record (WHERE id = :id). |
+| `get_pending_approvals` | read | no | — | — | List content drafts waiting for user approval before publishing. |
+| `approve_content_version` | external | yes | — | version_approved | Approve a pending content version draft to proceed to scheduled or immediate publication. |
+| `reject_content_version` | write | no | — | — | Reject a pending content draft and trigger regeneration with corrective feedback. |
+| `list_ai_providers` | read | no | — | — | List configured AI providers with masked API keys and model preferences. |
+| `test_ai_provider` | read | no | api_key | — | Test connectivity and model availability for a specific AI provider. |
+| `save_ai_provider` | write | yes | api_key | — | Save or update user-specific AI provider credentials (encrypted at rest). |
+| `get_provider_health` | read | no | — | — | Check connectivity to local Ollama or active AI providers. |
+| `list_knowledge_documents` | read | no | — | — | List indexed knowledge documents (.pdf, .txt, .md) for the tenant workspace. |
+| `query_knowledge_base` | read | no | — | — | Perform semantic search across workspace knowledge documents using vector embeddings. |
+| `remove_knowledge_document` | write | always | — | — | Remove a knowledge document and purge its vector embeddings from the index. |
+| `get_dashboard_summary` | read | no | — | — | Get overview statistics of connections, automations, executions, and worker health. |
+| `list_audit_logs` | read | no | — | — | Retrieve system audit trail records for actions performed in this tenant workspace. |
 
-### Automation Management
-- `list_automations`: Lists all configured automated publishing pipelines.
-- `get_automation_details`: Inspects target table, operation mode, schedule, lead time, and deadline policy.
-- `create_automation`: Configures a new automation definition with verified 30+ min lead time.
-- `update_automation`: Updates scheduling parameters, reviewer settings, or deadline policy.
-- `toggle_automation`: Enables or pauses an automation without destroying its configuration.
-- `propose_automation_plan`: Generates an intelligent mapping plan based on discovered table profiles.
-- `create_from_template`: Instantiates an automation from predefined blueprints (`FEATURE_TEMPLATES`).
-
-### Content Generation & Simulation
-- `generate_content`: Triggers real structured AI generation using live schema constraints and RAG passages.
-- `simulate_dry_run`: Simulates end-to-end execution, field mappings, and novelty checks with zero DB writes (`FEATURE_DRY_RUN`).
-- `evaluate_content_quality`: Computes Flesch-Kincaid ease, grade, SEO metrics, and factual grounding (`FEATURE_QUALITY_SCORE`).
-- `check_content_novelty`: Evaluates candidate titles against recent publications via semantic embeddings.
-
-### Approvals & Review
-- `list_pending_approvals`: Lists drafts awaiting review with single-use cryptographic tokens.
-- `review_content_version`: Records approval or rejection with feedback for automated revision.
-- `publish_approved_execution`: Atomically publishes an approved draft to the target MySQL database.
-
-### Compensation & Operational Safety
-- `compensate_execution`: Safely rolls back a published execution within a 24-hour window (`FEATURE_UNDO_CENTER`).
-- `get_calendar_events`: Retrieves scheduled publications and execution history (`FEATURE_CONTENT_CALENDAR`).
-- `reschedule_automation`: Reschedules publishing deadline enforcing 30-minute lead time policy.
-- `get_database_insights`: Safe read-only metrics and 30-day velocity analytics (`FEATURE_DB_INSIGHTS`).
-
-### Knowledge Base & AI Providers
-- `list_knowledge_documents`: Lists indexed RAG sources (Markdown, TXT, PDF).
-- `delete_knowledge_document`: Deletes document and re-indexes FAISS vector store.
-- `list_ai_providers`: Lists configured AI providers (Ollama local inference, OpenAI, Gemini, Claude).
-- `test_ai_provider`: Tests provider reachability and model availability.
-- `list_model_roles`: Lists specialized model role assignments (planner, generator, classifier, summarizer).
-- `update_model_role`: Reassigns specific tasks to different models or providers.
-
----
+Tools not in this table do not exist; Orbit says so instead of improvising. See `docs/orbit-agent/ARCHITECTURE.md`.
 
 ## 3. Platform Feature Flags Summary
 

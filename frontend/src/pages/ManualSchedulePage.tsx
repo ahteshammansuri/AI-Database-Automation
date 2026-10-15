@@ -29,6 +29,8 @@ import { ConnectionProfile, SchemaResponse, SchemaTable, SchemaColumn } from "..
 import { SearchableSelect } from "../components/common/SearchableSelect";
 import { InlineAiFieldAssist } from "../components/common/InlineAiFieldAssist";
 import { SchemaFieldControl } from "../components/common/SchemaFieldControl";
+import { useOrbitSurface } from "../hooks/useOrbitSurface";
+import { orbitTargets } from "../services/orbitTargets";
 
 export const ManualSchedulePage: React.FC = () => {
   const navigate = useNavigate();
@@ -354,6 +356,95 @@ export const ManualSchedulePage: React.FC = () => {
       setIsGeneratingAi(false);
     }
   };
+
+  // ---- Orbit surface: same state/API as the form; table columns are dynamic fields col.<name> ---
+  const colName = (key?: string) => String(key ?? "").replace(/^col\./, "");
+  useOrbitSurface("manual.form", () => ({
+    describe: () => ({
+      connection_id: selectedConnId,
+      table: selectedTable?.name ?? null,
+      columns: (selectedTable?.columns || [])
+        .filter((c: any) => !c.is_primary_key && !["created_at", "updated_at", "deleted_at"].includes(c.name.toLowerCase()))
+        .map((c: any) => ({
+          field: `col.${c.name}`, type: c.data_type, required: c.is_nullable === false && !c.default_value,
+          dropdown: !!lookupOptions[c.name]?.length || undefined, value: formData[c.name] === undefined ? null : String(formData[c.name]).slice(0, 120),
+        })),
+      tables: (schema?.tables || []).map((t: any) => t.name || t.table_name).slice(0, 60),
+      result: successResult?.message,
+    }),
+    fields: {
+      connection: {
+        get: () => selectedConnId,
+        set: async (v) => {
+          const id = Number(v);
+          if (!connections.find((c) => c.id === id)) return `Connection ${v} is not in this workspace.`;
+          await handleConnectionChange(id);
+          return null;
+        },
+        options: () => connections.map((c: any) => ({ value: c.id, label: `${c.name} (${c.database_name || c.database || ""})` })),
+      },
+      table: {
+        get: () => selectedTable?.name ?? null,
+        set: (v) => {
+          const name = String(v);
+          if (!(schema?.tables || []).some((t: any) => (t.name || t.table_name) === name)) return `Table '${name}' is not in this schema.`;
+          handleSelectTable(name);
+          return null;
+        },
+        options: () => (schema?.tables || []).map((t: any) => ({ value: t.name || t.table_name, label: t.name || t.table_name })),
+      },
+      "col.*": {
+        get: (key) => formData[colName(key)],
+        set: (v, key) => {
+          const c = colName(key);
+          if (!(selectedTable?.columns || []).some((x: any) => x.name === c)) return `Column '${c}' is not in the selected table.`;
+          handleFieldChange(c, v);
+          return null;
+        },
+        options: (key) => (lookupOptions[colName(key)] || []).map((o) => ({ value: o.id, label: String(o.label) })),
+        target: (key) => `manual.col.${colName(key)}`,
+      },
+      publish_mode: {
+        get: () => publishMode,
+        set: (v) => { const m = String(v).toUpperCase(); if (m !== "NOW" && m !== "SCHEDULED") return "Use NOW or SCHEDULED."; setPublishMode(m as any); return null; },
+        options: () => [{ value: "NOW", label: "Publish now" }, { value: "SCHEDULED", label: "Schedule" }],
+      },
+      scheduled_time: { get: () => scheduledTime, set: (v) => { setScheduledTime(String(v ?? "")); return null; } },
+      ai_topic: { get: () => aiTopic, set: (v) => { setAiTopic(String(v ?? "")); setShowAiHelper(true); return null; } },
+    },
+    actions: {
+      ai_draft: {
+        enabled: () => !!aiTopic.trim() && !!selectedTable,
+        run: async () => {
+          await handleGenerateAiDraft();
+          return { success: true, message: "AI draft filled into the form (review before publishing).", data: { fields: Object.keys(formData) } };
+        },
+      },
+      publish: {
+        enabled: () => !!selectedConnId && !!selectedTable && !isSubmitting,
+        run: async () => {
+          if (!selectedConnId || !selectedTable) return { success: false, message: "Choose the connection and table first." };
+          try {
+            setIsSubmitting(true);
+            setError(null);
+            const payload: Record<string, any> = { ...formData };
+            customFields.forEach((cf) => { if (cf.key.trim()) payload[cf.key.trim()] = cf.value; });
+            const res: any = await api.manualPublish({
+              connection_id: selectedConnId, target_table: selectedTable.name, payload,
+              publish_now: publishMode === "NOW", scheduled_time: publishMode === "SCHEDULED" ? scheduledTime : undefined,
+            });
+            setSuccessResult(res);
+            return { success: true, message: res?.message || "Done.", resource: res?.execution?.id ? { type: "AutomationExecution", id: res.execution.id } : undefined };
+          } catch (err: any) {
+            setError(err.message);
+            return { success: false, message: err.message || "Publishing failed." };
+          } finally {
+            setIsSubmitting(false);
+          }
+        },
+      },
+    },
+  }));
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -745,7 +836,7 @@ export const ManualSchedulePage: React.FC = () => {
                     const options = isRelational && lookupOptions[colName];
 
                     return (
-                      <div key={colName} className={colName === "title" || colName === "name" ? "sm:col-span-2" : ""}>
+                      <div key={colName} ref={(el: HTMLDivElement | null) => (el ? orbitTargets.register(`manual.col.${colName}`, el) : orbitTargets.unregister(`manual.col.${colName}`))} className={colName === "title" || colName === "name" ? "sm:col-span-2" : ""}>
                         <div className="flex items-center justify-between mb-1.5">
                           <label className="text-xs font-semibold text-slate-700 flex items-center gap-1">
                             <span>{colName}</span>
@@ -786,7 +877,7 @@ export const ManualSchedulePage: React.FC = () => {
                       const isLongText = col.data_type.includes("longtext") || colName.includes("content") || colName === "description";
 
                       return (
-                        <div key={colName}>
+                        <div key={colName} ref={(el: HTMLDivElement | null) => (el ? orbitTargets.register(`manual.col.${colName}`, el) : orbitTargets.unregister(`manual.col.${colName}`))}>
                           <div className="flex items-center justify-between mb-1.5">
                             <label className="text-xs font-semibold text-slate-700 flex items-center gap-1">
                               <span>{colName}</span>
@@ -832,7 +923,7 @@ export const ManualSchedulePage: React.FC = () => {
                     const currentValue = formData[colName];
 
                     return (
-                      <div key={colName} className="space-y-3">
+                      <div key={colName} ref={(el: HTMLDivElement | null) => (el ? orbitTargets.register(`manual.col.${colName}`, el) : orbitTargets.unregister(`manual.col.${colName}`))} className="space-y-3">
                         <div className="flex items-center justify-between">
                           <label className="text-xs font-semibold text-slate-700">{colName}</label>
                           <span className="text-[10px] text-slate-400 font-mono">Image URL / Base64 Payload</span>
@@ -935,7 +1026,7 @@ export const ManualSchedulePage: React.FC = () => {
                     {seoAndOtherCols.map((col) => {
                       const colName = col.name;
                       return (
-                        <div key={colName}>
+                        <div key={colName} ref={(el: HTMLDivElement | null) => (el ? orbitTargets.register(`manual.col.${colName}`, el) : orbitTargets.unregister(`manual.col.${colName}`))}>
                           <div className="flex items-center justify-between mb-1.5">
                             <label className="text-xs font-semibold text-slate-700 flex items-center gap-1">
                               <span>{colName}</span>

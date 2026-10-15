@@ -33,6 +33,8 @@ import {
   Server,
   Sparkles
 } from "lucide-react";
+import { useOrbitSurface } from "../hooks/useOrbitSurface";
+import { orbitTargets } from "../services/orbitTargets";
 import { api } from "../services/api";
 
 const stockImagePresets = [
@@ -706,6 +708,51 @@ export const AutomationBuilderPage: React.FC = () => {
     }
   };
 
+  /** The exact payload the "Create" button sends (shared with Orbit's create action). */
+  const buildAutomationPayload = () => {
+    const currentTbl = schema?.tables?.find(t => t.name === targetTable);
+    const mappedFields = fieldMappings.map(m => {
+      const colNameStr = m.column || "";
+      const isRelational = colNameStr.endsWith("_id");
+      const refTable = isRelational ? resolveReferencedTable(colNameStr, currentTbl) : null;
+      return {
+        field_name: m.column,
+        mapping_type: m.source === "RUNTIME_VALUE" ? "DERIVED_SLUG" : m.source,
+        source_field: m.rule ? "title" : undefined,
+        fixed_value: m.value !== undefined ? m.value : (isRelational ? 1 : "active"),
+        relation_config: m.relation_config || (
+          isRelational ? {
+            policy: "CREATE_IF_MISSING",
+            creation_policy: "CREATE_IF_MISSING",
+            referenced_table: refTable || m.column.replace(/_id$/, "s"),
+            lookup_column: "name",
+          } : undefined
+        ),
+      };
+    });
+
+    return {
+      name,
+      connection_id: selectedConnId,
+      target_table: targetTable,
+      operation_mode: mode === "AI_GENERATED" ? "AI_CREATE" : "MANUAL_SCHEDULE",
+      field_mappings: mappedFields,
+      ai_provider: mode === "AI_GENERATED" ? aiConfig.provider : undefined,
+      ai_model: mode === "AI_GENERATED" ? aiConfig.model : undefined,
+      prompt_context: mode === "AI_GENERATED" ? ([aiConfig.topic, ...selectedContextTags].filter(Boolean).join(" • ") || `Generate rich content for table ${targetTable}`) : undefined,
+      knowledge_document_ids: mode === "AI_GENERATED" ? aiConfig.document_ids : [],
+      schedule_type: scheduleConfig.frequency,
+      start_date: scheduleConfig.start_date,
+      generation_time: scheduleConfig.generation_time,
+      publication_time: scheduleConfig.publication_time,
+      timezone: scheduleConfig.timezone,
+      requires_approval: approvalPolicy.require_approval,
+      reviewer_email: approvalPolicy.reviewer_email || undefined,
+      timeout_policy: approvalPolicy.timeout_action === "PUBLISH_PENDING" ? "AUTO_PUBLISH_LATEST" : "KEEP_DRAFT",
+      is_active: true
+    };
+  };
+
   const handleSubmit = async () => {
     if (!selectedConnId) {
       setError("Please select a target database connection.");
@@ -720,47 +767,7 @@ export const AutomationBuilderPage: React.FC = () => {
       setIsSubmitting(true);
       setError(null);
 
-      const currentTbl = schema?.tables?.find(t => t.name === targetTable);
-      const mappedFields = fieldMappings.map(m => {
-        const colNameStr = m.column || "";
-        const isRelational = colNameStr.endsWith("_id");
-        const refTable = isRelational ? resolveReferencedTable(colNameStr, currentTbl) : null;
-        return {
-          field_name: m.column,
-          mapping_type: m.source === "RUNTIME_VALUE" ? "DERIVED_SLUG" : m.source,
-          source_field: m.rule ? "title" : undefined,
-          fixed_value: m.value !== undefined ? m.value : (isRelational ? 1 : "active"),
-          relation_config: m.relation_config || (
-            isRelational ? {
-              policy: "CREATE_IF_MISSING",
-              creation_policy: "CREATE_IF_MISSING",
-              referenced_table: refTable || m.column.replace(/_id$/, "s"),
-              lookup_column: "name",
-            } : undefined
-          ),
-        };
-      });
-
-      await api.createAutomation({
-        name,
-        connection_id: selectedConnId,
-        target_table: targetTable,
-        operation_mode: mode === "AI_GENERATED" ? "AI_CREATE" : "MANUAL_SCHEDULE",
-        field_mappings: mappedFields,
-        ai_provider: mode === "AI_GENERATED" ? aiConfig.provider : undefined,
-        ai_model: mode === "AI_GENERATED" ? aiConfig.model : undefined,
-        prompt_context: mode === "AI_GENERATED" ? ([aiConfig.topic, ...selectedContextTags].filter(Boolean).join(" • ") || `Generate rich content for table ${targetTable}`) : undefined,
-        knowledge_document_ids: mode === "AI_GENERATED" ? aiConfig.document_ids : [],
-        schedule_type: scheduleConfig.frequency,
-        start_date: scheduleConfig.start_date,
-        generation_time: scheduleConfig.generation_time,
-        publication_time: scheduleConfig.publication_time,
-        timezone: scheduleConfig.timezone,
-        requires_approval: approvalPolicy.require_approval,
-        reviewer_email: approvalPolicy.reviewer_email || undefined,
-        timeout_policy: approvalPolicy.timeout_action === "PUBLISH_PENDING" ? "AUTO_PUBLISH_LATEST" : "KEEP_DRAFT",
-        is_active: true
-      });
+      await api.createAutomation(buildAutomationPayload());
 
       // Clear draft on successful creation
       sessionStorage.removeItem("automation_builder_draft");
@@ -773,6 +780,111 @@ export const AutomationBuilderPage: React.FC = () => {
       setIsSubmitting(false);
     }
   };
+
+  // ---- Orbit surfaces: one per wizard step, registered only while that step is on screen -------
+  const stepTarget = (n: number) => `builder.step.${n}`;
+  const leadTimeOk = () => {
+    const [gh, gm] = (scheduleConfig.generation_time || "08:00").split(":").map(Number);
+    const [ph, pm] = (scheduleConfig.publication_time || "09:00").split(":").map(Number);
+    let diff = (ph * 60 + pm) - (gh * 60 + gm);
+    if (diff <= 0) diff += 24 * 60;
+    return diff >= 30;
+  };
+  const go = (n: number, msg: string) => { setError(null); setStep(n); return { success: true, message: msg }; };
+  const timeOk = (v: any) => /^([01]\d|2[0-3]):[0-5]\d$/.test(String(v));
+
+  useOrbitSurface("builder.setup", () => ({
+    target: stepTarget(1),
+    fields: {
+      name: { get: () => name, set: (v) => { const t = String(v ?? "").trim(); if (!t) return "Name is required."; setName(t); return null; }, target: () => stepTarget(1) },
+      connection: {
+        get: () => selectedConnId,
+        set: (v) => { const id = Number(v); if (!connections.find((c) => c.id === id)) return `Connection ${v} is not in this workspace.`; setSelectedConnId(id); return null; },
+        options: () => connections.map((c: any) => ({ value: c.id, label: `${c.name} (${c.database_name || c.database || ""})` })),
+        target: () => stepTarget(1),
+      },
+      table: {
+        get: () => targetTable,
+        set: (v) => { const t = String(v); if (schema?.tables && !schema.tables.some((x: any) => x.name === t)) return `Table '${t}' is not in this schema.`; setTargetTable(t); return null; },
+        options: () => (schema?.tables || []).map((t: any) => ({ value: t.name, label: t.name })),
+        target: () => stepTarget(1),
+      },
+      operation: { get: () => operation, set: (v) => { const o = String(v).toUpperCase(); if (!["INSERT", "UPDATE"].includes(o)) return "Use INSERT or UPDATE."; setOperation(o); return null; }, options: () => [{ value: "INSERT", label: "Insert new records" }, { value: "UPDATE", label: "Update existing records" }], target: () => stepTarget(1) },
+      mode: { get: () => mode, set: (v) => { const m = String(v).toUpperCase(); if (!["AI_GENERATED", "MANUAL"].includes(m)) return "Use AI_GENERATED or MANUAL."; setMode(m as any); return null; }, options: () => [{ value: "AI_GENERATED", label: "AI generated" }, { value: "MANUAL", label: "Manual" }], target: () => stepTarget(1) },
+      plan_prompt: { get: () => naturalPrompt, set: (v) => { setNaturalPrompt(String(v ?? "")); return null; }, target: () => stepTarget(1) },
+    },
+    actions: {
+      propose_plan: {
+        enabled: () => !!selectedConnId && !!naturalPrompt.trim(),
+        run: async () => { await handleProposeAutomation(); return { success: true, message: "AI plan applied to the builder; review each step.", data: { name, targetTable, mode } }; },
+      },
+      next: { run: () => (name.trim() ? go(2, "Moved to field mappings.") : { success: false, message: "Automation name is required first." }) },
+    },
+  }), step === 1);
+
+  useOrbitSurface("builder.mappings", () => ({
+    target: stepTarget(2),
+    describe: () => fieldMappings.map((m: any) => ({ column: m.column, source: m.source, value: m.value ?? undefined })),
+    actions: { back: { run: () => go(1, "Back to step 1.") }, next: { run: () => go(3, "Moved to AI and context.") } },
+  }), step === 2);
+
+  useOrbitSurface("builder.content", () => ({
+    target: stepTarget(3),
+    fields: {
+      provider: {
+        get: () => aiConfig.provider,
+        set: (v) => { setAiConfig((prev) => ({ ...prev, provider: String(v) })); return null; },
+        options: () => (availableProviders.length ? availableProviders.map((p: any) => ({ value: p.provider_id, label: p.name ?? p.provider_id })) : [{ value: "ollama", label: "Ollama (local)" }]),
+        target: () => stepTarget(3),
+      },
+      model: { get: () => aiConfig.model, set: (v) => { setAiConfig((prev) => ({ ...prev, model: String(v ?? "").trim() })); return null; }, target: () => stepTarget(3) },
+      topic: { get: () => aiConfig.topic, set: (v) => { const t = String(v ?? "").trim(); if (!t) return "Topic is required."; setAiConfig((prev) => ({ ...prev, topic: t })); return null; }, target: () => stepTarget(3) },
+      tone: { get: () => aiConfig.tone, set: (v) => { setAiConfig((prev) => ({ ...prev, tone: String(v ?? "") })); return null; }, target: () => stepTarget(3) },
+    },
+    actions: { back: { run: () => go(2, "Back to field mappings.") }, next: { run: () => (aiConfig.topic.trim() || mode !== "AI_GENERATED" ? go(4, "Moved to schedule and approval.") : { success: false, message: "Topic is required first." }) } },
+  }), step === 3);
+
+  useOrbitSurface("builder.schedule", () => ({
+    target: stepTarget(4),
+    fields: {
+      frequency: { get: () => scheduleConfig.frequency, set: (v) => { const f = String(v).toUpperCase(); if (!["DAILY", "WEEKLY", "ONE_TIME"].includes(f)) return "Use DAILY, WEEKLY or ONE_TIME."; setScheduleConfig((p) => ({ ...p, frequency: f })); return null; }, options: () => [{ value: "DAILY", label: "Daily" }, { value: "WEEKLY", label: "Weekly" }, { value: "ONE_TIME", label: "One time" }], target: () => stepTarget(4) },
+      start_date: { get: () => scheduleConfig.start_date, set: (v) => { if (!/^\d{4}-\d{2}-\d{2}$/.test(String(v))) return "Use YYYY-MM-DD."; setScheduleConfig((p) => ({ ...p, start_date: String(v) })); return null; }, target: () => stepTarget(4) },
+      generation_time: { get: () => scheduleConfig.generation_time, set: (v) => { if (!timeOk(v)) return "Use HH:MM (24h)."; setScheduleConfig((p) => ({ ...p, generation_time: String(v) })); return null; }, target: () => stepTarget(4) },
+      publication_time: { get: () => scheduleConfig.publication_time, set: (v) => { if (!timeOk(v)) return "Use HH:MM (24h)."; setScheduleConfig((p) => ({ ...p, publication_time: String(v) })); return null; }, target: () => stepTarget(4) },
+      require_approval: { get: () => String(approvalPolicy.require_approval), set: (v) => { setApprovalPolicy((p) => ({ ...p, require_approval: String(v) === "true" })); return null; }, options: () => [{ value: "true", label: "Require approval" }, { value: "false", label: "No approval" }], target: () => stepTarget(4) },
+      reviewer_email: { get: () => approvalPolicy.reviewer_email, set: (v) => { const e = String(v ?? "").trim(); if (e && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) return "That is not a valid email."; setApprovalPolicy((p) => ({ ...p, reviewer_email: e })); return null; }, target: () => stepTarget(4) },
+    },
+    actions: {
+      back: { run: () => go(3, "Back to AI and context.") },
+      next: { run: () => (leadTimeOk() ? go(5, "Moved to preview and enable.") : { success: false, message: "Publication time must be at least 30 minutes after generation time." }) },
+    },
+  }), step === 4);
+
+  useOrbitSurface("builder.review", () => ({
+    target: stepTarget(5),
+    describe: () => ({ name, table: targetTable, mode, schedule: scheduleConfig, approval: approvalPolicy.require_approval, preview: previewResult ? JSON.stringify(previewResult.data ?? previewResult).slice(0, 400) : null }),
+    actions: {
+      preview: { run: async () => { await handleTestPreview(); return { success: true, message: "Preview generated (shown on screen)." }; } },
+      back: { run: () => go(4, "Back to schedule.") },
+      create: {
+        enabled: () => !!selectedConnId && !!name.trim() && !isSubmitting,
+        run: async () => {
+          try {
+            setIsSubmitting(true);
+            const res: any = await api.createAutomation(buildAutomationPayload());
+            sessionStorage.removeItem("automation_builder_draft");
+            navigate("/automations");
+            return { success: true, message: res?.message || "Automation created and enabled.", resource: res?.automation?.id ? { type: "Automation", id: res.automation.id } : undefined };
+          } catch (err: any) {
+            setError(err.message);
+            return { success: false, message: err.message || "Creating the automation failed." };
+          } finally {
+            setIsSubmitting(false);
+          }
+        },
+      },
+    },
+  }), step === 5);
 
   const wizardSteps = [
     { num: 1, label: "Connection & Table" },
@@ -918,6 +1030,7 @@ export const AutomationBuilderPage: React.FC = () => {
         {step === 1 && (
           <motion.div
             key="step1"
+            ref={(el: HTMLDivElement | null) => (el ? orbitTargets.register(stepTarget(1), el) : orbitTargets.unregister(stepTarget(1)))}
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: -20 }}
@@ -1181,6 +1294,7 @@ export const AutomationBuilderPage: React.FC = () => {
         {step === 2 && (
           <motion.div
             key="step2"
+            ref={(el: HTMLDivElement | null) => (el ? orbitTargets.register(stepTarget(2), el) : orbitTargets.unregister(stepTarget(2)))}
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: -20 }}
@@ -1518,6 +1632,7 @@ export const AutomationBuilderPage: React.FC = () => {
         {step === 3 && (
           <motion.div
             key="step3"
+            ref={(el: HTMLDivElement | null) => (el ? orbitTargets.register(stepTarget(3), el) : orbitTargets.unregister(stepTarget(3)))}
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: -20 }}
@@ -2063,6 +2178,7 @@ export const AutomationBuilderPage: React.FC = () => {
         {step === 4 && (
           <motion.div
             key="step4"
+            ref={(el: HTMLDivElement | null) => (el ? orbitTargets.register(stepTarget(4), el) : orbitTargets.unregister(stepTarget(4)))}
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: -20 }}
@@ -2334,6 +2450,7 @@ export const AutomationBuilderPage: React.FC = () => {
         {step === 5 && (
           <motion.div
             key="step5"
+            ref={(el: HTMLDivElement | null) => (el ? orbitTargets.register(stepTarget(5), el) : orbitTargets.unregister(stepTarget(5)))}
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: -20 }}

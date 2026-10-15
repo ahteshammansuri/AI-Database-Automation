@@ -26,8 +26,12 @@ interface RequestOptions extends RequestInit {
   forceRefresh?: boolean;
 }
 
+// Live state must never be served from the memory cache (event polling, Orbit task state).
+const UNCACHED_PREFIXES = ["/live/", "/agent/"];
+
 async function request<T>(endpoint: string, options?: RequestOptions): Promise<T> {
-  const isGet = !options?.method || options.method.toUpperCase() === "GET";
+  const isRead = !options?.method || options.method.toUpperCase() === "GET";
+  const isGet = isRead && !UNCACHED_PREFIXES.some((p) => endpoint.startsWith(p));
   const cacheKey = `${endpoint}_${localStorage.getItem("auth_token") || "anon"}`;
 
   // Serve from instant memory cache if fresh GET
@@ -86,8 +90,8 @@ async function request<T>(endpoint: string, options?: RequestOptions): Promise<T
   // Store in cache if GET request
   if (isGet) {
     memoryCache.set(cacheKey, { data, timestamp: Date.now() });
-  } else {
-    // Invalidate cache on mutations
+  } else if (!isRead && !endpoint.startsWith("/agent/heartbeat") && !endpoint.startsWith("/agent/ui-actions/")) {
+    // Invalidate cache on mutations (Orbit heartbeats/acks change no portal data)
     clearApiCache();
   }
 
@@ -233,6 +237,7 @@ export const api = {
       body: JSON.stringify({ payload }),
     }),
   getLiveEvents: (sinceId?: number) => request<any[]>(`/live/events${sinceId ? `?since_id=${sinceId}` : ""}`),
+  getLiveEventsBaseline: () => request<any>("/live/events?baseline=1"),
   scheduleManual: (data: any) => request<any>("/automations", {
     method: "POST",
     body: JSON.stringify({
@@ -307,7 +312,7 @@ export const api = {
       }),
     });
   },
-  interruptAgentTask: (taskId: number, action: "STOP" | "PAUSE" = "STOP") =>
+  interruptAgentTask: (taskId: number, action: "STOP" | "PAUSE" | "RESUME" = "STOP") =>
     request<any>(`/agent/tasks/${taskId}/interrupt`, {
       method: "POST",
       body: JSON.stringify({ action }),
@@ -321,6 +326,7 @@ export const api = {
     request<any>(`/agent/tasks/${taskId}/confirm`, {
       method: "POST",
     }),
+  getAgentTask: (taskId: number) => request<any>(`/agent/tasks/${taskId}`),
   getAgentTaskTimeline: (taskId: number) => request<any>(`/agent/tasks/${taskId}/timeline`),
   getAgentPreferences: () => request<any>("/agent/preferences"),
   updateAgentPreferences: (prefs: { autonomy_level?: string; voice_enabled?: boolean; preferred_model?: string }) =>
@@ -329,6 +335,15 @@ export const api = {
       body: JSON.stringify(prefs),
     }),
   listAgentTools: () => request<any>("/agent/tools"),
+  ackAgentUiAction: (correlationId: string, status: string, result: Record<string, any> = {}) =>
+    request<any>(`/agent/ui-actions/${encodeURIComponent(correlationId)}/ack`, {
+      method: "POST",
+      body: JSON.stringify({ status, result }),
+    }),
+  agentHeartbeat: () => request<any>("/agent/heartbeat", { method: "POST", body: "{}" }),
+  getAgentSurfaces: () => request<any>("/agent/surfaces"),
+  continueAgentTask: (taskId: number, body: { surface: string; field: string; page_context?: any }) =>
+    request<any>(`/agent/tasks/${taskId}/continue`, { method: "POST", body: JSON.stringify(body) }),
 
   clearCache: clearApiCache,
 };

@@ -115,12 +115,13 @@ class AiProviderController extends Controller
                 'user_id' => $request->user()->id,
                 'provider_type' => $validated['provider_type'],
             ],
-            [
+            array_merge([
                 'model_name' => $validated['model_name'],
-                'encrypted_api_key' => $validated['api_key'] ?? null,
                 'base_url' => $validated['base_url'] ?? null,
                 'is_active' => true,
-            ]
+            ], !empty($validated['api_key'])
+                ? ['encrypted_api_key' => $validated['api_key']]  // keep the stored key unless a new one is given
+                : [])
         );
 
         AuditLog::log($request->user()->id, 'AI_PROVIDER_CONFIGURED', 'AiProvider', (string) $provider->id, [

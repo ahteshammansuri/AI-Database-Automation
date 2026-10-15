@@ -34,41 +34,44 @@ class BaseAIProvider(ABC):
         """
         pass
 
-    def plan_agent_turn(
+    def chat_structured(
         self,
-        goal: str,
-        context: Dict[str, Any],
-        available_tools: List[Dict[str, Any]],
-        rag_chunks: List[Dict[str, Any]]
-    ) -> Dict[str, Any]:
-        """
-        Reason about natural language request, extract slots, and select tool/question.
-        """
-        raise NotImplementedError("Provider does not support plan_agent_turn")
-
-    def synthesize_agent_response(
-        self,
-        goal: str,
-        executed_steps: List[Dict[str, Any]],
-        final_status: str,
-        domain_data: Optional[Dict[str, Any]] = None
+        messages: List[Dict[str, str]],
+        json_schema: Dict[str, Any],
+        timeout: float = 120.0,
+        temperature: float = 0.2,
+        deadline: Optional[float] = None,
+        **_: Any,
     ) -> str:
         """
-        Generate a concise, truthful spoken response based on verified service outcomes.
-        """
-        raise NotImplementedError("Provider does not support synthesize_agent_response")
+        `deadline` is an absolute time.monotonic() value after which the call must give up
+        (raising ProviderTimeoutError) so the caller can answer before its own client times out.
 
-    def evaluate_correction(
-        self,
-        correction_text: str,
-        active_task_status: str,
-        current_step: Optional[str] = None,
-        active_plan: Optional[List[Dict[str, Any]]] = None,
-        target_resource_type: Optional[str] = None,
-        target_resource_id: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        """
-        Evaluate user correction or mid-turn interruption and return structured action.
-        """
-        raise NotImplementedError("Provider does not support evaluate_correction")
+        Send a chat conversation and return the raw text of a single JSON object
+        constrained by json_schema. Callers validate the result; providers must not
+        repair or invent content themselves.
 
+        Raises ProviderUnavailableError when the provider/model cannot be reached,
+        ProviderUnsupportedError when structured chat is not implemented.
+        """
+        raise ProviderUnsupportedError(f"{type(self).__name__} does not support structured agent chat")
+
+
+class ProviderError(Exception):
+    """Base class for provider failures surfaced to the agent loop."""
+    category = "PROVIDER_ERROR"
+
+
+class ProviderUnavailableError(ProviderError):
+    """Provider daemon/API unreachable, or the selected model is not installed."""
+    category = "MODEL_UNAVAILABLE"
+
+
+class ProviderUnsupportedError(ProviderError):
+    """Provider has no structured chat implementation for the agent loop."""
+    category = "PROVIDER_UNSUPPORTED"
+
+
+class ProviderTimeoutError(ProviderError):
+    """The model did not finish in time (overloaded/slow machine). Nothing was produced."""
+    category = "MODEL_BUSY_OR_SLOW"

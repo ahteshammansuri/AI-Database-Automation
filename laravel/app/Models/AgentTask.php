@@ -23,6 +23,16 @@ class AgentTask extends Model
         'active_plan',
         'slots',
         'current_step_index',
+        'plan_version',
+        'stage',
+        'iteration_count',
+        'current_turn_id',
+        'turn_started_at',
+        'pending_user_turn',
+        'pending_tool_call',
+        'page_context',
+        'last_decision',
+        'final_verification',
         'idempotency_key',
         'target_resource_type',
         'target_resource_id',
@@ -36,6 +46,14 @@ class AgentTask extends Model
         'active_plan' => 'array',
         'slots' => 'array',
         'current_step_index' => 'integer',
+        'plan_version' => 'integer',
+        'iteration_count' => 'integer',
+        'turn_started_at' => 'datetime',
+        'pending_user_turn' => 'boolean',
+        'pending_tool_call' => 'array',
+        'page_context' => 'array',
+        'last_decision' => 'array',
+        'final_verification' => 'array',
         'cancelled_at' => 'datetime',
         'paused_at' => 'datetime',
         'completed_at' => 'datetime',
@@ -49,6 +67,11 @@ class AgentTask extends Model
     public function conversation(): BelongsTo
     {
         return $this->belongsTo(AgentConversation::class);
+    }
+
+    public function toolCalls(): HasMany
+    {
+        return $this->hasMany(AgentToolCall::class, 'task_id')->orderBy('id', 'asc');
     }
 
     public function timelineEvents(): HasMany

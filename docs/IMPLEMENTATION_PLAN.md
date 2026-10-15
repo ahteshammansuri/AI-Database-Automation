@@ -109,3 +109,13 @@ All 7 advanced feature flags and operational capabilities have been implemented,
 - **Full Laravel Test Suite (`php artisan test`):** 89 passed, 877 assertions (100% pass, 0 regressions).
 - **Python AI Service Test Suite (`pytest ai_service/tests/`):** 13 passed (100% pass).
 - **Frontend Production Build (`npm run build`):** Clean TypeScript compilation (`tsc -b`) and Vite production bundle (0 errors).
+
+---
+
+## Orbit agent loop upgrade (2026-10-15)
+
+Replaced the keyword-routed Orbit planner with a real observe-act agent. Evidence: `docs/orbit-agent/CURRENT_STATE_AUDIT.md`. Design: `docs/orbit-agent/ARCHITECTURE.md`. Character: `docs/orbit-agent/CHARACTER_TECH_DECISION.md`. Results: `docs/orbit-agent/TEST_RESULTS.md`.
+
+- AI service: `/v1/ai/agent/decide`, typed `AgentDecision` protocol, Ollama structured chat, bounded repair, tenant-scoped hybrid RAG with versioned product index. No keyword fallbacks.
+- Laravel: `AgentOrchestrator` loop on the `agent` queue, `ToolPolicyGate`, `ToolArgumentValidator`, `ToolRunner` (normalized results and postconditions), `SecretVault`, `RuntimeContextBuilder`, `UiActionCoordinator`. New tables: `agent_tool_calls`, `agent_ui_actions`, `agent_secure_inputs`.
+- Frontend: event-driven `AssistantContext`, acknowledged `actionBridge`, semantic `orbitTargets`, voice-first HUD, masked secure input, single TTS channel with barge-in, articulated SVG Orbit rig.
