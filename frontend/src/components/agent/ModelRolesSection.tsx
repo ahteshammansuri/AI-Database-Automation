@@ -28,9 +28,19 @@ interface ModelRoleItem {
   is_customized?: boolean;
 }
 
+const DEFAULT_PROVIDER_MODELS: Record<string, string[]> = {
+  gemini: ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.8-flash", "gemini-flash-latest"],
+  ollama: ["llama3.2:1b", "qwen2.5:3b", "llama3:latest", "mistral:7b"],
+  openai: ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo"],
+  anthropic: ["claude-3-5-sonnet", "claude-3-5-haiku-latest"],
+  mock: ["mock-llama3-synthetic", "mock-mistral-synthetic"],
+};
+
 export const ModelRolesSection: React.FC = () => {
   const [roles, setRoles] = useState<ModelRoleItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [providerModels, setProviderModels] = useState<Record<string, string[]>>(DEFAULT_PROVIDER_MODELS);
+  const [customInputRoles, setCustomInputRoles] = useState<Record<string, boolean>>({});
   const [savingRole, setSavingRole] = useState<string | null>(null);
   const [probingRole, setProbingRole] = useState<string | null>(null);
   const [probeResults, setProbeResults] = useState<Record<string, { available: boolean; latency_ms?: number; message?: string }>>({});
@@ -39,9 +49,34 @@ export const ModelRolesSection: React.FC = () => {
   const loadRoles = async () => {
     try {
       setLoading(true);
-      const res = await api.listModelRoles();
-      if (res.success && Array.isArray(res.roles)) {
-        setRoles(res.roles);
+      const [rolesRes, providersRes] = await Promise.allSettled([
+        api.listModelRoles(),
+        api.listAIProviders(),
+      ]);
+
+      if (rolesRes.status === "fulfilled" && rolesRes.value.success && Array.isArray(rolesRes.value.roles)) {
+        setRoles(rolesRes.value.roles);
+        if (rolesRes.value.provider_models) {
+          setProviderModels((prev) => ({ ...prev, ...rolesRes.value.provider_models }));
+        }
+      }
+
+      if (providersRes.status === "fulfilled" && Array.isArray(providersRes.value)) {
+        const liveMap: Record<string, string[]> = {};
+        for (const p of providersRes.value) {
+          if (p.provider_id && Array.isArray(p.models) && p.models.length > 0) {
+            liveMap[p.provider_id] = p.models;
+          }
+        }
+        if (Object.keys(liveMap).length > 0) {
+          setProviderModels((prev) => {
+            const merged = { ...prev };
+            for (const [k, v] of Object.entries(liveMap)) {
+              merged[k] = Array.from(new Set([...(merged[k] || []), ...v]));
+            }
+            return merged;
+          });
+        }
       }
     } catch (err: any) {
       console.error("Failed to load model roles:", err);
@@ -68,13 +103,18 @@ export const ModelRolesSection: React.FC = () => {
       fields: {
         provider: {
           get: (row) => find(row)?.provider,
-          set: (v, row) => { if (!find(row)) return `No role '${row}'.`; handleFieldChange(row!, "provider", String(v)); return null; },
+          set: (v, row) => { if (!find(row)) return `No role '${row}'.`; handleProviderChange(row!, String(v)); return null; },
           options: () => ["ollama", "openai", "gemini", "anthropic", "mock"].map((v) => ({ value: v, label: v })),
           target: (row) => `providers.roles.row.${row}`,
         },
         model_name: {
           get: (row) => find(row)?.model_name,
           set: (v, row) => { const t = String(v ?? "").trim(); if (!find(row)) return `No role '${row}'.`; if (!t) return "Model is required."; handleFieldChange(row!, "model_name", t); return null; },
+          options: (row) => {
+            const r = find(row);
+            const prov = r?.provider || "ollama";
+            return (providerModels[prov] || DEFAULT_PROVIDER_MODELS[prov] || []).map((m) => ({ value: m, label: m }));
+          },
           target: (row) => `providers.roles.row.${row}`,
         },
       },
@@ -97,6 +137,36 @@ export const ModelRolesSection: React.FC = () => {
   const handleFieldChange = (roleKey: string, field: keyof ModelRoleItem, value: any) => {
     setRoles((prev) =>
       prev.map((r) => (r.role === roleKey ? { ...r, [field]: value } : r))
+    );
+  };
+
+  const handleProviderChange = (roleKey: string, newProvider: string) => {
+    const available = providerModels[newProvider] || DEFAULT_PROVIDER_MODELS[newProvider] || [];
+    let nextModel = available[0] || "";
+    if (newProvider === "gemini") {
+      nextModel = available.includes("gemini-3.5-flash-lite")
+        ? "gemini-3.5-flash-lite"
+        : (available[0] || "gemini-3.5-flash-lite");
+    } else if (newProvider === "ollama") {
+      nextModel = available.includes("llama3.2:1b")
+        ? "llama3.2:1b"
+        : (available[0] || "qwen2.5:3b");
+    } else if (newProvider === "openai") {
+      nextModel = available.includes("gpt-4o-mini")
+        ? "gpt-4o-mini"
+        : (available[0] || "gpt-4o-mini");
+    } else if (newProvider === "anthropic") {
+      nextModel = available.includes("claude-3-5-sonnet")
+        ? "claude-3-5-sonnet"
+        : (available[0] || "claude-3-5-sonnet");
+    } else if (newProvider === "mock") {
+      nextModel = "mock-llama3-synthetic";
+    }
+
+    setRoles((prev) =>
+      prev.map((r) =>
+        r.role === roleKey ? { ...r, provider: newProvider, model_name: nextModel } : r
+      )
     );
   };
 
@@ -147,6 +217,12 @@ export const ModelRolesSection: React.FC = () => {
           message: res.message,
         },
       }));
+      if (res.models && Array.isArray(res.models) && res.models.length > 0) {
+        setProviderModels((prev) => ({
+          ...prev,
+          [roleItem.provider]: Array.from(new Set([...(prev[roleItem.provider] || []), ...res.models])),
+        }));
+      }
     } catch (err: any) {
       setProbeResults((prev) => ({
         ...prev,
@@ -204,6 +280,8 @@ export const ModelRolesSection: React.FC = () => {
           const feedback = statusFeedback[r.role];
           const isSaving = savingRole === r.role;
           const isProbing = probingRole === r.role;
+          const availableModels = providerModels[r.provider] || DEFAULT_PROVIDER_MODELS[r.provider] || [];
+          const isCustomMode = customInputRoles[r.role] || false;
 
           return (
             <motion.div
@@ -245,8 +323,8 @@ export const ModelRolesSection: React.FC = () => {
                     </label>
                     <select
                       value={r.provider}
-                      onChange={(e) => handleFieldChange(r.role, "provider", e.target.value)}
-                      className="w-full text-xs bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 font-medium text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                      onChange={(e) => handleProviderChange(r.role, e.target.value)}
+                      className="w-full text-xs bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 font-medium text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer"
                     >
                       <option value="ollama">Ollama (Local)</option>
                       <option value="mock">Local Mock (Test)</option>
@@ -257,33 +335,76 @@ export const ModelRolesSection: React.FC = () => {
                   </div>
 
                   <div>
-                    <label className="block text-[11px] font-semibold text-slate-500 mb-1">
-                      Model Identifier
-                    </label>
-                    <input
-                      type="text"
-                      value={r.model_name}
-                      onChange={(e) => handleFieldChange(r.role, "model_name", e.target.value)}
-                      placeholder="e.g. llama3.2:1b"
-                      className="w-full text-xs bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 font-mono text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                    />
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-[11px] font-semibold text-slate-500">
+                        Model Identifier
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => setCustomInputRoles((prev) => ({ ...prev, [r.role]: !prev[r.role] }))}
+                        className="text-[10px] text-indigo-600 hover:text-indigo-800 font-medium transition"
+                        title={isCustomMode ? "Switch back to verified model dropdown" : "Type a custom fine-tuned model name"}
+                      >
+                        {isCustomMode ? "Choose from list" : "Custom input"}
+                      </button>
+                    </div>
+
+                    {isCustomMode ? (
+                      <input
+                        type="text"
+                        value={r.model_name}
+                        onChange={(e) => handleFieldChange(r.role, "model_name", e.target.value)}
+                        placeholder="e.g. gemini-3.5-flash-lite"
+                        className="w-full text-xs bg-white border border-indigo-300 rounded-lg px-2.5 py-1.5 font-mono text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                      />
+                    ) : (
+                      <select
+                        value={r.model_name}
+                        onChange={(e) => {
+                          if (e.target.value === "__CUSTOM__") {
+                            setCustomInputRoles((prev) => ({ ...prev, [r.role]: true }));
+                          } else {
+                            handleFieldChange(r.role, "model_name", e.target.value);
+                          }
+                        }}
+                        className="w-full text-xs bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 font-mono text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer"
+                      >
+                        {availableModels.length === 0 && (
+                          <option value={r.model_name}>{r.model_name || "Select model"}</option>
+                        )}
+                        {!availableModels.includes(r.model_name) && r.model_name && (
+                          <option value={r.model_name}>{r.model_name} (Current)</option>
+                        )}
+                        {availableModels.map((mod) => (
+                          <option key={mod} value={mod}>
+                            {mod} {mod === "gemini-3.5-flash-lite" ? "⭐ (Active & High Availability)" : ""}
+                          </option>
+                        ))}
+                        <option value="__CUSTOM__">✍️ Custom model name...</option>
+                      </select>
+                    )}
                   </div>
                 </div>
 
-                {r.recommended_models && r.recommended_models.length > 0 && (
+                {availableModels.length > 0 && (
                   <div>
                     <span className="block text-[10px] font-medium text-slate-400 mb-1">
-                      Quick Picks:
+                      Quick Picks ({r.provider}):
                     </span>
                     <div className="flex flex-wrap gap-1.5">
-                      {r.recommended_models.map((rec) => (
+                      {availableModels.slice(0, 6).map((rec) => (
                         <button
                           key={rec}
                           type="button"
-                          onClick={() => handleFieldChange(r.role, "model_name", rec)}
+                          onClick={() => {
+                            if (isCustomMode) {
+                              setCustomInputRoles((prev) => ({ ...prev, [r.role]: false }));
+                            }
+                            handleFieldChange(r.role, "model_name", rec);
+                          }}
                           className={`text-[10px] font-mono px-2 py-0.5 rounded-md border transition ${
                             r.model_name === rec
-                              ? "bg-indigo-50 text-indigo-700 border-indigo-300 font-semibold"
+                              ? "bg-indigo-50 text-indigo-700 border-indigo-300 font-semibold shadow-2xs"
                               : "bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100"
                           }`}
                         >

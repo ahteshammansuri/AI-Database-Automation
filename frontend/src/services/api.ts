@@ -206,7 +206,7 @@ export const api = {
     request<any>(`/ai-providers/health?provider=${encodeURIComponent(provider)}${model ? `&model=${encodeURIComponent(model)}` : ""}`),
   
   // Role-Based AI Model Assignments
-  listModelRoles: () => request<{ success: boolean; roles: any[] }>("/model-roles"),
+  listModelRoles: () => request<{ success: boolean; roles: any[]; provider_models?: Record<string, string[]> }>("/model-roles"),
   updateModelRole: (data: {
     role: string;
     provider: string;

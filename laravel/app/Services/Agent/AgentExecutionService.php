@@ -78,7 +78,9 @@ class AgentExecutionService
             $updates['page_context'] = self::stripPageSecrets($pageContext);
         }
 
-        if ($task->status === 'RUNNING') {
+        $isActivelyRunning = $task->status === 'RUNNING' && \Illuminate\Support\Facades\Cache::has("orbit-agent-task:{$task->id}");
+
+        if ($isActivelyRunning) {
             // The running loop applies this at its next safe checkpoint (stale steps are not dispatched).
             $task->update($updates + ['pending_user_turn' => true, 'plan_version' => $task->plan_version + 1]);
             $this->orchestrator->timeline($task, 'NEW_INSTRUCTION', 'info',

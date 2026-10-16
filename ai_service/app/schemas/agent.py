@@ -86,9 +86,16 @@ class AgentDecision(BaseModel):
     emotion_hint: EmotionHint = "neutral"
     reasoning_summary: str = Field("", max_length=400)
 
+    @field_validator("slot_updates", mode="before")
+    @classmethod
+    def coerce_empty_slots(cls, v: Any) -> Any:
+        return {} if (v == [] or v is None) else v
+
     @field_validator("slot_updates")
     @classmethod
     def no_secret_slots(cls, v: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(v, dict):
+            return {}
         bad = [k for k in v if SECRET_KEY_PATTERN.search(k)]
         if bad:
             raise ValueError(f"secret-bearing slots are not allowed in model output: {bad}")
@@ -176,7 +183,10 @@ class DecideRequest(BaseModel):
     # AI service always answers (with MODEL_BUSY_OR_SLOW if needed) before Laravel gives up.
     deadline_seconds: float = Field(280.0, ge=10.0, le=1800.0)
 
-    _coerce = field_validator("runtime_context", "slots", mode="before")(classmethod(lambda cls, v: _empty_list_to_dict(v)))
+    @field_validator("slots", "runtime_context", mode="before")
+    @classmethod
+    def coerce_empty_dict(cls, v: Any) -> Any:
+        return {} if v == [] or v is None else v
 
 
 class RagInfo(BaseModel):

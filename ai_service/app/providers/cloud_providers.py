@@ -32,18 +32,58 @@ def _split_system(messages: List[Dict[str, str]], json_schema: Dict[str, Any]):
 
 
 def _post_json(url: str, headers: Dict[str, str], payload: Dict[str, Any], timeout: float, label: str) -> Dict[str, Any]:
-    try:
-        with httpx.Client(timeout=timeout) as client:
-            res = client.post(url, headers=headers, json=payload)
-    except httpx.TimeoutException:
-        raise ProviderError(f"{label} did not answer within {int(timeout)}s.")
-    except httpx.HTTPError as e:
-        raise ProviderUnavailableError(f"{label} is not reachable ({type(e).__name__}).")
-    if res.status_code in (401, 403):
-        raise ProviderUnavailableError(f"{label} rejected the configured API key (HTTP {res.status_code}).")
-    if res.status_code != 200:
-        raise ProviderError(f"{label} returned HTTP {res.status_code}.")
-    return res.json()
+    max_retries = 3
+    backoff = 1.5
+    last_res = None
+    for attempt in range(max_retries + 1):
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                res = client.post(url, headers=headers, json=payload)
+                last_res = res
+        except httpx.TimeoutException:
+            if attempt == max_retries:
+                raise ProviderError(f"{label} did not answer within {int(timeout)}s.")
+            time.sleep(backoff)
+            backoff *= 1.5
+            continue
+        except httpx.HTTPError as e:
+            if attempt == max_retries:
+                raise ProviderUnavailableError(f"{label} is not reachable ({type(e).__name__}).")
+            time.sleep(backoff)
+            backoff *= 1.5
+            continue
+
+        if res.status_code in (401, 403):
+            raise ProviderUnavailableError(f"{label} rejected the configured API key (HTTP {res.status_code}).")
+
+        # Retry on transient capacity/rate errors (503 High Demand / 429 Rate Limit / 502 / 504)
+        if res.status_code in (503, 429, 502, 504) and attempt < max_retries:
+            time.sleep(backoff)
+            backoff *= 1.5
+            continue
+
+        if res.status_code != 200:
+            detail = ""
+            try:
+                err_data = res.json()
+                detail = err_data.get("error", {}).get("message", "")
+            except Exception:
+                detail = res.text[:150]
+            msg = f"{label} returned HTTP {res.status_code}" + (f": {detail}" if detail else ".")
+            raise ProviderError(msg)
+
+        return res.json()
+
+    if last_res is not None and last_res.status_code != 200:
+        detail = ""
+        try:
+            err_data = last_res.json()
+            detail = err_data.get("error", {}).get("message", "")
+        except Exception:
+            detail = last_res.text[:150]
+        msg = f"{label} returned HTTP {last_res.status_code}" + (f": {detail}" if detail else ".")
+        raise ProviderError(msg)
+    raise ProviderError(f"{label} failed after {max_retries} retries.")
 
 
 class OpenAIProvider(BaseAIProvider):
@@ -171,9 +211,14 @@ class OpenAIProvider(BaseAIProvider):
 class GeminiProvider(BaseAIProvider):
     """Google Gemini API Provider."""
 
-    def __init__(self, api_key: str, model_name: str = "gemini-1.5-flash"):
+    def __init__(self, api_key: str, model_name: str = "gemini-3.5-flash-lite"):
         self.api_key = api_key.strip()
-        self.model_name = model_name or "gemini-1.5-flash"
+        raw = (model_name or "gemini-3.5-flash-lite").replace("models/", "").strip()
+        # Auto-map deprecated / sunset or heavily overloaded Gemini models to active high-availability models
+        if raw in ("gemini-1.5-flash", "gemini-2.5-flash", "gemini-1.0-pro", "gemini-1.5-pro", "gemini-2.5-pro", "gemini-2.5-flash-lite"):
+            self.model_name = "gemini-3.5-flash-lite"
+        else:
+            self.model_name = raw
 
     def test_connection(self) -> Dict[str, Any]:
         if not self.api_key or len(self.api_key) < 15:
@@ -223,7 +268,7 @@ class GeminiProvider(BaseAIProvider):
             }
 
     def list_models(self) -> List[str]:
-        return ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.0-pro"]
+        return ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.8-flash", "gemini-flash-latest"]
 
     def chat_structured(self, messages, json_schema, timeout: float = 120.0, temperature: float = 0.2, deadline=None, **_) -> str:
         if deadline is not None:
@@ -235,19 +280,42 @@ class GeminiProvider(BaseAIProvider):
             {"role": "model" if m["role"] == "assistant" else "user", "parts": [{"text": m["content"]}]}
             for m in convo
         ]
-        data = _post_json(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent",
-            {"Content-Type": "application/json", "x-goog-api-key": self.api_key},
-            {
-                "systemInstruction": {"parts": [{"text": system}]},
-                "contents": contents,
-                "generationConfig": {"responseMimeType": "application/json", "temperature": temperature},
-            },
-            timeout,
-            "Gemini",
-        )
-        parts = (data.get("candidates") or [{}])[0].get("content", {}).get("parts", [])
-        return _clean_json_output(parts[0].get("text", "") if parts else "")
+        payload = {
+            "systemInstruction": {"parts": [{"text": system}]},
+            "contents": contents,
+            "generationConfig": {"responseMimeType": "application/json", "temperature": temperature},
+        }
+
+        # Candidate models with fast high-availability flash-lite fallback if primary hits 503 high demand / 429
+        candidates = [self.model_name]
+        for fb in ("gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.8-flash"):
+            if fb not in candidates:
+                candidates.append(fb)
+
+        last_err = None
+        for mod in candidates:
+            try:
+                data = _post_json(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{mod}:generateContent",
+                    {"Content-Type": "application/json", "x-goog-api-key": self.api_key},
+                    payload,
+                    timeout,
+                    f"Gemini ({mod})",
+                )
+                parts = (data.get("candidates") or [{}])[0].get("content", {}).get("parts", [])
+                text = parts[0].get("text", "") if parts else ""
+                if text.strip():
+                    return _clean_json_output(text)
+            except Exception as e:
+                last_err = e
+                # Fall through to next candidate if model is overloaded (503), rate limited (429), or deprecated (404)
+                if any(code in str(e) for code in ("503", "429", "404", "high demand", "UNAVAILABLE")):
+                    continue
+                raise
+
+        if last_err:
+            raise last_err
+        raise ProviderError("Gemini failed across all candidate models.")
 
 
     def generate_structured_data(
@@ -276,20 +344,36 @@ class GeminiProvider(BaseAIProvider):
             }
         }
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.api_key}"
-        with httpx.Client(timeout=45.0) as client:
-            res = client.post(url, json=payload)
-            if res.status_code != 200:
-                raise RuntimeError(f"Gemini generation error ({res.status_code}): {res.text[:200]}")
+        candidates = [self.model_name]
+        for fb in ("gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.8-flash"):
+            if fb not in candidates:
+                candidates.append(fb)
 
-            data = res.json()
-            candidates = data.get("candidates", [])
-            if not candidates:
-                raise ValueError("Gemini returned empty candidate list.")
+        last_err = None
+        for mod in candidates:
+            try:
+                data = _post_json(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{mod}:generateContent",
+                    {"Content-Type": "application/json", "x-goog-api-key": self.api_key},
+                    payload,
+                    45.0,
+                    f"Gemini ({mod})",
+                )
+                candidates_list = data.get("candidates", [])
+                if not candidates_list:
+                    continue
 
-            raw = candidates[0]["content"]["parts"][0]["text"]
-            parsed = json.loads(_clean_json_output(raw))
-            return parsed
+                raw = candidates_list[0]["content"]["parts"][0]["text"]
+                return json.loads(_clean_json_output(raw))
+            except Exception as e:
+                last_err = e
+                if any(code in str(e) for code in ("503", "429", "404", "high demand", "UNAVAILABLE")):
+                    continue
+                raise
+
+        if last_err:
+            raise last_err
+        raise RuntimeError("Gemini structured data generation failed.")
 
 
 class ClaudeProvider(BaseAIProvider):

@@ -317,6 +317,12 @@ class AgentDecider:
             raise ValueError("output must be a JSON object")
         # Optional fields sent as null by some models are treated as absent.
         data = {k: v for k, v in data.items() if v is not None}
+        if data.get("kind") != "CALL_TOOL":
+            data.pop("tool_call", None)
+        if isinstance(data.get("slot_updates"), list):
+            data["slot_updates"] = {}
+        if isinstance(data.get("plan"), dict):
+            data["plan"] = [data["plan"]]
         decision = AgentDecision.model_validate(data)
         if decision.tool_call and decision.tool_call.name not in available_tools:
             raise ValueError(
@@ -352,10 +358,14 @@ class AgentDecider:
             return done(success=False, error_category=e.category, error_message=str(e))
         model_used = getattr(provider, "model", None) or getattr(provider, "model_name", None)
 
-        wait = deadline - time.monotonic() - 5
-        if wait <= 0 or not _MODEL_LOCK.acquire(timeout=wait):
-            return done(success=False, error_category="MODEL_BUSY_OR_SLOW", model_used=model_used,
-                        error_message="Another Orbit request was using the local model for the whole time budget.")
+        is_local = provider_name in ("ollama", "local")
+        acquired = False
+        if is_local:
+            wait = deadline - time.monotonic() - 5
+            if wait <= 0 or not _MODEL_LOCK.acquire(timeout=wait):
+                return done(success=False, error_category="MODEL_BUSY_OR_SLOW", model_used=model_used,
+                            error_message="Another Orbit request was using the local model for the whole time budget.")
+            acquired = True
         try:
             repairs = 0
             last_error: Optional[str] = None
@@ -380,7 +390,8 @@ class AgentDecider:
                         {"role": "user", "content": f"That decision was invalid: {last_error}\nReturn a corrected decision as one JSON object."},
                     ]
         finally:
-            _MODEL_LOCK.release()
+            if acquired:
+                _MODEL_LOCK.release()
 
         return done(success=False, error_category="MODEL_OUTPUT_INVALID",
                     error_message=f"The model did not produce a valid decision after {repairs} repair attempt(s): {last_error}",

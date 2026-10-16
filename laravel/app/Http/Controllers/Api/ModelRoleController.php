@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\ModelRole;
+use App\Models\AiProvider;
 use App\Models\AuditLog;
 use App\Services\AiServiceClient;
 use Illuminate\Http\Request;
@@ -42,9 +43,34 @@ class ModelRoleController extends Controller
             ];
         }
 
+        // Active model catalog per provider
+        $providerModels = [
+            'gemini' => ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-3.8-flash', 'gemini-flash-latest'],
+            'openai' => ['gpt-4o-mini', 'gpt-4o', 'gpt-4-turbo'],
+            'anthropic' => ['claude-3-5-sonnet', 'claude-3-5-haiku-latest'],
+            'mock' => ['mock-llama3-synthetic', 'mock-mistral-synthetic'],
+            'ollama' => ['llama3.2:1b', 'qwen2.5:3b', 'llama3:latest', 'mistral:7b'],
+        ];
+
+        try {
+            $aiCtrl = app(AiProviderController::class);
+            $providersData = $aiCtrl->index($request)->getData(true);
+            foreach ($providersData as $p) {
+                if (!empty($p['provider_id']) && !empty($p['models'])) {
+                    $providerModels[$p['provider_id']] = array_values(array_unique(array_merge(
+                        $p['models'],
+                        $providerModels[$p['provider_id']] ?? []
+                    )));
+                }
+            }
+        } catch (\Throwable) {
+            // Keep default catalog if live probe is not available
+        }
+
         return response()->json([
             'success' => true,
             'roles' => $result,
+            'provider_models' => $providerModels,
         ]);
     }
 
@@ -107,10 +133,16 @@ class ModelRoleController extends Controller
             'model_name' => 'nullable|string|max:64',
         ]);
 
+        $userProvider = AiProvider::where('user_id', $request->user()->id)
+            ->where('provider_type', $validated['provider'])
+            ->first();
+        $apiKey = $userProvider?->encrypted_api_key;
+
         try {
             $health = $this->aiClient->checkHealth(
                 $validated['provider'],
-                $validated['model_name'] ?? null
+                $validated['model_name'] ?? null,
+                $apiKey
             );
 
             return response()->json([
@@ -145,6 +177,11 @@ class ModelRoleController extends Controller
         $provider = $validated['provider'];
         $model = $validated['model_name'] ?? 'llama3.2';
 
+        $userProvider = AiProvider::where('user_id', $request->user()->id)
+            ->where('provider_type', $provider)
+            ->first();
+        $apiKey = $userProvider?->encrypted_api_key;
+
         $tests = [
             'json_conformance' => ['passed' => true, 'score' => 25, 'details' => 'Outputs valid JSON conforming to strict schema.'],
             'query_plan_accuracy' => ['passed' => true, 'score' => 25, 'details' => 'Mapped natural language count query to valid QueryPlan.'],
@@ -153,7 +190,7 @@ class ModelRoleController extends Controller
         ];
 
         // Probe provider responsiveness
-        $health = $this->aiClient->checkHealth($provider, $model);
+        $health = $this->aiClient->checkHealth($provider, $model, $apiKey);
         $isAvailable = (bool) ($health['available'] ?? false);
 
         if (!$isAvailable && $provider !== 'mock') {

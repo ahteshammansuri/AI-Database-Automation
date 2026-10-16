@@ -92,7 +92,7 @@ class AiProviderController extends Controller
             } elseif ($item['provider_id'] === 'openai') {
                 $item['models'] = ['gpt-4o-mini', 'gpt-4o', 'gpt-4-turbo'];
             } elseif ($item['provider_id'] === 'gemini') {
-                $item['models'] = ['gemini-1.5-flash', 'gemini-1.5-pro'];
+                $item['models'] = ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-3.8-flash', 'gemini-flash-latest'];
             } elseif ($item['provider_id'] === 'anthropic') {
                 $item['models'] = ['claude-3-5-sonnet', 'claude-3-5-haiku-latest'];
             }
@@ -149,7 +149,7 @@ class AiProviderController extends Controller
         $defaultModel = match ($providerType) {
             'ollama' => 'llama3',
             'openai' => 'gpt-4o-mini',
-            'gemini' => 'gemini-1.5-flash',
+            'gemini' => 'gemini-3.5-flash',
             'anthropic' => 'claude-3-5-sonnet',
             default => 'mock-llama3-synthetic',
         };

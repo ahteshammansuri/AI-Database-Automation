@@ -24,7 +24,7 @@ class IndexTableProfilesJob implements ShouldQueue
     public int $tries = 2;
 
     public function __construct(
-        public DbConnection $connection,
+        public DbConnection $dbConnection,
         public array $tables
     ) {
         $this->onQueue('default');
@@ -33,16 +33,16 @@ class IndexTableProfilesJob implements ShouldQueue
     public function handle(SchemaIntrospectionService $introspectionService): void
     {
         try {
-            if (!$this->connection->exists) {
+            if (!$this->dbConnection->exists) {
                 return;
             }
 
             $count = count($this->tables);
-            Log::info("[IndexTableProfilesJob] Starting background RAG indexing for connection #{$this->connection->id} ({$this->connection->name}) with {$count} tables.");
-            $indexed = $introspectionService->indexTableProfilesIntoRag($this->connection, $this->tables);
-            Log::info("[IndexTableProfilesJob] Finished background RAG indexing for connection #{$this->connection->id}: {$indexed}/{$count} indexed.");
+            Log::info("[IndexTableProfilesJob] Starting background RAG indexing for connection #{$this->dbConnection->id} ({$this->dbConnection->name}) with {$count} tables.");
+            $indexed = $introspectionService->indexTableProfilesIntoRag($this->dbConnection, $this->tables);
+            Log::info("[IndexTableProfilesJob] Finished background RAG indexing for connection #{$this->dbConnection->id}: {$indexed}/{$count} indexed.");
         } catch (\Throwable $e) {
-            Log::warning("[IndexTableProfilesJob] Background RAG indexing failed for connection #{$this->connection->id}: " . $e->getMessage());
+            Log::warning("[IndexTableProfilesJob] Background RAG indexing failed for connection #{$this->dbConnection->id}: " . $e->getMessage());
         }
     }
 }

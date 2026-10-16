@@ -21,14 +21,14 @@ class ModelRole extends Model
             'description' => 'Drives Orbit: interprets each request, chooses real portal tools, and reasons over their results.',
             'default_provider' => 'ollama',
             'default_model' => 'qwen2.5:3b',
-            'recommended' => ['qwen2.5:3b', 'qwen2.5:7b', 'llama3:latest', 'gpt-4o-mini', 'gemini-1.5-flash'],
+            'recommended' => ['qwen2.5:3b', 'qwen2.5:7b', 'llama3:latest', 'gpt-4o-mini', 'gemini-3.5-flash-lite', 'gemini-3.5-flash'],
         ],
         self::ROLE_GENERATOR => [
             'label' => 'Editorial Content Generator',
             'description' => 'Generates schema-validated structured content (articles, products, FAQs) from context packages.',
             'default_provider' => 'ollama',
             'default_model' => 'llama3.2:1b',
-            'recommended' => ['llama3.2:1b', 'mistral:7b', 'gpt-4o-mini', 'gemini-1.5-flash'],
+            'recommended' => ['llama3.2:1b', 'mistral:7b', 'gpt-4o-mini', 'gemini-3.5-flash-lite', 'gemini-3.5-flash'],
         ],
         self::ROLE_CLASSIFIER => [
             'label' => 'Schema & Column Classifier',
@@ -42,7 +42,7 @@ class ModelRole extends Model
             'description' => 'Synthesizes concise, voice-friendly execution summaries for the Orbit mascot to speak.',
             'default_provider' => 'ollama',
             'default_model' => 'llama3.2:1b',
-            'recommended' => ['llama3.2:1b', 'gpt-4o-mini', 'gemini-1.5-flash'],
+            'recommended' => ['llama3.2:1b', 'gpt-4o-mini', 'gemini-3.5-flash-lite', 'gemini-3.5-flash'],
         ],
     ];
 
