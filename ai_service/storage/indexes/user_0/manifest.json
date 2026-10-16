@@ -2,8 +2,8 @@
   "source": "docs/orbit-agent/product_context_rag.md",
   "sha256": "dbfb60bc0253566c208f51ee4d940d6aba1a33ddf167a8c004c52cc8de64499d",
   "version": "dbfb60bc0253",
-  "embedding_backend": "lexical-fallback",
-  "dimension": 256,
+  "embedding_backend": "ollama:nomic-embed-text",
+  "dimension": 768,
   "chunks": 25,
-  "indexed_at": "2026-10-16T10:45:16Z"
+  "indexed_at": "2026-10-16T12:52:45Z"
 }

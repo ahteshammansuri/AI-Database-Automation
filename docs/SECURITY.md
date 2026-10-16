@@ -1,1 +1,0 @@
-SECURITY_MODEL.md
