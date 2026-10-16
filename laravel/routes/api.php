@@ -89,9 +89,14 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/automations', [AutomationController::class, 'index']);
     Route::post('/automations', [AutomationController::class, 'store']);
     Route::post('/automations/manual-publish', [AutomationController::class, 'manualPublish']);
+    Route::post('/media/upload', [\App\Http\Controllers\Api\MediaController::class, 'upload'])->middleware('throttle:30,1');
     Route::post('/automations/preview-ai', [AutomationController::class, 'previewAi']);
     Route::post('/automations/field-assist', [AutomationController::class, 'fieldAssist']);
     Route::post('/automations/propose-plan', [AutomationController::class, 'proposePlan']);
+    Route::post('/automations/field-plan', [AutomationController::class, 'fieldPlan']);
+    Route::post('/automations/preview', [AutomationController::class, 'preview'])->middleware('throttle:20,1');
+    Route::post('/automations/schedule-preview', [AutomationController::class, 'schedulePreview']);
+    Route::get('/automations/schedule-occupancy', [AutomationController::class, 'scheduleOccupancy']);
     Route::get('/automations/{id}', [AutomationController::class, 'show']);
     Route::put('/automations/{id}', [AutomationController::class, 'update']);
     Route::delete('/automations/{id}', [AutomationController::class, 'destroy']);

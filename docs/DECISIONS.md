@@ -162,3 +162,22 @@
   4. Fall back to deterministic algorithmic answer phrasing when `llm_answer_phrasing` is disabled, ensuring sub-second response times after query execution.
 - **Consequence:** Maintains rigorous structured validation while delivering responsive user experiences on CPU-only local setups.
 
+
+
+---
+
+## ADR-014: Relational parents, images and honest generation in automations (2026-10-16)
+- **Status:** Accepted.
+- **Context:** Automations must work for any table (blogs, articles, news, products, FAQs). Many tables reference parents (`category_id → categories`), many have image columns, and the AI layer previously filled gaps with invented values (stock-photo URLs, placeholder text, foreign key `1`).
+- **Decision:**
+  1. A per-column field plan is built from the live schema. Foreign keys are resolved by explicit per-column rules: *AI picks (reuse or create)*, *AI picks existing only*, *fixed record*, or *empty*.
+  2. A missing parent is created only when the column's policy is `CREATE_IF_MISSING`, the parent table is writable and not sensitive, and every required parent column can be filled honestly (label, slug, description, timestamps, active-looking enum, 0 for counters). Parents that need another foreign key or a secret column are refused. Parent and child are written in one transaction, parent first.
+  3. Foreign keys never fall back to a guessed id. A missing id, a disallowed creation or a protected parent is an error with a plain message.
+  4. The text model receives a field contract (kind, limits, enum values, existing parent names). Missing fields get one repair pass and are then reported, never invented. Image columns are never sent to the text model.
+  5. Images are generated from the produced title and summary: OpenAI or Gemini with the user's own key, or a locally rendered designed cover (clearly labelled, not presented as AI). They are stored as platform media (magic bytes checked, per-user dedup), and the column receives a URL.
+  6. Every run produces a read-only write plan (`planInsert`, `START TRANSACTION READ ONLY`) that is stored with the version and shown in the preview, the review email and the history.
+- **Consequence:** The same rules protect previews, scheduled runs and manual publishing. Automations still follow the eligibility tiers of ADR-003/010. Connection `access_mode` is not yet applied to automations, as ADR-010 states; whether it should be is an open product decision.
+
+## ADR-015: Schedule model with end dates, weekdays, completion and a 15-minute gap (2026-10-16)
+- **Status:** Accepted. Replaces the 30-minute lead time in ADR-related docs.
+- **Decision:** One-time / daily / weekly with `start_date`, optional `end_date` and ISO `weekly_days`, evaluated in the automation's IANA timezone by a single `ScheduleCalculator`. Publication ≥ 15 minutes after generation (next day allowed). One-time and bounded schedules complete automatically. Missed windows are recorded, not back-filled. `schedule_anchor_at` prevents back-filling after create, change or resume.

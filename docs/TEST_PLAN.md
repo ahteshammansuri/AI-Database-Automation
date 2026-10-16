@@ -71,3 +71,22 @@ cd ai_service && ../.venv/bin/pytest tests/ -v
 cd frontend && npm run build
 ```
 
+
+
+---
+
+## Automation engine (2026-10-16)
+
+| Suite | What it proves | Needs |
+|---|---|---|
+| `tests/Unit/ScheduleCalculatorTest.php` | 15-minute gap, midnight wrap, end date run count, weekly weekdays, one-time end, timezone aliases, wall-clock across DST, summary states | nothing |
+| `tests/Feature/AutomationSchedulerTest.php` | exactly one run per occurrence, one-time completes, end date stops, weekly days only, missed window recorded, no back-fill after create/resume, manual containers never scheduled, keep-draft skips, late drafts not auto-published | platform DB |
+| `tests/Feature/AutomationRelationsAndPipelineTest.php` | field-plan suggestions, tenant isolation, preview writes nothing, parent created first with required columns, reuse of existing parent (case-insensitive), closest existing when creation is off, schema/schedule validation messages, executor refusals (missing id, secret column, protected parent), unique slugs, enum normalisation, manual dry-run then publish, timezone scheduling, publish-now refuses rejected versions, honest e-mail failure, signed link never logged | fixture MySQL on 127.0.0.1:3317 (`docker compose -f docker-compose.fixtures.yml up -d`); skipped otherwise |
+| `ai_service/tests/test_content_contract_and_images.py` | field contract, token budget, no fabricated values, one repair pass then honest `missing_fields`, no stock image URLs, local cover exact sizes, paid provider without key fails clearly, service token required | Pillow |
+| `frontend/src/lib/schedule.test.ts` | client gap/weekday/run-date/timezone helpers match the server rules | Node 24 |
+
+```bash
+cd laravel && php artisan test tests/Unit/ScheduleCalculatorTest.php tests/Feature/AutomationSchedulerTest.php tests/Feature/AutomationRelationsAndPipelineTest.php
+cd .. && .venv/bin/python -m pytest ai_service/tests/test_content_contract_and_images.py
+cd frontend && npm test
+```

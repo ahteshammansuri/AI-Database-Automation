@@ -359,7 +359,7 @@ export const DashboardPage: React.FC = () => {
                   </div>
                 </div>
                 <p className="text-[11px] text-slate-400">
-                  Lead time enforced: generation initiates 30 minutes before publication deadline.
+                  Publication is always at least 15 minutes after generation, so reviewers have time to decide.
                 </p>
               </div>
             ) : (

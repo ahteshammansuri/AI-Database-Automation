@@ -75,7 +75,7 @@ class CalendarService
     }
 
     /**
-     * Reschedule an automation schedule time with minimum 30-minute lead time policy enforcement.
+     * Reschedule an automation's next run, keeping its generation-to-publication gap (minimum 15 minutes).
      */
     public function reschedule(User $user, int $automationId, string $newDateTime): array
     {
@@ -92,7 +92,7 @@ class CalendarService
         }
 
         $targetTime = Carbon::parse($newDateTime);
-        $leadTime = $automation->lead_time_minutes ?? 30;
+        $leadTime = max(\App\Services\Automation\ScheduleCalculator::MIN_GAP_MINUTES, (int) ($automation->lead_time_minutes ?? 30));
         $minAllowed = now()->addMinutes($leadTime);
 
         if ($targetTime->lt($minAllowed)) {
@@ -106,6 +106,8 @@ class CalendarService
             'publication_time' => $newPub,
             'generation_time' => $newGen,
             'start_date' => $targetTime->format('Y-m-d'),
+            'schedule_anchor_at' => now(),
+            'completed_at' => null,
         ]);
 
         return [
@@ -120,18 +122,7 @@ class CalendarService
 
     protected function calculateNextRun(Automation $auto, Carbon $from): ?Carbon
     {
-        try {
-            $timeParts = explode(':', $auto->publication_time ?: '09:00');
-            $h = (int) ($timeParts[0] ?? 9);
-            $m = (int) ($timeParts[1] ?? 0);
-
-            $cand = $from->copy()->setTime($h, $m, 0);
-            if ($cand->lte($from)) {
-                $cand->addDay();
-            }
-            return $cand;
-        } catch (\Throwable $e) {
-            return null;
-        }
+        $next = app(\App\Services\Automation\ScheduleCalculator::class)->nextOccurrence($auto, $from);
+        return $next ? Carbon::instance($next['publication_at']) : null;
     }
 }

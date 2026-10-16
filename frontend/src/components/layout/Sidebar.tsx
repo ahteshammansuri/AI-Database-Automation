@@ -14,14 +14,18 @@ import {
   Cpu,
   History,
   ShieldCheck,
-  FileText
+  FileText,
+  X
 } from "lucide-react";
 
 interface SidebarProps {
   pendingApprovalsCount?: number;
+  /** Below the lg breakpoint the sidebar is a slide-in drawer controlled by the layout. */
+  mobileOpen?: boolean;
+  onClose?: () => void;
 }
 
-export const Sidebar: React.FC<SidebarProps> = ({ pendingApprovalsCount = 0 }) => {
+export const Sidebar: React.FC<SidebarProps> = ({ pendingApprovalsCount = 0, mobileOpen = false, onClose }) => {
   const location = useLocation();
 
   const links = [
@@ -45,7 +49,20 @@ export const Sidebar: React.FC<SidebarProps> = ({ pendingApprovalsCount = 0 }) =
   ];
 
   return (
-    <aside className="w-64 bg-white border-r border-slate-200/90 flex flex-col shrink-0 shadow-xs relative z-20">
+    <>
+    {/* Mobile overlay */}
+    <div
+      aria-hidden="true"
+      onClick={onClose}
+      className={`fixed inset-0 z-30 bg-slate-900/40 backdrop-blur-[1px] transition-opacity lg:hidden ${
+        mobileOpen ? "opacity-100" : "pointer-events-none opacity-0"
+      }`}
+    />
+    <aside
+      id="portal-sidebar"
+      className={`fixed inset-y-0 left-0 z-40 w-72 max-w-[85vw] bg-white border-r border-slate-200/90 flex flex-col shrink-0 shadow-xl transition-transform duration-200 ease-out
+        lg:static lg:z-20 lg:w-64 lg:max-w-none lg:translate-x-0 lg:shadow-xs ${mobileOpen ? "translate-x-0" : "-translate-x-full"}`}
+    >
       {/* Brand Header */}
       <div className="p-5 border-b border-slate-100 flex items-center gap-3">
         <motion.div
@@ -64,6 +81,14 @@ export const Sidebar: React.FC<SidebarProps> = ({ pendingApprovalsCount = 0 }) =
           </h1>
           <p className="text-[11px] text-slate-400 font-medium">Database Automation</p>
         </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="ml-auto p-2 -mr-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 lg:hidden"
+          aria-label="Close menu"
+        >
+          <X className="w-5 h-5" />
+        </button>
       </div>
 
       {/* Nav Links */}
@@ -93,7 +118,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ pendingApprovalsCount = 0 }) =
               <motion.div
                 whileHover={{ x: 2 }}
                 transition={{ duration: 0.15 }}
-                className={`relative flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
+                className={`relative flex items-center justify-between px-3 py-2.5 lg:py-2 rounded-lg text-sm lg:text-xs font-medium transition-colors ${
                   isActive
                     ? "text-indigo-700 font-bold"
                     : "text-slate-600 hover:text-slate-900 hover:bg-slate-50"
@@ -135,5 +160,6 @@ export const Sidebar: React.FC<SidebarProps> = ({ pendingApprovalsCount = 0 }) =
         <p className="text-[10px] text-slate-500">Parameterized MySQL Writes Only</p>
       </div>
     </aside>
+    </>
   );
 };

@@ -3,21 +3,42 @@
 namespace App\Services;
 
 use App\Models\DbConnection;
+use App\Models\IdempotencyKey;
+use App\Services\Automation\ParentRowBuilder;
+use App\Services\Automation\PendingParentId;
+use App\Services\Automation\TargetTableInspector;
+use App\Services\Data\DataAccessPolicy;
 use Exception;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
 use PDO;
 use PDOException;
-use Illuminate\Support\Str;
 
 class SafeDatabaseExecutor
 {
+    /** Marker returned by coerceValue() when a column should be left out of the INSERT. */
+    private const OMIT = "\0__omit__";
+
     public function __construct(
         protected DatabaseSafetyService $safetyService,
-        protected SchemaIntrospectionService $introspectionService
-    ) {}
+        protected SchemaIntrospectionService $introspectionService,
+        protected ?TargetTableInspector $inspector = null,
+        protected ?ParentRowBuilder $parentRowBuilder = null,
+        protected ?DataAccessPolicy $accessPolicy = null,
+    ) {
+        $this->inspector ??= new TargetTableInspector();
+        $this->parentRowBuilder ??= new ParentRowBuilder();
+        $this->accessPolicy ??= new DataAccessPolicy();
+    }
 
     /**
-     * Safely insert an allowlisted, parameterized record into a target customer database.
-     * Guaranteed atomic transaction with rollback, foreign key resolution, and relation auditing.
+     * Insert one row into a customer table inside a transaction. Parent records referenced by
+     * foreign-key columns are matched (or created, only where the column's relation options allow it)
+     * in the same transaction first, so the child row always points at a real parent and nothing is
+     * left behind if anything fails.
+     *
+     * $relationOptions: per-column arrays {referenced_table?, referenced_column?, creation_policy|policy,
+     * description?}; plus an optional top-level 'idempotency_key' string.
      */
     public function executeInsert(
         DbConnection $connection,
@@ -25,13 +46,7 @@ class SafeDatabaseExecutor
         array $payload,
         array $relationOptions = []
     ): array {
-        // 1. Pre-flight security check
-        $this->safetyService->validateConnectionTarget($connection->host, $connection->port);
-
-        if ($this->safetyService->isTableSensitive($tableName)) {
-            throw new Exception("Security violation: Table '{$tableName}' is classified as restricted and cannot receive automated writes.");
-        }
-
+        $this->preflight($connection, $tableName);
         if (empty($payload)) {
             throw new Exception("Payload for table '{$tableName}' cannot be empty.");
         }
@@ -39,8 +54,8 @@ class SafeDatabaseExecutor
         $idempotencyKey = $relationOptions['idempotency_key'] ?? $payload['_idempotency_key'] ?? null;
         unset($payload['_idempotency_key']);
 
-        if ($idempotencyKey && \Illuminate\Support\Facades\Schema::hasTable('idempotency_keys')) {
-            $existing = \App\Models\IdempotencyKey::where('idempotency_key', $idempotencyKey)
+        if ($idempotencyKey && Schema::hasTable('idempotency_keys')) {
+            $existing = IdempotencyKey::where('idempotency_key', $idempotencyKey)
                 ->where('status', 'COMMITTED')
                 ->first();
             if ($existing) {
@@ -55,96 +70,44 @@ class SafeDatabaseExecutor
                 ];
             }
 
-            \App\Models\IdempotencyKey::updateOrCreate(
+            IdempotencyKey::updateOrCreate(
                 ['idempotency_key' => $idempotencyKey],
-                [
-                    'user_id' => $connection->user_id,
-                    'status' => 'IN_PROGRESS',
-                ]
+                ['user_id' => $connection->user_id, 'status' => 'IN_PROGRESS']
             );
         }
 
         $pdo = null;
         try {
             $pdo = $connection->createTargetPdo();
-            $dbName = $connection->database_name;
-
-            // 2. Discover columns and types for target table
-            $colStmt = $pdo->prepare("
-                SELECT column_name, data_type, column_type, is_nullable, column_default, column_key, character_maximum_length 
-                FROM information_schema.columns 
-                WHERE table_schema = :db_name AND table_name = :table_name
-            ");
-            $colStmt->execute(['db_name' => $dbName, 'table_name' => $tableName]);
-            $rawCols = $colStmt->fetchAll();
-
-            if (empty($rawCols)) {
+            $info = $this->inspector->describe($pdo, $connection->database_name, $tableName);
+            if ($info === null) {
                 throw new Exception("Target table '{$tableName}' not found or has no accessible columns.");
             }
 
-            // Begin transaction BEFORE any related entity resolutions or writes
             $pdo->beginTransaction();
 
-            $relationResolutions = [];
+            $resolutions = [];
+            $issues = [];
+            $steps = [];
+            $row = $this->prepareRow($pdo, $connection, $info, $payload, $relationOptions, false, $resolutions, $issues, $steps);
 
-            // 3. Sanitize and coerce payload according to discovered column types and constraints
-            $filteredData = $this->sanitizeAndCoercePayload(
-                $pdo,
-                $dbName,
-                $tableName,
-                $rawCols,
-                $payload,
-                true,
-                $relationOptions,
-                $relationResolutions
-            );
-
-            if (empty($filteredData)) {
+            $errors = array_values(array_filter($issues, fn($i) => $i['level'] === 'error'));
+            if (!empty($errors)) {
+                throw new Exception(implode(' ', array_map(fn($e) => $e['message'], $errors)));
+            }
+            if (empty($row)) {
                 throw new Exception("No valid columns found in payload matching schema for '{$tableName}'.");
             }
 
-            // 4. Construct parameterized SQL statement
-            $columns = array_keys($filteredData);
-            $colSql = implode(', ', array_map(fn($c) => "`{$c}`", $columns));
-            $paramSql = implode(', ', array_map(fn($c) => ":{$c}", $columns));
+            $insertedId = $this->insertRow($pdo, $tableName, $row, $info);
 
-            $insertSql = "INSERT INTO `{$tableName}` ({$colSql}) VALUES ({$paramSql})";
-
-            // 5. Hard AST keyword check
-            $this->safetyService->assertQueryIsSafe($insertSql);
-
-            // 6. Execute insert inside active transaction
-            $stmt = $pdo->prepare($insertSql);
-
-            foreach ($filteredData as $col => $val) {
-                if ($val === null) {
-                    $stmt->bindValue(":{$col}", null, PDO::PARAM_NULL);
-                } elseif (is_int($val)) {
-                    $stmt->bindValue(":{$col}", $val, PDO::PARAM_INT);
-                } elseif (is_bool($val)) {
-                    $stmt->bindValue(":{$col}", $val ? 1 : 0, PDO::PARAM_INT);
-                } else {
-                    $stmt->bindValue(":{$col}", (string) $val, PDO::PARAM_STR);
-                }
-            }
-
-            $stmt->execute();
-            $insertedId = $pdo->lastInsertId();
-
-            // 7. Handle many-to-many associations (e.g. post_tags) if present in payload or options
-            $this->handleAssociationTables(
-                $pdo,
-                $dbName,
-                $tableName,
-                (int) $insertedId,
-                $payload,
-                $relationResolutions
-            );
+            // Many-to-many associations (e.g. post_tags) when present in the payload
+            $this->handleAssociationTables($pdo, $connection, $tableName, (int) $insertedId, $payload, $resolutions);
 
             $pdo->commit();
 
-            if (!empty($idempotencyKey) && \Illuminate\Support\Facades\Schema::hasTable('idempotency_keys')) {
-                \App\Models\IdempotencyKey::where('idempotency_key', $idempotencyKey)->update([
+            if (!empty($idempotencyKey) && Schema::hasTable('idempotency_keys')) {
+                IdempotencyKey::where('idempotency_key', $idempotencyKey)->update([
                     'target_record_id' => (string) $insertedId,
                     'status' => 'COMMITTED',
                 ]);
@@ -155,17 +118,17 @@ class SafeDatabaseExecutor
                 'operation' => 'INSERT',
                 'table' => $tableName,
                 'record_id' => $insertedId ?: 'inserted',
-                'columns_written' => $columns,
-                'relation_resolutions' => $relationResolutions,
+                'columns_written' => array_keys($row),
+                'written_values' => $this->displayRow($row),
+                'relation_resolutions' => $resolutions,
+                'warnings' => array_values(array_filter($issues, fn($i) => $i['level'] !== 'error')),
             ];
         } catch (Exception $e) {
             if ($pdo && $pdo->inTransaction()) {
                 $pdo->rollBack();
             }
-            if (!empty($idempotencyKey) && \Illuminate\Support\Facades\Schema::hasTable('idempotency_keys')) {
-                \App\Models\IdempotencyKey::where('idempotency_key', $idempotencyKey)->update([
-                    'status' => 'FAILED',
-                ]);
+            if (!empty($idempotencyKey) && Schema::hasTable('idempotency_keys')) {
+                IdempotencyKey::where('idempotency_key', $idempotencyKey)->update(['status' => 'FAILED']);
             }
             throw new Exception("Target database write failed: " . $e->getMessage());
         } finally {
@@ -174,215 +137,528 @@ class SafeDatabaseExecutor
     }
 
     /**
-     * Coerce payload values to match physical MySQL schema types and prevent 1366 / 1292 SQL errors.
+     * Dry run of executeInsert(): validates the payload against the live schema and resolves parent
+     * records with SELECTs only, inside a READ ONLY transaction that is always rolled back. Returns the
+     * exact row that would be written, the ordered write steps (parent creations first), relation
+     * decisions and any errors/warnings. Never writes.
      */
-    protected function sanitizeAndCoercePayload(
-        PDO $pdo,
-        string $dbName,
+    public function planInsert(
+        DbConnection $connection,
         string $tableName,
-        array $rawCols,
         array $payload,
-        bool $isInsert = true,
-        array $relationOptions = [],
-        array &$relationResolutions = []
+        array $relationOptions = []
     ): array {
-        // Index column metadata by lowercase name
-        $cols = [];
-        foreach ($rawCols as $rc) {
-            $c = array_change_key_case($rc, CASE_LOWER);
-            $cols[$c['column_name']] = $c;
-        }
+        $this->preflight($connection, $tableName);
+        unset($payload['_idempotency_key']);
 
-        // Fetch foreign key references for this table
-        $fkMap = [];
+        $pdo = null;
         try {
-            $fkStmt = $pdo->prepare("
-                SELECT column_name, referenced_table_name, referenced_column_name
-                FROM information_schema.key_column_usage
-                WHERE table_schema = :db_name 
-                  AND table_name = :table_name 
-                  AND referenced_table_name IS NOT NULL
-            ");
-            $fkStmt->execute(['db_name' => $dbName, 'table_name' => $tableName]);
-            foreach ($fkStmt->fetchAll() as $fk) {
-                $f = array_change_key_case($fk, CASE_LOWER);
-                $fkMap[$f['column_name']] = [
-                    'table' => $f['referenced_table_name'],
-                    'column' => $f['referenced_column_name'],
+            $pdo = $connection->createTargetPdo();
+            $info = $this->inspector->describe($pdo, $connection->database_name, $tableName);
+            if ($info === null) {
+                throw new Exception("Target table '{$tableName}' not found or has no accessible columns.");
+            }
+
+            try {
+                $pdo->exec('START TRANSACTION READ ONLY');
+            } catch (\Throwable) {
+                $pdo->beginTransaction();
+            }
+
+            $resolutions = [];
+            $issues = [];
+            $steps = [];
+            $row = $this->prepareRow($pdo, $connection, $info, $payload, $relationOptions, true, $resolutions, $issues, $steps);
+
+            $columns = [];
+            foreach ($info['columns'] as $name => $c) {
+                if ($c['auto_increment']) {
+                    continue;
+                }
+                $columns[] = [
+                    'column' => $name,
+                    'type' => $c['column_type'],
+                    'kind' => $c['kind'],
+                    'nullable' => $c['nullable'],
+                    'required' => $c['required'],
+                    'written' => array_key_exists($name, $row),
+                    'value' => array_key_exists($name, $row) ? $this->displayValue($row[$name]) : null,
+                    'note' => array_key_exists($name, $row) ? null : ($c['has_default'] ? 'database default' : ($c['nullable'] ? 'left empty (NULL)' : null)),
                 ];
             }
-        } catch (Exception) {
-            // Non-fatal if foreign key introspection is restricted
+
+            return [
+                'table' => $tableName,
+                'row' => $this->displayRow($row),
+                'columns' => $columns,
+                'steps' => $steps,
+                'relations' => $resolutions,
+                'issues' => $issues,
+                'can_publish' => empty(array_filter($issues, fn($i) => $i['level'] === 'error')),
+            ];
+        } finally {
+            if ($pdo) {
+                try {
+                    $pdo->exec('ROLLBACK');
+                } catch (\Throwable) {
+                }
+            }
+            $pdo = null;
         }
+    }
 
-        $sanitized = [];
+    // ------------------------------------------------------------------
+    // Row preparation (shared by executeInsert and planInsert)
+    // ------------------------------------------------------------------
 
-        foreach ($payload as $key => $val) {
-            if (!isset($cols[$key])) {
-                continue;
-            }
+    private function preflight(DbConnection $connection, string $tableName): void
+    {
+        $this->safetyService->validateConnectionTarget($connection->host, $connection->port);
 
-            $colMeta = $cols[$key];
-            $dataType = strtolower($colMeta['data_type'] ?? 'varchar');
-            $isNullable = strtoupper($colMeta['is_nullable'] ?? 'YES') === 'YES';
-            $default = $colMeta['column_default'] ?? null;
-            $maxLen = isset($colMeta['character_maximum_length']) ? (int) $colMeta['character_maximum_length'] : null;
-
-            // Never populate soft-delete timestamp on INSERT
-            if ($isInsert && $key === 'deleted_at') {
-                $sanitized[$key] = null;
-                continue;
-            }
-
-            // 1. Integer / Numeric fields (handles foreign keys & IDs)
-            if (in_array($dataType, ['int', 'integer', 'bigint', 'smallint', 'tinyint', 'mediumint'], true)) {
-                $refTable = $fkMap[$key]['table'] ?? ($relationOptions[$key]['referenced_table'] ?? null);
-                $refCol = $fkMap[$key]['column'] ?? ($relationOptions[$key]['lookup_column'] ?? 'id');
-
-                // If not found in FK map, infer by convention for _id columns (e.g. category_id -> categories)
-                if (!$refTable && str_ends_with($key, '_id')) {
-                    $base = substr($key, 0, -3);
-                    $candidates = [$base . 's', $base . 'es', str_ends_with($base, 'y') ? substr($base, 0, -1) . 'ies' : $base . 's', $base];
-                    foreach ($candidates as $cand) {
-                        try {
-                            $checkStmt = $pdo->prepare("SELECT 1 FROM information_schema.tables WHERE table_schema = :db AND table_name = :tbl LIMIT 1");
-                            $checkStmt->execute(['db' => $dbName, 'tbl' => $cand]);
-                            if ($checkStmt->fetch()) {
-                                $refTable = $cand;
-                                break;
-                            }
-                        } catch (\Throwable) {}
-                    }
-                }
-
-                if ($refTable) {
-                    // Check if lookup value or options provides a semantic category string
-                    $semanticVal = $val;
-                    if (is_numeric($semanticVal) && (int)$semanticVal <= 1) {
-                        if (!empty($relationOptions[$key]['fixed_value']) && !is_numeric($relationOptions[$key]['fixed_value'])) {
-                            $semanticVal = $relationOptions[$key]['fixed_value'];
-                        } elseif (!empty($payload['category']) && is_string($payload['category'])) {
-                            $semanticVal = $payload['category'];
-                        } elseif (!empty($payload['category_name']) && is_string($payload['category_name'])) {
-                            $semanticVal = $payload['category_name'];
-                        }
-                    }
-
-                    // Intelligent relational resolution
-                    $resolvedId = $this->resolveRelationalRecord(
-                        $pdo,
-                        $dbName,
-                        $refTable,
-                        $refCol,
-                        $semanticVal,
-                        $relationOptions[$key] ?? [],
-                        $relationResolutions
-                    );
-
-                    $sanitized[$key] = $resolvedId ?? ($isNullable ? null : 1);
-                } elseif (is_numeric($val)) {
-                    $sanitized[$key] = (int) $val;
-                } elseif ($isNullable) {
-                    $sanitized[$key] = null;
-                } elseif ($default !== null && is_numeric($default)) {
-                    $sanitized[$key] = (int) $default;
-                } else {
-                    $sanitized[$key] = 1;
-                }
-                continue;
-            }
-
-            // 2. Decimal / Float / Double
-            if (in_array($dataType, ['decimal', 'float', 'double', 'numeric'], true)) {
-                if (is_numeric($val)) {
-                    $sanitized[$key] = (float) $val;
-                } else {
-                    $sanitized[$key] = $isNullable ? null : (is_numeric($default) ? (float) $default : 0.0);
-                }
-                continue;
-            }
-
-            // 3. Datetime / Date / Timestamp
-            if (in_array($dataType, ['datetime', 'timestamp', 'date', 'time'], true)) {
-                if (!empty($val) && !str_starts_with(strtolower((string) $val), 'generated')) {
-                    $ts = strtotime((string) $val);
-                    if ($ts !== false) {
-                        $sanitized[$key] = date($dataType === 'date' ? 'Y-m-d' : 'Y-m-d H:i:s', $ts);
-                        continue;
-                    }
-                }
-                $sanitized[$key] = $isNullable ? null : date($dataType === 'date' ? 'Y-m-d' : 'Y-m-d H:i:s');
-                continue;
-            }
-
-            // 4. Strings / Text / Varchar
-            if (in_array($dataType, ['varchar', 'char', 'text', 'mediumtext', 'longtext', 'tinytext'], true)) {
-                $strVal = is_array($val) || is_object($val) ? json_encode($val) : (string) $val;
-
-                // Handle image fields that received placeholder text
-                if (preg_match('/(banner|img|image|thumbnail|cover|photo)/i', $key)) {
-                    if (empty($strVal) || str_starts_with(strtolower($strVal), 'generated')) {
-                        $strVal = str_contains($key, 'banner')
-                            ? 'https://images.unsplash.com/photo-1518770660439-4636190af475?w=1200&auto=format&fit=crop&q=80'
-                            : (str_contains($key, 'meta')
-                                ? 'https://images.unsplash.com/photo-1451187580459-43490279c0fa?w=800&auto=format&fit=crop&q=80'
-                                : 'https://images.unsplash.com/photo-1460925895917-afdab827c52f?w=600&auto=format&fit=crop&q=80');
-                    }
-                }
-
-                // Enforce slug uniqueness on INSERT to prevent 1062 duplicate key violations
-                if ($isInsert && ($key === 'slug' || str_ends_with($key, '_slug') || str_ends_with($key, 'slug')) && !empty($strVal)) {
-                    $baseSlug = $strVal;
-                    $uniqueSlug = $baseSlug;
-                    $attempt = 1;
-                    while ($attempt <= 10) {
-                        try {
-                            $checkStmt = $pdo->prepare("SELECT 1 FROM `{$tableName}` WHERE `{$key}` = :val LIMIT 1");
-                            $checkStmt->execute(['val' => $uniqueSlug]);
-                            if (!$checkStmt->fetch()) {
-                                break;
-                            }
-                        } catch (Exception) {
-                            break;
-                        }
-                        $suffix = '-' . rand(100, 9999);
-                        if ($maxLen !== null && strlen($baseSlug . $suffix) > $maxLen) {
-                            $uniqueSlug = substr($baseSlug, 0, $maxLen - strlen($suffix)) . $suffix;
-                        } else {
-                            $uniqueSlug = $baseSlug . $suffix;
-                        }
-                        $attempt++;
-                    }
-                    $strVal = $uniqueSlug;
-                }
-
-                // Truncate to max column length if defined
-                if ($maxLen !== null && strlen($strVal) > $maxLen) {
-                    $strVal = substr($strVal, 0, $maxLen);
-                }
-
-                $sanitized[$key] = $strVal;
-                continue;
-            }
-
-            // 5. Enum fields
-            if ($dataType === 'enum') {
-                $sanitized[$key] = (string) $val;
-                continue;
-            }
-
-            // Default fallback
-            $sanitized[$key] = is_array($val) || is_object($val) ? json_encode($val) : $val;
+        if (!in_array(strtolower((string) ($connection->db_type ?: 'mysql')), ['mysql', 'mariadb'], true)) {
+            throw new Exception("Automations can currently write to MySQL connections only; '{$connection->name}' is " . ($connection->db_type ?? 'unknown') . '.');
         }
-
-        return $sanitized;
+        if (!preg_match('/^[A-Za-z0-9_]+$/', $tableName)) {
+            throw new Exception("Invalid table name '{$tableName}'.");
+        }
+        if ($this->safetyService->isTableSensitive($tableName)) {
+            throw new Exception("Security violation: Table '{$tableName}' is classified as restricted and cannot receive automated writes.");
+        }
+        $class = $this->accessPolicy->getTableClass($connection, $tableName);
+        if ($class === 'blocked' || $class === 'read_only') {
+            throw new Exception("Table '{$tableName}' is protected ({$class}) and cannot receive automated writes.");
+        }
     }
 
     /**
-     * Intelligent relational record resolution:
-     * - Searches referenced table by primary key, name, or slug.
-     * - If missing and creation policy permits (and target is not restricted), creates related entity atomically.
-     * - Handles concurrent unique key conflicts by re-reading.
+     * Turn a payload into the exact column => value row for the INSERT. Foreign keys are resolved
+     * to real parent ids (creating parents only where allowed); values are coerced and validated
+     * against the column types; required columns that nothing fills are reported as errors.
+     */
+    private function prepareRow(
+        PDO $pdo,
+        DbConnection $connection,
+        array $info,
+        array $payload,
+        array $relationOptions,
+        bool $dryRun,
+        array &$resolutions,
+        array &$issues,
+        array &$steps
+    ): array {
+        $table = $info['table'];
+        $cols = $info['columns'];
+        $row = [];
+
+        foreach ($payload as $key => $val) {
+            if (!is_string($key) || !isset($cols[$key])) {
+                continue; // not a column of this table (e.g. quality metrics)
+            }
+            $c = $cols[$key];
+
+            if ($c['is_secret']) {
+                $issues[] = ['level' => 'error', 'column' => $key, 'message' => "`{$key}` holds secrets and is never written by automations."];
+                continue;
+            }
+            if ($c['auto_increment'] || $c['generated']) {
+                continue;
+            }
+            if ($key === 'deleted_at') {
+                if ($c['nullable']) {
+                    $row[$key] = null; // never soft-delete a brand-new row
+                }
+                continue;
+            }
+
+            $opts = is_array($relationOptions[$key] ?? null) ? $relationOptions[$key] : [];
+            if ($c['foreign_key'] || !empty($opts['referenced_table'])) {
+                $res = $this->resolveForeignKey($pdo, $connection, $key, $c, $val, $opts, $dryRun, $steps);
+                if ($res['status'] === 'error') {
+                    $issues[] = ['level' => 'error', 'column' => $key, 'message' => $res['details']];
+                    continue;
+                }
+                if ($res['status'] !== 'null') {
+                    $resolutions[] = $res;
+                }
+                if ($res['status'] === 'null') {
+                    $row[$key] = null;
+                } elseif ($res['resolved_id'] !== null) {
+                    $row[$key] = $res['resolved_id'];
+                } else {
+                    // Dry run of a parent that will be created: placeholder for display only.
+                    $row[$key] = new PendingParentId($res['table'], (string) $res['lookup']);
+                }
+                continue;
+            }
+
+            [$value, $colIssues] = $this->coerceValue($c, $val);
+            foreach ($colIssues as $ci) {
+                $issues[] = $ci + ['column' => $key];
+            }
+            if ($value === self::OMIT) {
+                continue;
+            }
+
+            if ($c['kind'] === 'slug' && is_string($value) && $value !== '') {
+                $value = $this->uniqueValue($pdo, $table, $key, Str::slug($value) ?: $value, $c['max_length'], $dryRun, $issues);
+            } elseif ($c['is_unique'] && !$c['is_primary'] && is_string($value) && $value !== '' && $this->valueExists($pdo, $table, $key, $value)) {
+                $issues[] = [
+                    'level' => $dryRun ? 'warning' : 'error',
+                    'column' => $key,
+                    'message' => "`{$key}` must be unique and '" . Str::limit($value, 60) . "' already exists in `{$table}`.",
+                ];
+            }
+
+            $row[$key] = $value;
+        }
+
+        foreach ($cols as $name => $c) {
+            if ($c['required'] && !array_key_exists($name, $row) && !$c['is_secret']) {
+                $alreadyReported = (bool) array_filter($issues, fn($i) => ($i['column'] ?? null) === $name && $i['level'] === 'error');
+                if (!$alreadyReported) {
+                    $issues[] = ['level' => 'error', 'column' => $name, 'message' => "`{$name}` is required in `{$table}` (NOT NULL, no default) but this automation does not fill it."];
+                }
+            }
+        }
+
+        $steps[] = [
+            'order' => count($steps) + 1,
+            'action' => 'INSERT',
+            'table' => $table,
+            'description' => 'Insert the new row into `' . $table . '`.',
+            'values' => $this->displayRow($row),
+        ];
+
+        return $row;
+    }
+
+    /**
+     * Coerce a payload value to the column's type. Returns [value|OMIT, issues].
+     */
+    private function coerceValue(array $c, mixed $val): array
+    {
+        $issues = [];
+        $name = $c['name'];
+        $type = $c['data_type'];
+
+        if ($val === null || (is_string($val) && trim($val) === '' && !in_array($c['kind'], ['text', 'body', 'summary', 'title', 'keywords', 'meta_title', 'meta_description', 'url', 'image', 'contact'], true))) {
+            if ($c['nullable']) {
+                return [null, []];
+            }
+            if ($c['has_default']) {
+                return [self::OMIT, []];
+            }
+            if (is_string($val) && in_array($type, ['varchar', 'char', 'text', 'tinytext', 'mediumtext', 'longtext'], true)) {
+                return ['', []];
+            }
+            return [self::OMIT, [['level' => 'error', 'message' => "`{$name}` is required but has no value."]]];
+        }
+
+        // Integers (non-FK) and booleans
+        if (in_array($type, ['int', 'integer', 'bigint', 'smallint', 'mediumint', 'tinyint', 'bit'], true)) {
+            if (is_bool($val)) {
+                return [$val ? 1 : 0, []];
+            }
+            if (is_string($val) && in_array(strtolower(trim($val)), ['true', 'yes', 'on', 'active', 'published'], true)) {
+                return [1, []];
+            }
+            if (is_string($val) && in_array(strtolower(trim($val)), ['false', 'no', 'off', 'inactive', 'draft'], true)) {
+                return [0, []];
+            }
+            if (is_numeric($val)) {
+                return [(int) $val, []];
+            }
+            if ($c['nullable']) {
+                return [null, [['level' => 'warning', 'message' => "`{$name}` expected a whole number; left empty."]]];
+            }
+            return [self::OMIT, [['level' => 'error', 'message' => "`{$name}` must be a whole number (got '" . Str::limit((string) json_encode($val), 40) . "')."]]];
+        }
+
+        if (in_array($type, ['decimal', 'float', 'double', 'numeric'], true)) {
+            if (is_numeric($val)) {
+                return [(float) $val, []];
+            }
+            if ($c['nullable']) {
+                return [null, [['level' => 'warning', 'message' => "`{$name}` expected a number; left empty."]]];
+            }
+            return [self::OMIT, [['level' => 'error', 'message' => "`{$name}` must be a number."]]];
+        }
+
+        if (in_array($type, ['datetime', 'timestamp', 'date', 'time', 'year'], true)) {
+            $ts = is_numeric($val) ? (int) $val : strtotime((string) $val);
+            if ($ts !== false && $ts > 0) {
+                $fmt = match ($type) {
+                    'date' => 'Y-m-d',
+                    'time' => 'H:i:s',
+                    'year' => 'Y',
+                    default => 'Y-m-d H:i:s',
+                };
+                return [date($fmt, $ts), []];
+            }
+            if ($c['nullable']) {
+                return [null, [['level' => 'warning', 'message' => "`{$name}` was not a valid date; left empty."]]];
+            }
+            return [self::OMIT, [['level' => 'error', 'message' => "`{$name}` must be a valid date/time."]]];
+        }
+
+        if ($type === 'enum') {
+            foreach ($c['enum_values'] as $opt) {
+                if (strcasecmp((string) $opt, trim((string) $val)) === 0) {
+                    return [(string) $opt, []];
+                }
+            }
+            return [self::OMIT, [['level' => 'error', 'message' => "`{$name}` must be one of: " . implode(', ', $c['enum_values']) . " (got '" . Str::limit((string) $val, 40) . "')."]]];
+        }
+
+        if ($type === 'json') {
+            if (is_array($val) || is_object($val)) {
+                return [json_encode($val, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), []];
+            }
+            json_decode((string) $val);
+            return [json_last_error() === JSON_ERROR_NONE ? (string) $val : json_encode((string) $val), []];
+        }
+
+        // Strings
+        $str = is_array($val) || is_object($val) ? json_encode($val, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : (string) $val;
+        $str = str_replace("\0", '', $str);
+        $max = $c['max_length'];
+        if ($max !== null && mb_strlen($str) > $max) {
+            $cut = mb_substr($str, 0, $max);
+            if (in_array($c['kind'], ['title', 'summary', 'meta_title', 'meta_description', 'text', 'keywords'], true)) {
+                $space = mb_strrpos($cut, ' ');
+                if ($space !== false && $space > $max * 0.6) {
+                    $cut = rtrim(mb_substr($cut, 0, $space), " ,.;:-");
+                }
+            }
+            $issues[] = ['level' => 'warning', 'message' => "`{$name}` was shortened from " . mb_strlen($str) . " to " . mb_strlen($cut) . " characters to fit the column."];
+            $str = $cut;
+        }
+        return [$str, $issues];
+    }
+
+    /**
+     * Resolve a foreign-key value to a real parent id.
+     *  - integer / numeric string: must exist in the parent table (no fallback to another id);
+     *  - text label: matched case-insensitively against the parent's name/title (or slug);
+     *  - no match: create the parent only when the relation options say CREATE_IF_MISSING and the
+     *    parent table is not protected; otherwise fail with a clear message.
+     */
+    private function resolveForeignKey(
+        PDO $pdo,
+        DbConnection $connection,
+        string $column,
+        array $c,
+        mixed $val,
+        array $opts,
+        bool $dryRun,
+        array &$steps
+    ): array {
+        $refTable = $c['foreign_key']['table'] ?? $opts['referenced_table'];
+        $refCol = $c['foreign_key']['column'] ?? ($opts['referenced_column'] ?? 'id');
+        $policy = strtoupper((string) ($opts['creation_policy'] ?? $opts['policy'] ?? 'REUSE_EXISTING_ONLY'));
+        $base = ['column' => $column, 'table' => $refTable, 'lookup' => $val, 'resolved_id' => null];
+
+        if (!preg_match('/^[A-Za-z0-9_]+$/', (string) $refTable) || !preg_match('/^[A-Za-z0-9_]+$/', (string) $refCol)) {
+            return $base + ['status' => 'error', 'action' => 'FAILED', 'details' => "Invalid relation target for `{$column}`."];
+        }
+
+        if (is_array($val)) {
+            $val = $val['id'] ?? $val['label'] ?? $val['name'] ?? $val['title'] ?? null;
+        }
+        if ($val === null || (is_string($val) && trim($val) === '')) {
+            if ($c['nullable']) {
+                return $base + ['status' => 'null', 'action' => 'LEFT_EMPTY', 'details' => "`{$column}` left empty."];
+            }
+            return $base + ['status' => 'error', 'action' => 'FAILED', 'details' => "`{$column}` needs a `{$refTable}` record but none was chosen."];
+        }
+
+        if ($this->accessPolicy->getTableClass($connection, $refTable) === 'blocked') {
+            return $base + ['status' => 'error', 'action' => 'FAILED', 'details' => "`{$column}` points at protected table `{$refTable}`, which automations cannot use."];
+        }
+
+        $refInfo = $this->inspector->describe($pdo, $connection->database_name, $refTable);
+        if ($refInfo === null) {
+            return $base + ['status' => 'error', 'action' => 'FAILED', 'details' => "Referenced table `{$refTable}` for `{$column}` was not found."];
+        }
+
+        // 1. Explicit id
+        if (is_int($val) || (is_string($val) && ctype_digit(trim($val)))) {
+            $id = (int) $val;
+            $stmt = $pdo->prepare("SELECT 1 FROM `{$refTable}` WHERE `{$refCol}` = :id LIMIT 1");
+            $stmt->execute(['id' => $id]);
+            if ($stmt->fetchColumn()) {
+                return ['status' => 'ok', 'action' => 'REUSED_BY_ID', 'column' => $column, 'table' => $refTable, 'lookup' => $id, 'resolved_id' => $id,
+                    'details' => "Uses existing `{$refTable}` record #{$id}."];
+            }
+            return $base + ['status' => 'error', 'action' => 'FAILED', 'details' => "`{$column}` points at `{$refTable}` #{$id}, which does not exist (it may have been deleted). Choose another record."];
+        }
+
+        // 2. Label match
+        $label = trim(preg_replace('/\s+/', ' ', (string) $val));
+        $labelCol = TargetTableInspector::labelColumn($refInfo);
+        $slugCol = TargetTableInspector::slugColumn($refInfo);
+        if ($labelCol === null && $slugCol === null) {
+            return $base + ['status' => 'error', 'action' => 'FAILED', 'details' => "`{$refTable}` has no name, title or slug column, so '{$label}' cannot be matched. Choose a fixed record instead."];
+        }
+
+        $where = [];
+        $params = [];
+        if ($labelCol) {
+            $where[] = "LOWER(`{$labelCol}`) = LOWER(:label)";
+            $params['label'] = $label;
+        }
+        if ($slugCol && ($slug = Str::slug($label)) !== '') {
+            $where[] = "`{$slugCol}` = :slug";
+            $params['slug'] = $slug;
+        }
+        $select = "`{$refCol}` AS id" . ($labelCol ? ", `{$labelCol}` AS label" : '');
+        $stmt = $pdo->prepare("SELECT {$select} FROM `{$refTable}` WHERE " . implode(' OR ', $where) . " ORDER BY `{$refCol}` ASC LIMIT 5");
+        $stmt->execute($params);
+        $matches = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        if (!empty($matches)) {
+            $pick = $matches[0];
+            foreach ($matches as $m) {
+                if (isset($m['label']) && strcasecmp((string) $m['label'], $label) === 0) {
+                    $pick = $m;
+                    break;
+                }
+            }
+            $id = is_numeric($pick['id']) ? (int) $pick['id'] : $pick['id'];
+            $shown = $pick['label'] ?? $label;
+            return ['status' => 'ok', 'action' => 'MATCHED_EXISTING', 'column' => $column, 'table' => $refTable, 'lookup' => $label, 'resolved_id' => $id,
+                'details' => "Matched existing `{$refTable}` record '{$shown}' (#{$id})."];
+        }
+
+        // 3. Create when allowed
+        if ($policy !== 'CREATE_IF_MISSING') {
+            return $base + ['status' => 'error', 'action' => 'FAILED', 'details' => "No `{$refTable}` record named '{$label}' exists, and this automation may only use existing records. Choose a fixed record or allow creating new ones."];
+        }
+        if ($this->safetyService->isTableSensitive($refTable) || $this->accessPolicy->getTableClass($connection, $refTable) !== 'writable') {
+            return $base + ['status' => 'error', 'action' => 'FAILED', 'details' => "No `{$refTable}` record named '{$label}' exists, and `{$refTable}` is protected, so automations will not create one."];
+        }
+
+        $built = $this->parentRowBuilder->build($refInfo, $label, $opts['description'] ?? null, $connection->data_timezone ?: 'UTC');
+        $errors = array_filter($built['issues'], fn($i) => $i['level'] === 'error');
+        if (!empty($errors)) {
+            return $base + ['status' => 'error', 'action' => 'FAILED', 'details' => implode(' ', array_map(fn($e) => $e['message'], $errors))];
+        }
+        $values = $built['values'];
+        if ($slugCol && isset($values[$slugCol])) {
+            $values[$slugCol] = $this->uniqueValue($pdo, $refTable, $slugCol, $values[$slugCol], $refInfo['columns'][$slugCol]['max_length'], $dryRun, $built['issues']);
+        }
+
+        $steps[] = [
+            'order' => count($steps) + 1,
+            'action' => 'CREATE_PARENT',
+            'table' => $refTable,
+            'description' => "Create `{$refTable}` record '{$label}' first, then use its new id for `{$column}`.",
+            'values' => $this->displayRow($values),
+        ];
+
+        if ($dryRun) {
+            return ['status' => 'create', 'action' => 'WILL_CREATE', 'column' => $column, 'table' => $refTable, 'lookup' => $label, 'resolved_id' => null,
+                'values' => $this->displayRow($values),
+                'details' => "No `{$refTable}` record named '{$label}' exists yet; it will be created in the same transaction and its new id stored in `{$column}`."];
+        }
+
+        try {
+            $newId = $this->insertRow($pdo, $refTable, $values, $refInfo);
+        } catch (PDOException $e) {
+            if ($e->getCode() == 23000 || str_contains($e->getMessage(), 'Duplicate entry')) {
+                $stmt = $pdo->prepare("SELECT {$select} FROM `{$refTable}` WHERE " . implode(' OR ', $where) . " ORDER BY `{$refCol}` ASC LIMIT 1");
+                $stmt->execute($params);
+                if ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                    return ['status' => 'ok', 'action' => 'CONCURRENCY_REUSED', 'column' => $column, 'table' => $refTable, 'lookup' => $label, 'resolved_id' => (int) $row['id'],
+                        'details' => "'{$label}' was created concurrently; reused `{$refTable}` #{$row['id']}."];
+                }
+            }
+            throw new Exception("Could not create the `{$refTable}` record '{$label}': " . $e->getMessage());
+        }
+
+        $id = is_numeric($newId) ? (int) $newId : $newId;
+        return ['status' => 'ok', 'action' => 'CREATED_NEW', 'column' => $column, 'table' => $refTable, 'lookup' => $label, 'resolved_id' => $id,
+            'values' => $this->displayRow($values),
+            'details' => "Created `{$refTable}` record '{$label}' (#{$id}) and used it for `{$column}`."];
+    }
+
+    /** Parameterised INSERT of an already-validated row; returns the new primary key. */
+    private function insertRow(PDO $pdo, string $table, array $row, array $info): string|int
+    {
+        $columns = array_keys($row);
+        $colSql = implode(', ', array_map(fn($c) => "`{$c}`", $columns));
+        $paramSql = implode(', ', array_map(fn($i) => ":p{$i}", array_keys($columns)));
+        $sql = "INSERT INTO `{$table}` ({$colSql}) VALUES ({$paramSql})";
+        $this->safetyService->assertQueryIsSafe($sql);
+
+        $stmt = $pdo->prepare($sql);
+        foreach ($columns as $i => $col) {
+            $val = $row[$col];
+            if ($val === null) {
+                $stmt->bindValue(":p{$i}", null, PDO::PARAM_NULL);
+            } elseif (is_int($val)) {
+                $stmt->bindValue(":p{$i}", $val, PDO::PARAM_INT);
+            } elseif (is_bool($val)) {
+                $stmt->bindValue(":p{$i}", $val ? 1 : 0, PDO::PARAM_INT);
+            } else {
+                $stmt->bindValue(":p{$i}", (string) $val, PDO::PARAM_STR);
+            }
+        }
+        $stmt->execute();
+
+        $id = $pdo->lastInsertId();
+        if ((!$id || $id === '0') && $info['primary_key'] && array_key_exists($info['primary_key'], $row)) {
+            return $row[$info['primary_key']];
+        }
+        return $id;
+    }
+
+    private function valueExists(PDO $pdo, string $table, string $column, string $value): bool
+    {
+        try {
+            $stmt = $pdo->prepare("SELECT 1 FROM `{$table}` WHERE `{$column}` = :v LIMIT 1");
+            $stmt->execute(['v' => $value]);
+            return (bool) $stmt->fetchColumn();
+        } catch (\Throwable) {
+            return false;
+        }
+    }
+
+    /** Make a slug-like value unique with a numeric suffix (-2, -3, ...), respecting the column length. */
+    private function uniqueValue(PDO $pdo, string $table, string $column, string $value, ?int $maxLen, bool $dryRun, array &$issues): string
+    {
+        $base = $maxLen ? mb_substr($value, 0, $maxLen) : $value;
+        if (!$this->valueExists($pdo, $table, $column, $base)) {
+            return $base;
+        }
+        for ($n = 2; $n <= 50; $n++) {
+            $suffix = "-{$n}";
+            $candidate = ($maxLen && mb_strlen($base . $suffix) > $maxLen ? mb_substr($base, 0, $maxLen - strlen($suffix)) : $base) . $suffix;
+            if (!$this->valueExists($pdo, $table, $column, $candidate)) {
+                $issues[] = ['level' => 'info', 'column' => $column, 'message' => "`{$table}`.`{$column}` '{$base}' already exists, so '{$candidate}' will be used."];
+                return $candidate;
+            }
+        }
+        $candidate = mb_substr($base, 0, max(1, ($maxLen ?? 200) - 9)) . '-' . Str::lower(Str::random(8));
+        $issues[] = ['level' => 'info', 'column' => $column, 'message' => "`{$table}`.`{$column}` made unique as '{$candidate}'."];
+        return $candidate;
+    }
+
+    private function displayValue(mixed $v): mixed
+    {
+        if ($v instanceof PendingParentId) {
+            return (string) $v;
+        }
+        return $v;
+    }
+
+    private function displayRow(array $row): array
+    {
+        return array_map(fn($v) => $this->displayValue($v), $row);
+    }
+
+    /**
+     * Backwards-compatible single relation resolution (used for tag pivots): returns the parent id,
+     * creating it when the options allow. Must run inside the caller's transaction.
      */
     public function resolveRelationalRecord(
         PDO $pdo,
@@ -391,151 +667,28 @@ class SafeDatabaseExecutor
         string $refCol,
         mixed $lookupValue,
         array $options = [],
-        array &$relationResolutions = []
+        array &$relationResolutions = [],
+        ?DbConnection $connection = null
     ): ?int {
-        $policy = $options['creation_policy'] ?? 'CREATE_IF_MISSING';
-        $isSensitive = $this->safetyService->isTableSensitive($refTable);
-
-        // Security invariant: NEVER auto-create in sensitive tables (users, accounts, payments, logs)
-        if ($isSensitive) {
-            $policy = 'REUSE_EXISTING_ONLY';
+        $connection ??= new DbConnection(['database_name' => $dbName]);
+        $steps = [];
+        $res = $this->resolveForeignKey(
+            $pdo,
+            $connection,
+            $refTable . '_ref',
+            ['foreign_key' => ['table' => $refTable, 'column' => $refCol], 'nullable' => true],
+            $lookupValue,
+            $options + ['creation_policy' => $options['creation_policy'] ?? 'CREATE_IF_MISSING'],
+            false,
+            $steps
+        );
+        if ($res['status'] === 'error') {
+            throw new Exception($res['details']);
         }
-
-        // Branch 1: Numeric ID provided
-        if (is_numeric($lookupValue) && (int) $lookupValue > 0) {
-            $idVal = (int) $lookupValue;
-            $stmt = $pdo->prepare("SELECT `{$refCol}` FROM `{$refTable}` WHERE `{$refCol}` = :id LIMIT 1");
-            $stmt->execute(['id' => $idVal]);
-            if ($row = $stmt->fetch()) {
-                $relationResolutions[] = [
-                    'table' => $refTable,
-                    'action' => 'REUSED_BY_ID',
-                    'lookup' => $idVal,
-                    'resolved_id' => $idVal,
-                    'details' => "Reused existing record ID #{$idVal} in {$refTable}.",
-                ];
-                return $idVal;
-            }
+        if ($res['status'] !== 'null') {
+            $relationResolutions[] = $res;
         }
-
-        // Branch 2: Semantic name / string provided (e.g. "Cloud Architecture", "Cars", "Technology")
-        $rawSearch = is_string($lookupValue) ? trim($lookupValue) : null;
-        if (empty($rawSearch)) {
-            if (!empty($options['default_id']) && is_numeric($options['default_id'])) {
-                return (int) $options['default_id'];
-            }
-            return null;
-        }
-
-        $slugVal = Str::slug($rawSearch);
-
-        // Discover columns in referenced table
-        $colStmt = $pdo->prepare("
-            SELECT column_name AS col_name FROM information_schema.columns 
-            WHERE table_schema = :db_name AND table_name = :ref_table
-        ");
-        $colStmt->execute(['db_name' => $dbName, 'ref_table' => $refTable]);
-        $rows = $colStmt->fetchAll(\PDO::FETCH_ASSOC);
-        $refCols = array_map(function ($r) {
-            $val = $r['col_name'] ?? $r['column_name'] ?? $r['COLUMN_NAME'] ?? (array_values($r)[0] ?? '');
-            return strtolower((string) $val);
-        }, $rows);
-
-        // Check if matching row exists by slug or name
-        $whereClauses = [];
-        $params = [];
-
-        if (in_array('slug', $refCols, true)) {
-            $whereClauses[] = "`slug` = :slug";
-            $params['slug'] = $slugVal;
-        }
-        if (in_array('name', $refCols, true)) {
-            $whereClauses[] = "`name` = :name";
-            $params['name'] = $rawSearch;
-        }
-        if (in_array('title', $refCols, true)) {
-            $whereClauses[] = "`title` = :title";
-            $params['title'] = $rawSearch;
-        }
-
-        if (!empty($whereClauses)) {
-            $sql = "SELECT `{$refCol}` FROM `{$refTable}` WHERE " . implode(' OR ', $whereClauses) . " LIMIT 1";
-            $findStmt = $pdo->prepare($sql);
-            $findStmt->execute($params);
-            if ($row = $findStmt->fetch()) {
-                $foundId = (int) $row[$refCol];
-                $relationResolutions[] = [
-                    'table' => $refTable,
-                    'action' => 'MATCHED_EXISTING',
-                    'lookup' => $rawSearch,
-                    'resolved_id' => $foundId,
-                    'details' => "Found existing category/taxonomy '{$rawSearch}' (ID #{$foundId}) in {$refTable}.",
-                ];
-                return $foundId;
-            }
-        }
-
-        // Branch 3: Not found - check creation policy
-        if ($policy === 'CREATE_IF_MISSING' && !$isSensitive) {
-            try {
-                $insertCols = [];
-
-                if (in_array('name', $refCols, true)) {
-                    $insertCols['name'] = $rawSearch;
-                }
-                if (in_array('slug', $refCols, true)) {
-                    $insertCols['slug'] = $slugVal;
-                }
-                if (in_array('description', $refCols, true)) {
-                    $insertCols['description'] = "Automated category for {$rawSearch}.";
-                }
-
-                if (!empty($insertCols)) {
-                    $colNames = implode(', ', array_map(fn($c) => "`{$c}`", array_keys($insertCols)));
-                    $placeholders = implode(', ', array_map(fn($c) => ":{$c}", array_keys($insertCols)));
-                    $insSql = "INSERT INTO `{$refTable}` ({$colNames}) VALUES ({$placeholders})";
-
-                    $insStmt = $pdo->prepare($insSql);
-                    foreach ($insertCols as $k => $v) {
-                        $insStmt->bindValue(":{$k}", $v);
-                    }
-                    $insStmt->execute();
-                    $newId = (int) $pdo->lastInsertId();
-
-                    $relationResolutions[] = [
-                        'table' => $refTable,
-                        'action' => 'CREATED_NEW',
-                        'lookup' => $rawSearch,
-                        'resolved_id' => $newId,
-                        'details' => "Dynamically created missing category/taxonomy '{$rawSearch}' (new ID #{$newId}) in {$refTable}.",
-                    ];
-                    return $newId;
-                }
-            } catch (PDOException $e) {
-                // If a concurrent insert occurred causing duplicate key (23000), re-read existing record
-                if ($e->getCode() == 23000 || str_contains($e->getMessage(), 'Duplicate entry')) {
-                    if (!empty($whereClauses)) {
-                        $findStmt = $pdo->prepare("SELECT `{$refCol}` FROM `{$refTable}` WHERE " . implode(' OR ', $whereClauses) . " LIMIT 1");
-                        $findStmt->execute($params);
-                        if ($row = $findStmt->fetch()) {
-                            $foundId = (int) $row[$refCol];
-                            $relationResolutions[] = [
-                                'table' => $refTable,
-                                'action' => 'CONCURRENCY_REUSED',
-                                'lookup' => $rawSearch,
-                                'resolved_id' => $foundId,
-                                'details' => "Resolved duplicate race condition: reused existing record ID #{$foundId}.",
-                            ];
-                            return $foundId;
-                        }
-                    }
-                }
-                throw new Exception("Failed to create missing related record in '{$refTable}': " . $e->getMessage());
-            }
-        }
-
-        // Branch 4: Entity not found and creation not permitted - fail safely without arbitrary guessing
-        throw new Exception("Relational resolution error: No matching record found for '{$rawSearch}' in referenced table '{$refTable}', and creation is disallowed (Policy: {$policy}). Please select an existing entity or enable permitted creation.");
+        return $res['resolved_id'] !== null ? (int) $res['resolved_id'] : null;
     }
 
     /**
@@ -543,68 +696,52 @@ class SafeDatabaseExecutor
      */
     protected function handleAssociationTables(
         PDO $pdo,
-        string $dbName,
+        DbConnection $connection,
         string $tableName,
         int $recordId,
         array $payload,
         array &$relationResolutions
     ): void {
-        // Example: linking tags for posts
-        if ($tableName === 'posts' && (!empty($payload['tags']) || !empty($payload['tag_names']))) {
-            $tagList = $payload['tags'] ?? $payload['tag_names'];
-            if (is_string($tagList)) {
-                $tagList = array_map('trim', explode(',', $tagList));
+        if ($tableName !== 'posts' || (empty($payload['tags']) && empty($payload['tag_names']))) {
+            return;
+        }
+        $tagList = $payload['tags'] ?? $payload['tag_names'];
+        if (is_string($tagList)) {
+            $tagList = array_map('trim', explode(',', $tagList));
+        }
+        if (!is_array($tagList)) {
+            return;
+        }
+
+        $ptCheck = $pdo->prepare("SELECT 1 FROM information_schema.tables WHERE table_schema = :db AND table_name = 'post_tags'");
+        $ptCheck->execute(['db' => $connection->database_name]);
+        $hasPivot = (bool) $ptCheck->fetchColumn();
+        $tagsCheck = $pdo->prepare("SELECT 1 FROM information_schema.tables WHERE table_schema = :db AND table_name = 'tags'");
+        $tagsCheck->execute(['db' => $connection->database_name]);
+        if (!$hasPivot || !$tagsCheck->fetchColumn()) {
+            return;
+        }
+
+        foreach ($tagList as $tagItem) {
+            $tagName = is_array($tagItem) ? ($tagItem['name'] ?? null) : trim((string) $tagItem);
+            if (empty($tagName)) {
+                continue;
             }
-            if (!is_array($tagList)) {
-                return;
-            }
-
-            foreach ($tagList as $tagItem) {
-                $tagName = is_array($tagItem) ? ($tagItem['name'] ?? null) : (string) $tagItem;
-                if (empty($tagName)) continue;
-
-                // Resolve tag ID in tags table
-                $tagId = $this->resolveRelationalRecord(
-                    $pdo,
-                    $dbName,
-                    'tags',
-                    'id',
-                    $tagName,
-                    ['creation_policy' => 'CREATE_IF_MISSING'],
-                    $relationResolutions
-                );
-
+            try {
+                $tagId = $this->resolveRelationalRecord($pdo, $connection->database_name, 'tags', 'id', $tagName, ['creation_policy' => 'CREATE_IF_MISSING'], $relationResolutions, $connection);
                 if ($tagId) {
-                    try {
-                        // Check if post_tags pivot table exists
-                        $ptCheck = $pdo->prepare("
-                            SELECT table_name FROM information_schema.tables 
-                            WHERE table_schema = :db_name AND table_name = 'post_tags'
-                        ");
-                        $ptCheck->execute(['db_name' => $dbName]);
-                        if ($ptCheck->fetch()) {
-                            // Insert association record with INSERT IGNORE to prevent duplicate links
-                            $insPt = $pdo->prepare("
-                                INSERT IGNORE INTO `post_tags` (`post_id`, `tag_id`) 
-                                VALUES (:post_id, :tag_id)
-                            ");
-                            $insPt->execute([
-                                'post_id' => $recordId,
-                                'tag_id' => $tagId,
-                            ]);
-
-                            $relationResolutions[] = [
-                                'table' => 'post_tags',
-                                'action' => 'PIVOT_LINKED',
-                                'lookup' => "post #{$recordId} -> tag #{$tagId} ('{$tagName}')",
-                                'resolved_id' => $tagId,
-                                'details' => "Linked association post #{$recordId} to tag '{$tagName}' in post_tags.",
-                            ];
-                        }
-                    } catch (Exception) {
-                        // Non-fatal pivot linking
-                    }
+                    $insPt = $pdo->prepare("INSERT IGNORE INTO `post_tags` (`post_id`, `tag_id`) VALUES (:post_id, :tag_id)");
+                    $insPt->execute(['post_id' => $recordId, 'tag_id' => $tagId]);
+                    $relationResolutions[] = [
+                        'table' => 'post_tags',
+                        'action' => 'PIVOT_LINKED',
+                        'lookup' => "post #{$recordId} -> tag #{$tagId} ('{$tagName}')",
+                        'resolved_id' => $tagId,
+                        'details' => "Linked post #{$recordId} to tag '{$tagName}' in post_tags.",
+                    ];
                 }
+            } catch (Exception) {
+                // Tag linking is best-effort and never blocks the main insert.
             }
         }
     }

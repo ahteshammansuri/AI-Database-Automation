@@ -511,10 +511,9 @@ export const LandingPage: React.FC = () => {
 {`{
   "title": "Scaling Relational MySQL with Fair Queues and Ephemeral Pooling",
   "slug": "scaling-relational-mysql-fair-queues-ephemeral-pooling-2026",
-  "banner": "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=1200",
+  "banner": "https://api.your-site.com/storage/media/42/9f2c1e.jpg",
   "status": "published",
-  "category_id": 1,
-  "category_name": "Database Engineering",
+  "category_id": "Database Engineering",  // matched or created first, then its id is stored
   "content": "### High-Throughput Relational Workloads\\n\\nBy managing database connection lifecycles within ephemeral try-finally scopes, multi-tenant automation engines avoid resource pooling exhaustion while ensuring absolute tenant isolation..."
 }`}
                 </pre>

@@ -6,6 +6,7 @@ use App\Models\ApprovalToken;
 use App\Models\ContentVersion;
 use App\Models\AutomationExecution;
 use App\Models\AuditLog;
+use App\Mail\ContentReviewMail;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 use Exception;
@@ -13,45 +14,60 @@ use Exception;
 class EmailApprovalService
 {
     /**
-     * Issue approval token and dispatch notification email.
+     * Issue a single-use approval token for this exact version and send the review email.
+     * Returns whether the configured mail transport accepted the message; a failure is recorded,
+     * never reported as sent.
+     *
+     * @return array{token: ApprovalToken, sent: bool, error: ?string}
      */
-    public function dispatchApprovalNotification(ContentVersion $version, string $recipientEmail): ApprovalToken
+    public function dispatchApprovalNotification(ContentVersion $version, string $recipientEmail): array
     {
         $tokenRecord = ApprovalToken::generateForVersion($version);
+        $version->loadMissing('execution.automation.connection');
         $automation = $version->execution->automation;
 
-        $frontendUrl = env('FRONTEND_URL', 'http://localhost:5173');
-        $approvalUrl = "{$frontendUrl}/approvals/{$tokenRecord->token}";
+        $frontendUrl = rtrim((string) env('FRONTEND_URL', 'http://localhost:5173'), '/');
+        $reviewUrl = "{$frontendUrl}/approvals/{$tokenRecord->token}";
 
-        $payload = $version->payload;
-        $title = $payload['title'] ?? 'Untitled Draft';
-
-        // Dispatch real email via Laravel Mail transport (log, smtp, etc.)
+        $sent = false;
+        $error = null;
         try {
-            Mail::raw("A new AI-generated draft is awaiting your editorial review for '{$automation->name}' (Draft #{$version->version_number}).\n\nTitle: {$title}\n\nSecure Review & Decision Link:\n{$approvalUrl}\n\nThis cryptographic HMAC single-use link expires in 48 hours.", function ($message) use ($recipientEmail, $automation, $version) {
-                $message->to($recipientEmail)
-                    ->subject("Action Required: Review '{$automation->name}' Draft #{$version->version_number}");
-            });
+            Mail::to($recipientEmail)->send(new ContentReviewMail($version, $tokenRecord, $reviewUrl));
+            $sent = true;
         } catch (\Throwable $e) {
-            Log::warning("Email dispatch error: " . $e->getMessage());
+            $error = $e->getMessage();
+            Log::warning("Review email for version #{$version->id} failed: " . $error);
         }
 
-        // Log simulated email clearly for local development & demonstration
-        Log::info("[EMAIL DISPATCHED] To: {$recipientEmail} | Subject: Review Required: '{$automation->name}' Draft #{$version->version_number} | Review URL: {$approvalUrl}");
-
+        // The signed link is a credential: it is never written to logs or the audit trail.
         AuditLog::log(
             $version->user_id,
-            'APPROVAL_EMAIL_SENT',
+            $sent ? 'APPROVAL_EMAIL_SENT' : 'APPROVAL_EMAIL_FAILED',
             'ContentVersion',
             (string) $version->id,
             [
                 'recipient' => $recipientEmail,
                 'version' => $version->version_number,
-                'approval_url' => $approvalUrl,
+                'automation_id' => $automation->id,
+                'error' => $error ? mb_substr($error, 0, 300) : null,
             ]
         );
 
-        return $tokenRecord;
+        return ['token' => $tokenRecord, 'sent' => $sent, 'error' => $error ? mb_substr($error, 0, 300) : null];
+    }
+
+    /**
+     * A token may only act on a version that is still awaiting review, in a run that has not finished.
+     */
+    private function assertReviewable(ContentVersion $version): void
+    {
+        $execution = $version->execution;
+        if ($version->status !== 'PENDING_APPROVAL') {
+            throw new Exception("This draft is no longer awaiting review (it is {$version->status}).");
+        }
+        if (!$execution || in_array($execution->status, AutomationExecution::TERMINAL_STATUSES, true) || in_array($execution->status, ['PUBLISHING', 'GENERATING', 'REGENERATING'], true)) {
+            throw new Exception('This run is ' . strtolower((string) $execution?->status) . ', so the draft can no longer be approved or rejected here.');
+        }
     }
 
     /**
@@ -71,6 +87,7 @@ class EmailApprovalService
 
         $version = $token->version;
         $execution = $version->execution;
+        $this->assertReviewable($version);
 
         // Mark token used
         $token->update(['used_at' => now()]);
@@ -115,6 +132,7 @@ class EmailApprovalService
 
         $version = $token->version;
         $execution = $version->execution;
+        $this->assertReviewable($version);
 
         $token->update(['used_at' => now()]);
         $version->update([

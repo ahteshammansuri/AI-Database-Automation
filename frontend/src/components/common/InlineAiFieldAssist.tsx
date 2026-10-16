@@ -38,10 +38,7 @@ export const InlineAiFieldAssist: React.FC<InlineAiFieldAssistProps> = ({
     fn.includes("quantity") ||
     fn.includes("number");
 
-  if (isExcluded) {
-    return null;
-  }
-
+  // Hooks run unconditionally (rules of hooks); excluded fields render nothing further below.
   const [isOpen, setIsOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [selectedAction, setSelectedAction] = useState<AssistAction | null>(null);
@@ -63,6 +60,10 @@ export const InlineAiFieldAssist: React.FC<InlineAiFieldAssistProps> = ({
     }
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [isOpen]);
+
+  if (isExcluded) {
+    return null;
+  }
 
   const handleAction = async (action: AssistAction, tone?: string) => {
     setSelectedAction(action);

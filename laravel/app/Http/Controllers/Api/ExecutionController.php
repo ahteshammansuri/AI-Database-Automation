@@ -18,7 +18,7 @@ class ExecutionController extends Controller
     public function index(Request $request)
     {
         $query = AutomationExecution::where('user_id', $request->user()->id)
-            ->with(['automation:id,name,target_table,operation_mode,connection_id', 'versions']);
+            ->with(['automation:id,name,target_table,operation_mode,connection_id,timezone,requires_approval', 'versions']);
 
         if ($request->filled('status')) {
             $query->where('status', $request->status);
@@ -38,9 +38,10 @@ class ExecutionController extends Controller
     {
         $execution = AutomationExecution::where('user_id', $request->user()->id)
             ->where('id', $id)
-            ->with(['automation.connection', 'versions.approvalTokens'])
+            ->with(['automation.connection', 'versions'])
             ->firstOrFail();
 
+        // Signed approval tokens never leave the server except inside the review e-mail.
         return response()->json($execution);
     }
 
@@ -57,16 +58,33 @@ class ExecutionController extends Controller
             ]);
         }
 
+        if (in_array($execution->status, ['PUBLISHING', 'GENERATING', 'REGENERATING', 'QUEUED'], true)) {
+            return response()->json(['message' => "This run is {$execution->status}; wait for it to finish first."], 409);
+        }
+
         $version = ContentVersion::where('execution_id', $execution->id)
             ->latest('version_number')
             ->first();
 
-        if ($version && $version->status !== 'APPROVED') {
-            $version->update(['status' => 'APPROVED']);
+        // Only the latest reviewable or approved version can ever be published; rejected or invalid never.
+        if (!$version || !in_array($version->status, ['PENDING_APPROVAL', 'APPROVED'], true)) {
+            return response()->json([
+                'message' => $version
+                    ? "The latest version is {$version->status} and cannot be published. Retry the run to generate a new version."
+                    : 'There is no generated version to publish yet.',
+            ], 422);
         }
 
-        $execution->update(['status' => 'APPROVED']);
-        $execution->addTimelineEvent('MANUAL_PUBLISH_TRIGGERED', 'User triggered immediate publication from portal.');
+        if ($version->status !== 'APPROVED') {
+            $version->update(['status' => 'APPROVED']);
+            AuditLog::log($request->user()->id, 'VERSION_APPROVED', 'ContentVersion', (string) $version->id, [
+                'execution_id' => $execution->id,
+                'via' => 'publish_now',
+            ]);
+        }
+
+        $execution->update(['status' => 'PUBLISHING', 'lease_expires_at' => now()->addMinutes(10), 'error_message' => null, 'failure_category' => null]);
+        $execution->addTimelineEvent('MANUAL_PUBLISH_TRIGGERED', "You published version #{$version->version_number} immediately from the portal.");
 
         PublishAutomationContentJob::dispatch($execution->id);
 
@@ -94,14 +112,24 @@ class ExecutionController extends Controller
             return response()->json(['message' => 'Cannot retry an already published execution.'], 422);
         }
 
+        if (in_array($execution->status, ['PUBLISHING', 'GENERATING', 'REGENERATING', 'QUEUED'], true)) {
+            return response()->json(['message' => "This run is already {$execution->status}."], 409);
+        }
+
         $newRetryCount = ($execution->retry_count ?? 0) + 1;
-        $execution->update([
+        $updates = [
             'status' => 'QUEUED',
             'retry_count' => $newRetryCount,
             'error_message' => null,
             'failure_category' => null,
             'lease_expires_at' => now()->addMinutes(15),
-        ]);
+        ];
+        // A retry after the original publication time gets a fresh window so a reviewer can still see it.
+        if (!$execution->publication_time || $execution->publication_time->isPast()) {
+            $automation = $execution->automation;
+            $updates['publication_time'] = now()->addMinutes($automation && $automation->requires_approval ? 30 : 15);
+        }
+        $execution->update($updates);
 
         $execution->addTimelineEvent(
             'USER_RETRY_TRIGGERED',
@@ -249,9 +277,13 @@ class ExecutionController extends Controller
         $tableName = $execution->automation->target_table;
         $recordId = (int) $execution->target_record_id;
 
-        // Disallow modifying sensitive system columns
-        $forbiddenColumns = ['id', 'created_at', 'password', 'password_hash', 'token', 'secret', 'remember_token'];
-        $cleanPayload = array_diff_key($validated['payload'], array_flip($forbiddenColumns));
+        // Disallow modifying keys, creation time and any secret column
+        $forbiddenColumns = ['id', 'created_at'];
+        $cleanPayload = array_filter(
+            array_diff_key($validated['payload'], array_flip($forbiddenColumns)),
+            fn($col) => is_string($col) && !\App\Services\Data\ColumnClassifier::isSecret($col),
+            ARRAY_FILTER_USE_KEY
+        );
 
         if (empty($cleanPayload)) {
             return response()->json(['message' => 'No eligible fields provided for update.'], 422);

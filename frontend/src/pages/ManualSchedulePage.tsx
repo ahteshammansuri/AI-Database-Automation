@@ -22,9 +22,17 @@ import {
   Check,
   Tag,
   Wand2,
-  Plus
+  Plus,
+  Loader2,
+  Eye,
+  ShieldCheck,
 } from "lucide-react";
 import { api } from "../services/api";
+import { DatePicker } from "../components/ui/DatePicker";
+import { TimePicker } from "../components/ui/TimePicker";
+import { TimezoneSelect } from "../components/ui/TimezoneSelect";
+import { ContentPreview } from "../components/content/ContentPreview";
+import { browserTimeZone, todayIn, nowTimeIn, addMinutesHHMM, zonedIso, formatInstant, relativeFromNow } from "../lib/schedule";
 import { ConnectionProfile, SchemaResponse, SchemaTable, SchemaColumn } from "../types";
 import { SearchableSelect } from "../components/common/SearchableSelect";
 import { InlineAiFieldAssist } from "../components/common/InlineAiFieldAssist";
@@ -45,6 +53,23 @@ export const ManualSchedulePage: React.FC = () => {
   const [formData, setFormData] = useState<Record<string, any>>({});
   const [publishMode, setPublishMode] = useState<"NOW" | "SCHEDULED">("NOW");
   const [scheduledTime, setScheduledTime] = useState<string>("");
+  const [scheduleTz, setScheduleTz] = useState<string>(browserTimeZone());
+  // Default: one hour from now, rounded up to 5 minutes (tomorrow if that crosses midnight).
+  const defaultSlot = (() => {
+    const tz = browserTimeZone();
+    const now = nowTimeIn(tz);
+    const [h, m] = addMinutesHHMM(now, 60).split(":").map(Number);
+    const total = (Math.ceil((h * 60 + m) / 5) * 5) % 1440;
+    const clock = `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+    const today = todayIn(tz);
+    return { date: clock < now ? todayIn(tz, new Date(Date.now() + 86400000)) : today, clock };
+  })();
+  const [scheduleDate, setScheduleDate] = useState<string>(defaultSlot.date);
+  const [scheduleClock, setScheduleClock] = useState<string>(defaultSlot.clock);
+  const [relationPolicies, setRelationPolicies] = useState<Record<string, boolean>>({});
+  const [uploadingCol, setUploadingCol] = useState<string | null>(null);
+  const [review, setReview] = useState<{ plan: any; payload: Record<string, any> } | null>(null);
+  const [isPlanning, setIsPlanning] = useState(false);
 
   // Relational Lookup Options cache: { [columnName]: [{ id: any, label: string }] }
   const [lookupOptions, setLookupOptions] = useState<Record<string, { id: any; label: string }[]>>({});
@@ -66,16 +91,8 @@ export const ManualSchedulePage: React.FC = () => {
   const [showAiHelper, setShowAiHelper] = useState(false);
 
   // File upload input ref for image
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Stock image presets for image/banner fields
-  const stockImagePresets = [
-    { label: "Tech Architecture", url: "https://images.unsplash.com/photo-1518770660439-4636190af475?w=1200&auto=format&fit=crop&q=80" },
-    { label: "Data Network", url: "https://images.unsplash.com/photo-1451187580459-43490279c0fa?w=1200&auto=format&fit=crop&q=80" },
-    { label: "Modern Analytics", url: "https://images.unsplash.com/photo-1460925895917-afdab827c52f?w=1200&auto=format&fit=crop&q=80" },
-    { label: "Cloud Infrastructure", url: "https://images.unsplash.com/photo-1544197150-b99a580bb7a8?w=1200&auto=format&fit=crop&q=80" },
-  ];
-
   // 1. Initial atomic load: connections AND target schema together (zero flicker)
   useEffect(() => {
     let isMounted = true;
@@ -241,7 +258,7 @@ export const ManualSchedulePage: React.FC = () => {
       } else if (colName === "status") {
         initial[col.name] = col.data_type.includes("int") ? 1 : "published";
       } else if (colName.includes("banner") || colName.includes("meta_img") || colName.includes("thumbnail") || colName.includes("image")) {
-        initial[col.name] = stockImagePresets[0].url;
+        initial[col.name] = "";
       } else if (col.is_foreign_key || (colName && colName.endsWith("_id"))) {
         initial[col.name] = 1;
         // Trigger lookup fetch
@@ -288,17 +305,35 @@ export const ManualSchedulePage: React.FC = () => {
   };
 
   // Image Upload handler via File Drop / Input
-  const handleImageFileChange = (e: React.ChangeEvent<HTMLInputElement>, colName: string) => {
+  // Images are uploaded to the platform and the column receives the public URL (never a base64 blob).
+  const handleImageFileChange = async (e: React.ChangeEvent<HTMLInputElement>, colName: string) => {
     const file = e.target.files?.[0];
+    e.target.value = "";
     if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = reader.result as string;
-      handleFieldChange(colName, dataUrl);
-    };
-    reader.readAsDataURL(file);
+    try {
+      setUploadingCol(colName);
+      setError(null);
+      const res = await api.uploadMedia(file);
+      handleFieldChange(colName, res.url);
+    } catch (err: any) {
+      setError(`Image upload failed: ${err.message}`);
+    } finally {
+      setUploadingCol(null);
+    }
   };
+
+  const buildPayload = () => {
+    const finalPayload: Record<string, any> = { ...formData };
+    customFields.forEach((cf) => {
+      if (cf.key.trim()) finalPayload[cf.key.trim()] = cf.value;
+    });
+    return finalPayload;
+  };
+
+  const relationPolicyPayload = () =>
+    Object.fromEntries(Object.entries(relationPolicies).filter(([, on]) => on).map(([col]) => [col, "CREATE_IF_MISSING" as const]));
+
+  const scheduledAtIso = () => zonedIso(scheduleDate, scheduleClock, scheduleTz);
 
   // AI Content Generator: Auto-draft content for the form using Python AI Service
   const handleGenerateAiDraft = async () => {
@@ -409,7 +444,17 @@ export const ManualSchedulePage: React.FC = () => {
         set: (v) => { const m = String(v).toUpperCase(); if (m !== "NOW" && m !== "SCHEDULED") return "Use NOW or SCHEDULED."; setPublishMode(m as any); return null; },
         options: () => [{ value: "NOW", label: "Publish now" }, { value: "SCHEDULED", label: "Schedule" }],
       },
-      scheduled_time: { get: () => scheduledTime, set: (v) => { setScheduledTime(String(v ?? "")); return null; } },
+      scheduled_time: {
+        get: () => `${scheduleDate} ${scheduleClock}`,
+        set: (v) => {
+          const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})/.exec(String(v ?? ""));
+          if (!m) return "Use YYYY-MM-DD HH:MM in the selected timezone.";
+          setScheduleDate(m[1]);
+          setScheduleClock(m[2]);
+          setScheduledTime(String(v));
+          return null;
+        },
+      },
       ai_topic: { get: () => aiTopic, set: (v) => { setAiTopic(String(v ?? "")); setShowAiHelper(true); return null; } },
     },
     actions: {
@@ -431,7 +476,8 @@ export const ManualSchedulePage: React.FC = () => {
             customFields.forEach((cf) => { if (cf.key.trim()) payload[cf.key.trim()] = cf.value; });
             const res: any = await api.manualPublish({
               connection_id: selectedConnId, target_table: selectedTable.name, payload,
-              publish_now: publishMode === "NOW", scheduled_time: publishMode === "SCHEDULED" ? scheduledTime : undefined,
+              publish_now: publishMode === "NOW", scheduled_at: publishMode === "SCHEDULED" ? scheduledAtIso() : undefined,
+              timezone: scheduleTz, relation_policies: relationPolicyPayload(),
             });
             setSuccessResult(res);
             return { success: true, message: res?.message || "Done.", resource: res?.execution?.id ? { type: "AutomationExecution", id: res.execution.id } : undefined };
@@ -446,36 +492,56 @@ export const ManualSchedulePage: React.FC = () => {
     },
   }));
 
+  // Step 1 of publishing: a read-only dry run that shows exactly what will be written.
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedConnId || !selectedTable) {
-      setError("Please select both a target database and a valid target table.");
+      setError("Choose a database and a table first.");
       return;
     }
-
+    if (publishMode === "SCHEDULED" && new Date(scheduledAtIso()).getTime() < Date.now() + 60000) {
+      setError("Pick a time at least one minute in the future, or choose “Publish now”.");
+      return;
+    }
     try {
-      setIsSubmitting(true);
+      setIsPlanning(true);
       setError(null);
-      setSuccessResult(null);
-
-      const finalPayload = { ...formData };
-      customFields.forEach((cf) => {
-        if (cf.key.trim()) {
-          finalPayload[cf.key.trim()] = cf.value;
-        }
-      });
-
+      const payload = buildPayload();
       const res = await api.manualPublish({
         connection_id: selectedConnId,
         target_table: selectedTable.name,
-        payload: finalPayload,
-        publish_now: publishMode === "NOW",
-        scheduled_time: publishMode === "SCHEDULED" ? scheduledTime : undefined,
+        payload,
+        dry_run: true,
+        relation_policies: relationPolicyPayload(),
       });
+      setReview({ plan: res.plan, payload });
+    } catch (err: any) {
+      setError(err.message || "Could not check this record.");
+    } finally {
+      setIsPlanning(false);
+    }
+  };
 
+  // Step 2: the user confirmed the reviewed plan.
+  const confirmPublish = async () => {
+    if (!selectedConnId || !selectedTable || !review) return;
+    try {
+      setIsSubmitting(true);
+      setError(null);
+      const res = await api.manualPublish({
+        connection_id: selectedConnId,
+        target_table: selectedTable.name,
+        payload: review.payload,
+        publish_now: publishMode === "NOW",
+        scheduled_at: publishMode === "SCHEDULED" ? scheduledAtIso() : undefined,
+        timezone: scheduleTz,
+        relation_policies: relationPolicyPayload(),
+      });
+      setReview(null);
       setSuccessResult(res);
     } catch (err: any) {
-      setError(err.message || "Failed to execute manual publication.");
+      setError(err.message || "Publishing failed.");
+      if (err.data?.plan) setReview((r) => (r ? { ...r, plan: err.data.plan } : r));
     } finally {
       setIsSubmitting(false);
     }
@@ -858,6 +924,17 @@ export const ManualSchedulePage: React.FC = () => {
                           loadingRelational={loadingLookups[colName]}
                           referencedTable={refTable}
                         />
+                        {isRelational && typeof formData[colName] === "string" && formData[colName].trim() !== "" && !/^\d+$/.test(formData[colName].trim()) && (
+                          <label className="mt-1.5 flex items-start gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-[11px] text-emerald-900">
+                            <input
+                              type="checkbox"
+                              checked={relationPolicies[colName] ?? true}
+                              onChange={(e) => setRelationPolicies((p) => ({ ...p, [colName]: e.target.checked }))}
+                              className="mt-0.5 rounded border-emerald-300 text-emerald-600"
+                            />
+                            <span>If no {refTable ?? "record"} named “{formData[colName]}” exists, create it first and link this row to it. You will see this in the review before anything is written.</span>
+                          </label>
+                        )}
                       </div>
                     );
                   })}
@@ -926,30 +1003,30 @@ export const ManualSchedulePage: React.FC = () => {
                       <div key={colName} ref={(el: HTMLDivElement | null) => (el ? orbitTargets.register(`manual.col.${colName}`, el) : orbitTargets.unregister(`manual.col.${colName}`))} className="space-y-3">
                         <div className="flex items-center justify-between">
                           <label className="text-xs font-semibold text-slate-700">{colName}</label>
-                          <span className="text-[10px] text-slate-400 font-mono">Image URL / Base64 Payload</span>
+                          <span className="text-[10px] text-slate-400 font-mono">Image URL</span>
                         </div>
 
-                        {/* Interactive Drag & Drop File Upload Zone */}
+                        {/* Upload zone (one file input per column) */}
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                          <div
-                            onClick={() => fileInputRef.current?.click()}
+                          <label
+                            htmlFor={`upload-${colName}`}
                             className="border-2 border-dashed border-slate-200 hover:border-indigo-300 hover:bg-slate-50/50 rounded-xl p-4 text-center cursor-pointer transition flex flex-col items-center justify-center space-y-1.5"
                           >
                             <input
-                              ref={fileInputRef}
+                              id={`upload-${colName}`}
                               type="file"
-                              accept="image/*"
+                              accept="image/png,image/jpeg,image/webp,image/gif"
                               onChange={(e) => handleImageFileChange(e, colName)}
-                              className="hidden"
+                              className="sr-only"
                             />
                             <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center">
-                              <Upload className="w-4 h-4" />
+                              {uploadingCol === colName ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
                             </div>
                             <span className="text-xs font-semibold text-slate-800">
-                              Upload Image File
+                              {uploadingCol === colName ? "Uploading…" : "Upload an image"}
                             </span>
-                            <span className="text-[10px] text-slate-400">PNG, JPG, WebP up to 5MB</span>
-                          </div>
+                            <span className="text-[10px] text-slate-400">PNG, JPG, WebP or GIF up to 10 MB · stored as a URL</span>
+                          </label>
 
                           {/* Live Thumbnail Preview */}
                           <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5 flex items-center gap-3">
@@ -959,14 +1036,11 @@ export const ManualSchedulePage: React.FC = () => {
                                   src={currentValue}
                                   alt="Preview"
                                   className="w-16 h-16 rounded-lg object-cover border border-slate-200 bg-white"
-                                  onError={(e) => {
-                                    (e.target as any).src = stockImagePresets[0].url;
-                                  }}
                                 />
                                 <div className="flex-1 min-w-0 text-xs">
                                   <span className="text-emerald-700 font-bold block">Image Attached</span>
                                   <span className="text-[10px] text-slate-400 font-mono truncate block">
-                                    {String(currentValue).startsWith("data:") ? "Local File (Base64)" : currentValue}
+                                    {currentValue}
                                   </span>
                                   <button
                                     type="button"
@@ -995,19 +1069,6 @@ export const ManualSchedulePage: React.FC = () => {
                             className="w-full bg-slate-50/50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-900 font-mono focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 focus:bg-white transition"
                           />
 
-                          <div className="flex flex-wrap items-center gap-1.5 pt-1">
-                            <span className="text-[10px] text-slate-400 font-semibold">Stock Presets:</span>
-                            {stockImagePresets.map((preset) => (
-                              <button
-                                key={preset.label}
-                                type="button"
-                                onClick={() => handleFieldChange(colName, preset.url)}
-                                className="text-[10px] px-2.5 py-0.5 bg-slate-100 hover:bg-indigo-50 hover:text-indigo-700 text-slate-600 rounded-full border border-slate-200 transition"
-                              >
-                                {preset.label}
-                              </button>
-                            ))}
-                          </div>
                         </div>
                       </div>
                     );
@@ -1159,17 +1220,26 @@ export const ManualSchedulePage: React.FC = () => {
               </div>
 
               {publishMode === "SCHEDULED" && (
-                <div className="pt-2">
-                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                    Target Publication Date & Time
-                  </label>
-                  <input
-                    type="datetime-local"
-                    required
-                    value={scheduledTime}
-                    onChange={(e) => setScheduledTime(e.target.value)}
-                    className="w-full bg-slate-50/50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs text-slate-900 font-mono focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 focus:bg-white transition"
-                  />
+                <div className="space-y-2 pt-2">
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                    <div>
+                      <label className="mb-1.5 block text-xs font-semibold text-slate-700">Date</label>
+                      <DatePicker value={scheduleDate} onChange={(d) => d && setScheduleDate(d)} today={todayIn(scheduleTz)} min={todayIn(scheduleTz)} ariaLabel="Publication date" />
+                    </div>
+                    <div>
+                      <label className="mb-1.5 block text-xs font-semibold text-slate-700">Time</label>
+                      <TimePicker value={scheduleClock} onChange={setScheduleClock} ariaLabel="Publication time" />
+                    </div>
+                    <div>
+                      <label className="mb-1.5 block text-xs font-semibold text-slate-700">Timezone</label>
+                      <TimezoneSelect value={scheduleTz} onChange={(tz) => { setScheduleTz(tz); }} />
+                    </div>
+                  </div>
+                  <p className={`text-[11px] ${new Date(scheduledAtIso()).getTime() < Date.now() + 60000 ? "text-rose-600" : "text-slate-500"}`}>
+                    {new Date(scheduledAtIso()).getTime() < Date.now() + 60000
+                      ? "That time has already passed. Pick a later time."
+                      : `Publishes ${formatInstant(scheduledAtIso(), scheduleTz, { withZone: true })} (${relativeFromNow(scheduledAtIso())}). The background worker writes it even if this page is closed.`}
+                  </p>
                 </div>
               )}
 
@@ -1178,18 +1248,18 @@ export const ManualSchedulePage: React.FC = () => {
                   type="submit"
                   whileHover={{ scale: 1.02 }}
                   whileTap={{ scale: 0.98 }}
-                  disabled={isSubmitting}
-                  className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition shadow-xs flex items-center gap-2"
+                  disabled={isPlanning || isSubmitting}
+                  className="w-full sm:w-auto justify-center px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white rounded-xl text-xs font-bold transition shadow-xs flex items-center gap-2"
                 >
-                  {isSubmitting ? (
+                  {isPlanning ? (
                     <>
                       <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                      <span>Writing to Database...</span>
+                      <span>Checking against your database…</span>
                     </>
                   ) : (
                     <>
-                      <Send className="w-3.5 h-3.5" />
-                      <span>{publishMode === "NOW" ? "Publish Record Now" : "Schedule Publication Job"}</span>
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>Review before {publishMode === "NOW" ? "publishing" : "scheduling"}</span>
                     </>
                   )}
                 </motion.button>
@@ -1198,6 +1268,56 @@ export const ManualSchedulePage: React.FC = () => {
           )}
         </form>
       )}
+    {/* Review before anything is written */}
+      <AnimatePresence>
+        {review && (
+          <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-900/50 p-0 backdrop-blur-xs sm:items-center sm:p-4">
+            <motion.div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="manual-review-title"
+              initial={{ opacity: 0, y: 16 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 16 }}
+              className="flex max-h-[94vh] w-full max-w-4xl flex-col space-y-3 rounded-t-2xl border border-slate-200 bg-white p-4 shadow-2xl sm:max-h-[90vh] sm:rounded-2xl sm:p-6"
+            >
+              <div className="flex items-start justify-between gap-3 border-b border-slate-100 pb-3">
+                <div>
+                  <h3 id="manual-review-title" className="flex items-center gap-2 text-sm font-bold text-slate-900"><ShieldCheck className="h-4 w-4 text-indigo-600" /> Review before {publishMode === "NOW" ? "publishing" : "scheduling"}</h3>
+                  <p className="mt-0.5 text-xs text-slate-500">
+                    {publishMode === "NOW"
+                      ? `This is exactly what will be written to ${selectedTable?.name} when you confirm.`
+                      : `This will be written to ${selectedTable?.name} on ${formatInstant(scheduledAtIso(), scheduleTz, { withZone: true })}.`}
+                  </p>
+                </div>
+                <button type="button" onClick={() => setReview(null)} aria-label="Close" className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700"><X className="h-5 w-5" /></button>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+                <ContentPreview
+                  payload={review.payload}
+                  meta={{ write_plan: review.plan, issues: review.plan?.issues ?? [], manual: true }}
+                  targetTable={selectedTable?.name}
+                  timezone={scheduleTz}
+                  publicationTime={publishMode === "SCHEDULED" ? scheduledAtIso() : null}
+                  defaultTab="database"
+                />
+              </div>
+              <div className="flex flex-col-reverse gap-2 border-t border-slate-100 pt-3 sm:flex-row sm:justify-end">
+                <button type="button" onClick={() => setReview(null)} className="rounded-xl bg-slate-100 px-4 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-200">Go back and edit</button>
+                <button
+                  type="button"
+                  onClick={confirmPublish}
+                  disabled={isSubmitting || !review.plan?.can_publish}
+                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 text-xs font-bold text-white shadow-xs hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {isSubmitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+                  {!review.plan?.can_publish ? "Fix the problems first" : publishMode === "NOW" ? "Confirm and publish now" : "Confirm schedule"}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </motion.div>
   );
 };

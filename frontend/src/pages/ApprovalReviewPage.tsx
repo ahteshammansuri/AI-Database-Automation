@@ -1,275 +1,209 @@
-import React, { useEffect, useState } from "react";
-import { useParams, Link } from "react-router-dom";
-import { motion, AnimatePresence } from "framer-motion";
-import {
-  CheckCircle2,
-  XCircle,
-  Clock,
-  ArrowRight,
-  ShieldCheck,
-  FileText,
-  AlertCircle,
-  Send
-} from "lucide-react";
+import React, { useEffect, useRef, useState } from "react";
+import { useParams, Link, useLocation } from "react-router-dom";
+import { motion } from "framer-motion";
+import { AlertCircle, ArrowRight, CheckCircle2, Clock, Loader2, MessageSquare, Send, ShieldCheck, XCircle } from "lucide-react";
 import { api } from "../services/api";
+import { ContentPreview } from "../components/content/ContentPreview";
+import { formatInstant, relativeFromNow } from "../lib/schedule";
 
+const POLICY_TEXT: Record<string, string> = {
+  AUTO_PUBLISH_LATEST: "If nobody decides by then, this version will be published automatically.",
+  KEEP_DRAFT: "If nobody decides by then, nothing is published; the draft is kept.",
+  CANCEL: "If nobody decides by then, the run is cancelled and nothing is written.",
+};
+
+/**
+ * Public page opened from the review email. Approving or rejecting needs a click here (POST with
+ * the single-use token), so mail scanners that follow links can never publish anything.
+ */
 export const ApprovalReviewPage: React.FC = () => {
   const { token } = useParams<{ token: string }>();
+  const location = useLocation();
+  const feedbackRef = useRef<HTMLTextAreaElement>(null);
 
-  const [preview, setPreview] = useState<any>(null);
+  const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
   const [feedback, setFeedback] = useState("");
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [submitting, setSubmitting] = useState<"APPROVE" | "REJECT" | null>(null);
+  const [result, setResult] = useState<{ action: "APPROVE" | "REJECT"; message: string } | null>(null);
 
   useEffect(() => {
     if (!token) return;
-    const fetchPreview = async () => {
+    (async () => {
       try {
         setLoading(true);
-        setError(null);
-        const data = await api.getApprovalPreview(token);
-        setPreview(data);
+        setData(await api.getApprovalPreview(token));
       } catch (err: any) {
         setError(err.message);
       } finally {
         setLoading(false);
       }
-    };
-    fetchPreview();
+    })();
   }, [token]);
 
-  const handleAction = async (actionType: "APPROVE" | "REJECT") => {
+  useEffect(() => {
+    if (!loading && location.hash === "#request-changes") {
+      feedbackRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      feedbackRef.current?.focus();
+    }
+  }, [loading, location.hash]);
+
+  const act = async (action: "APPROVE" | "REJECT") => {
     if (!token) return;
+    if (action === "REJECT" && !feedback.trim()) {
+      setError("Tell the AI what to change before requesting a new version.");
+      feedbackRef.current?.focus();
+      return;
+    }
     try {
-      setIsSubmitting(true);
+      setSubmitting(action);
       setError(null);
-      const res = await api.submitApprovalAction(token, actionType, feedback);
-      setResult(res);
+      const res = await api.submitApprovalAction(token, action, feedback.trim());
+      setResult({ action, message: res?.message || (action === "APPROVE" ? "Approved." : "Feedback sent.") });
     } catch (err: any) {
-      setError(`Action failed: ${err.message}`);
+      setError(err.message);
     } finally {
-      setIsSubmitting(false);
+      setSubmitting(null);
     }
   };
 
+  const shell = (children: React.ReactNode) => (
+    <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4">
+      <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="w-full max-w-md space-y-4 rounded-3xl border border-slate-200 bg-white p-6 text-center shadow-sm sm:p-8">
+        {children}
+      </motion.div>
+    </div>
+  );
+
   if (loading) {
-    return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6 text-slate-500">
-        <motion.div
-          initial={{ opacity: 0, scale: 0.9 }}
-          animate={{ opacity: 1, scale: 1 }}
-          className="text-center space-y-3"
-        >
-          <div className="w-10 h-10 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mx-auto shadow-sm" />
-          <p className="text-xs font-semibold text-slate-700">Verifying cryptographic approval token...</p>
-          <p className="text-[11px] text-slate-400">Validating HMAC-SHA256 signature and timestamp</p>
-        </motion.div>
-      </div>
+    return shell(
+      <>
+        <Loader2 className="mx-auto h-8 w-8 animate-spin text-indigo-600" />
+        <p className="text-xs font-semibold text-slate-700">Opening the draft…</p>
+      </>
     );
   }
 
-  if (error && !preview) {
-    return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
-        <motion.div
-          initial={{ opacity: 0, y: 15 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="max-w-md w-full bg-white border border-slate-200 rounded-3xl p-8 text-center space-y-4 shadow-sm"
-        >
-          <div className="w-14 h-14 rounded-2xl bg-rose-50 border border-rose-200 text-rose-600 flex items-center justify-center mx-auto shadow-2xs">
-            <XCircle className="w-7 h-7" />
-          </div>
-          <h3 className="text-xl font-extrabold text-slate-900 tracking-tight">Invalid or Expired Link</h3>
-          <p className="text-xs text-slate-500 leading-relaxed">{error}</p>
-          <Link
-            to="/"
-            className="inline-flex items-center gap-2 text-xs font-bold text-indigo-600 hover:text-indigo-700 pt-2"
-          >
-            <span>Return to Dashboard</span>
-            <ArrowRight className="w-3.5 h-3.5" />
-          </Link>
-        </motion.div>
-      </div>
+  if (!data) {
+    return shell(
+      <>
+        <XCircle className="mx-auto h-10 w-10 text-rose-500" />
+        <h1 className="text-lg font-extrabold text-slate-900">This review link does not work</h1>
+        <p className="text-xs text-slate-500">{error || "The link is invalid."}</p>
+        <Link to="/approvals" className="inline-flex items-center gap-1.5 text-xs font-bold text-indigo-600">Open Approvals in the portal <ArrowRight className="h-3.5 w-3.5" /></Link>
+      </>
     );
   }
 
   if (result) {
-    return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
-        <motion.div
-          initial={{ opacity: 0, scale: 0.95 }}
-          animate={{ opacity: 1, scale: 1 }}
-          className="max-w-lg w-full bg-white border border-slate-200 rounded-3xl p-8 text-center space-y-4 shadow-sm"
-        >
-          <div className="w-14 h-14 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-600 flex items-center justify-center mx-auto shadow-2xs">
-            <CheckCircle2 className="w-7 h-7" />
-          </div>
-          <h3 className="text-xl font-extrabold text-slate-900 tracking-tight">Decision Recorded</h3>
-          <p className="text-xs text-slate-600 font-medium leading-relaxed">{result.message}</p>
-          {result.next_step && (
-            <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-2xl text-xs text-slate-600 font-mono text-left">
-              <strong className="text-slate-900">Next Action:</strong> {result.next_step}
-            </div>
-          )}
-          <Link
-            to="/executions"
-            className="inline-flex items-center gap-2 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-xs transition"
-          >
-            <span>View in Executions Log</span>
-            <ArrowRight className="w-3.5 h-3.5" />
-          </Link>
-        </motion.div>
-      </div>
+    const approved = result.action === "APPROVE";
+    return shell(
+      <>
+        <CheckCircle2 className={`mx-auto h-10 w-10 ${approved ? "text-emerald-600" : "text-indigo-600"}`} />
+        <h1 className="text-lg font-extrabold text-slate-900">{approved ? "Approved" : "Changes requested"}</h1>
+        <p className="text-xs text-slate-600">{result.message}</p>
+        <p className="rounded-xl bg-slate-50 p-3 text-xs text-slate-600">
+          {approved
+            ? data.publication_time && new Date(data.publication_time) > new Date()
+              ? `It will be written to ${data.target_table} on ${formatInstant(data.publication_time, data.timezone || "UTC", { withZone: true })}.`
+              : `It is being written to ${data.target_table} now.`
+            : "A new version is being written with your feedback. You will get a new review email when it is ready."}
+        </p>
+        <Link to="/executions" className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 text-xs font-bold text-white hover:bg-indigo-700">
+          Open execution history <ArrowRight className="h-3.5 w-3.5" />
+        </Link>
+      </>
     );
   }
 
-  const payload = preview?.payload || {};
-  const isApproveAction = preview?.action === "APPROVE";
+  const tz = data.timezone || "UTC";
+  const closed = !data.valid;
+  const closedReason = data.is_used
+    ? "A decision was already made with this link."
+    : data.is_expired
+    ? "This link has expired."
+    : !data.reviewable
+    ? `This draft is no longer waiting for review (the run is ${String(data.execution_status || "").toLowerCase().replace(/_/g, " ")}).`
+    : null;
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 15 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.3 }}
-      className="min-h-screen bg-slate-50 py-12 px-4 sm:px-6"
-    >
-      <div className="max-w-3xl mx-auto space-y-6">
-        {/* Header Info */}
-        <motion.div
-          whileHover={{ y: -2 }}
-          className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs space-y-3"
-        >
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
-            <div>
-              <div className="flex items-center gap-2 mb-1.5">
-                <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold ${
-                  isApproveAction ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-rose-50 text-rose-700 border border-rose-200"
-                }`}>
-                  Action: {preview?.action}
-                </span>
-                <span className="text-xs text-slate-500 font-medium">Version #{preview?.version_number || 1}</span>
+    <div className="min-h-screen bg-slate-50 px-3 py-6 sm:px-6 sm:py-10">
+      <div className="mx-auto max-w-3xl space-y-4">
+        <header className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-xs sm:p-6">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-0.5 text-[11px] font-bold text-indigo-700">Review before publishing</span>
+            <span className="text-xs text-slate-500">Version {data.version_number}</span>
+          </div>
+          <h1 className="text-lg font-extrabold tracking-tight text-slate-900 sm:text-xl">{data.automation_name}</h1>
+          <div className="grid gap-2 text-xs sm:grid-cols-2">
+            <div className="flex items-start gap-2 rounded-xl bg-slate-50 p-3">
+              <Clock className="mt-0.5 h-4 w-4 shrink-0 text-indigo-600" />
+              <div>
+                <p className="font-semibold text-slate-800">{data.publication_time ? formatInstant(data.publication_time, tz, { withZone: true }) : "No publication time"}</p>
+                <p className="text-slate-500">{data.publication_time ? `Publishes ${relativeFromNow(data.publication_time)} into ${data.target_table}` : ""}</p>
               </div>
-              <h2 className="text-xl font-extrabold text-slate-900 tracking-tight">{preview?.automation_name}</h2>
             </div>
-            <div className="text-xs text-slate-500 font-mono flex items-center gap-1.5">
-              <Clock className="w-3.5 h-3.5 text-amber-600" />
-              Deadline: {preview?.scheduled_publication_time ? new Date(preview.scheduled_publication_time).toLocaleString() : "Immediate"}
+            <div className="flex items-start gap-2 rounded-xl bg-slate-50 p-3">
+              <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
+              <p className="text-slate-600">{POLICY_TEXT[data.timeout_policy] ?? POLICY_TEXT.KEEP_DRAFT} This link works once and expires {formatInstant(data.expires_at, tz)}.</p>
             </div>
           </div>
+          {data.rejection_feedback && (
+            <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">Rewritten after feedback: “{data.rejection_feedback}”</p>
+          )}
+        </header>
 
-          <div className="flex items-center gap-2 text-xs text-slate-500">
-            <ShieldCheck className="w-4 h-4 text-emerald-600" />
-            <span>Single-use cryptographic HMAC token valid until {new Date(preview?.expires_at).toLocaleString()}</span>
+        {closed && closedReason && (
+          <div role="status" className="flex items-start gap-2 rounded-xl border border-slate-300 bg-white p-3.5 text-xs text-slate-700">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-slate-500" />
+            <span>{closedReason} You can still see the content below.</span>
           </div>
-        </motion.div>
+        )}
 
-        {/* Content Preview */}
-        <motion.div
-          whileHover={{ y: -2 }}
-          className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs space-y-4"
-        >
-          <div>
-            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 block mb-1">Generated Draft Payload</span>
-            <h3 className="text-2xl font-extrabold text-slate-900 tracking-tight mb-2">{payload.title}</h3>
-            {payload.excerpt && (
-              <p className="text-xs text-slate-600 italic bg-slate-50/80 p-4 rounded-xl border border-slate-200 leading-relaxed">
-                {payload.excerpt}
-              </p>
+        <section className="rounded-2xl border border-slate-200 bg-white p-3 shadow-xs sm:p-5">
+          <ContentPreview payload={data.content_payload || {}} meta={data.meta} targetTable={data.target_table} timezone={tz} />
+        </section>
+
+        {!closed && (
+          <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-xs sm:p-6">
+            {error && (
+              <div role="alert" className="flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-800">
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /> <span>{error}</span>
+              </div>
             )}
-          </div>
-
-          {payload.content && (
-            <div className="border border-slate-200 bg-slate-50/50 rounded-xl p-5 text-xs text-slate-800 leading-relaxed font-sans whitespace-pre-wrap max-h-96 overflow-y-auto">
-              {payload.content}
-            </div>
-          )}
-        </motion.div>
-
-        {/* Interactive Action Submission */}
-        <motion.div
-          whileHover={{ y: -2 }}
-          className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs space-y-4"
-        >
-          {error && (
-            <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 text-xs flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
-              <span>{error}</span>
-            </div>
-          )}
-
-          {isApproveAction ? (
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
-                <h4 className="text-sm font-bold text-slate-900">Approve Publication</h4>
-                <p className="text-xs text-slate-500 mt-0.5">Locks version #{preview?.version_number || 1} and schedules target database insertion</p>
+                <h2 className="text-sm font-bold text-slate-900">Looks good?</h2>
+                <p className="text-xs text-slate-500">Approving locks exactly this version for publication.</p>
               </div>
-              <motion.button
-                whileHover={{ scale: 1.02 }}
-                whileTap={{ scale: 0.98 }}
-                onClick={() => handleAction("APPROVE")}
-                disabled={isSubmitting}
-                className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition shadow-xs flex items-center gap-2"
-              >
-                {isSubmitting ? (
-                  <>
-                    <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                    <span>Processing Decision...</span>
-                  </>
-                ) : (
-                  <>
-                    <CheckCircle2 className="w-4 h-4" />
-                    <span>Confirm Approval</span>
-                  </>
-                )}
-              </motion.button>
+              <button type="button" onClick={() => act("APPROVE")} disabled={!!submitting} className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-6 py-2.5 text-xs font-bold text-white shadow-xs transition hover:bg-emerald-700 disabled:opacity-60">
+                {submitting === "APPROVE" ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                Approve version {data.version_number}
+              </button>
             </div>
-          ) : (
-            <div className="space-y-4">
-              <div>
-                <h4 className="text-sm font-bold text-slate-900">Reject Draft & Request Regeneration</h4>
-                <p className="text-xs text-slate-500 mt-0.5">Provide feedback. The local model will ingest your notes and regenerate a revised draft.</p>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1.5">Editorial Revision Feedback</label>
-                <textarea
-                  rows={3}
-                  required
-                  value={feedback}
-                  onChange={(e) => setFeedback(e.target.value)}
-                  placeholder="e.g. Please emphasize zero-downtime database strategies and add practical code examples..."
-                  className="w-full bg-slate-50/50 border border-slate-200 rounded-xl p-3 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-rose-500/20 focus:border-rose-600 focus:bg-white transition"
-                />
-              </div>
-
+            <div id="request-changes" className="space-y-2 border-t border-slate-100 pt-4">
+              <label htmlFor="feedback" className="flex items-center gap-1.5 text-sm font-bold text-slate-900"><MessageSquare className="h-4 w-4 text-indigo-600" /> Request changes</label>
+              <p className="text-xs text-slate-500">The AI rewrites it using your notes and sends you a new version to review.</p>
+              <textarea
+                id="feedback"
+                ref={feedbackRef}
+                rows={3}
+                value={feedback}
+                onChange={(e) => setFeedback(e.target.value)}
+                placeholder="e.g. Make the title more specific, add a short example, and choose the Cloud category."
+                className="w-full rounded-xl border border-slate-200 bg-slate-50/50 p-3 text-xs text-slate-900 focus:border-indigo-600 focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+              />
               <div className="flex justify-end">
-                <motion.button
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.98 }}
-                  onClick={() => handleAction("REJECT")}
-                  disabled={isSubmitting || !feedback.trim()}
-                  className="px-6 py-2.5 bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition shadow-xs flex items-center gap-2"
-                >
-                  {isSubmitting ? (
-                    <>
-                      <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                      <span>Submitting Feedback...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Send className="w-4 h-4" />
-                      <span>Reject & Regenerate Version</span>
-                    </>
-                  )}
-                </motion.button>
+                <button type="button" onClick={() => act("REJECT")} disabled={!!submitting} className="inline-flex items-center gap-2 rounded-xl border border-slate-300 bg-white px-5 py-2.5 text-xs font-bold text-slate-800 transition hover:bg-slate-50 disabled:opacity-60">
+                  {submitting === "REJECT" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                  Send feedback and rewrite
+                </button>
               </div>
             </div>
-          )}
-        </motion.div>
+          </section>
+        )}
       </div>
-    </motion.div>
+    </div>
   );
 };

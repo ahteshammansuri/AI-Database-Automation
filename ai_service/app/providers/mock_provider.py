@@ -37,6 +37,9 @@ class MockAIProvider(BaseAIProvider):
         recent_titles: Optional[List[str]] = None,
         **kwargs: Any
     ) -> Dict[str, Any]:
+        if kwargs.get("field_specs"):
+            return self._generate_from_specs(prompt, kwargs["field_specs"], rejection_feedback, recent_titles)
+
         # 1. Extract RAG context passages if present
         rag_passages = []
         rag_match = re.search(r"--- RETRIEVED KNOWLEDGE CONTEXT.*?---\s*(.*?)\s*----------------------------------", prompt, re.DOTALL)
@@ -81,20 +84,14 @@ class MockAIProvider(BaseAIProvider):
         if is_food_topic:
             title = f"The Essential Guide to {topic_display}"
             excerpt = f"A holistic, evidence-based exploration of {topic_display}, focusing on balanced macronutrients, dietary wellness, and daily sustainable habits."
-            banner_img = "https://images.unsplash.com/photo-1498837167922-ddd27525d352?w=1200&auto=format&fit=crop&q=80"
-            meta_img = "https://images.unsplash.com/photo-1540420773420-3366772f4999?w=800&auto=format&fit=crop&q=80"
             keywords = "healthy diet, nutrition, meal planning, dietary habits, wellness, healthy living"
         elif is_tech_topic:
             title = f"Deep Dive: {topic_display}"
             excerpt = f"An in-depth exploration of {topic_display}, examining architecture patterns, performance considerations, and automated workflows."
-            banner_img = "https://images.unsplash.com/photo-1518770660439-4636190af475?w=1200&auto=format&fit=crop&q=80"
-            meta_img = "https://images.unsplash.com/photo-1451187580459-43490279c0fa?w=800&auto=format&fit=crop&q=80"
             keywords = "database, automation, mysql, ai, devops, software architecture"
         else:
             title = f"Comprehensive Insights: {topic_display}"
             excerpt = f"An insightful analysis examining key trends, practical frameworks, and strategic guidance for {topic_display}."
-            banner_img = "https://images.unsplash.com/photo-1486312338219-ce68d2c6f44d?w=1200&auto=format&fit=crop&q=80"
-            meta_img = "https://images.unsplash.com/photo-1499750310107-5fef28a66643?w=800&auto=format&fit=crop&q=80"
             keywords = f"{raw_topic.lower()}, insights, analysis, strategy, best practices"
 
         if rejection_feedback:
@@ -157,10 +154,9 @@ By adhering to these actionable insights, you create a sustainable and highly ef
                 result[field] = keywords
             elif lower_field == "deleted_at":
                 result[field] = None
-            elif re.search(r"(banner)", lower_field):
-                result[field] = banner_img
-            elif re.search(r"(meta_img|thumbnail|cover|photo|image|avatar)", lower_field):
-                result[field] = meta_img
+            elif re.search(r"(banner|meta_img|thumbnail|cover|photo|image|avatar)", lower_field):
+                # Images come from the image pipeline, never from the text model.
+                continue
             elif lower_field.endswith("_id") or lower_field == "id" or lower_field in ["category_id", "author_id", "user_id"]:
                 if relation_catalog and field in relation_catalog and relation_catalog[field].get("values"):
                     result[field] = relation_catalog[field]["values"][0]
@@ -184,6 +180,70 @@ By adhering to these actionable insights, you create a sustainable and highly ef
                     result[field] = result[field][:max_len]
 
         return result
+
+    def _generate_from_specs(
+        self,
+        prompt: str,
+        specs: List[Dict[str, Any]],
+        rejection_feedback: Optional[str],
+        recent_titles: Optional[List[str]],
+    ) -> Dict[str, Any]:
+        """Deterministic, clearly synthetic values that honour the field contract (offline dev and tests)."""
+        cleaned = re.sub(r"--- RETRIEVED KNOWLEDGE CONTEXT.*?----------------------------------", "", prompt, flags=re.DOTALL)
+        m = re.search(r"Topic and direction:\s*([^\n]+)", cleaned, re.IGNORECASE) or re.search(r"topic:\s*([^\n]+)", cleaned, re.IGNORECASE)
+        topic = (m.group(1) if m else cleaned.strip().split("\n")[0]).strip().rstrip(".") or "Content Automation"
+        topic = re.sub(r"\s+", " ", topic)[:80]
+        display = " ".join(w[:1].upper() + w[1:] for w in topic.split())
+
+        title = f"{display}: A Practical Guide"
+        if rejection_feedback:
+            title = f"{display}: A Revised Practical Guide"
+        if recent_titles and any(title.lower() == t.lower() for t in recent_titles):
+            title = f"{display}: Lessons From the Field"
+        summary = f"A practical look at {topic.lower()}: what matters, common pitfalls and the steps that work."
+        body = (
+            f"{summary}\n\n## Why it matters\n{display} affects day-to-day decisions. This guide focuses on what you can apply right away.\n\n"
+            f"## Key steps\n1. Define the outcome you want.\n2. Start with the simplest approach that works.\n3. Measure, review and adjust.\n\n"
+            f"## Common pitfalls\n- Skipping the basics\n- Changing too many things at once\n\n## Summary\nSmall, consistent improvements beat big one-off changes."
+        )
+        if rejection_feedback:
+            body += f"\n\n> Revised to address reviewer feedback: {rejection_feedback}"
+        keywords = ", ".join(dict.fromkeys(w.lower() for w in re.findall(r"[A-Za-z]{4,}", topic))) or "guide, practical"
+
+        out: Dict[str, Any] = {}
+        for spec in specs:
+            name = spec.get("name")
+            kind = spec.get("kind", "text")
+            if not name:
+                continue
+            if kind == "title":
+                val: Any = title
+            elif kind == "summary":
+                val = summary
+            elif kind == "body":
+                val = body
+            elif kind == "meta_title":
+                val = title[:60]
+            elif kind == "meta_description":
+                val = summary[:160]
+            elif kind == "keywords":
+                val = keywords
+            elif kind == "relation_label":
+                options = spec.get("options") or []
+                val = options[0] if options else " ".join(display.split()[:2])
+            elif kind == "enum":
+                val = (spec.get("enum_values") or [""])[0]
+            elif kind == "number":
+                val = "1"
+            elif kind == "boolean":
+                val = "true"
+            else:
+                val = display
+            max_len = spec.get("max_length")
+            if max_len and isinstance(val, str) and kind != "body" and len(val) > int(max_len):
+                val = val[: int(max_len)].rstrip()
+            out[name] = val
+        return out
 
     # ------------------------------------------------------------------
     # Agent loop test double. Never selected implicitly: the factory only

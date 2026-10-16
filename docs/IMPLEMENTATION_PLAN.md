@@ -119,3 +119,39 @@ Replaced the keyword-routed Orbit planner with a real observe-act agent. Evidenc
 - AI service: `/v1/ai/agent/decide`, typed `AgentDecision` protocol, Ollama structured chat, bounded repair, tenant-scoped hybrid RAG with versioned product index. No keyword fallbacks.
 - Laravel: `AgentOrchestrator` loop on the `agent` queue, `ToolPolicyGate`, `ToolArgumentValidator`, `ToolRunner` (normalized results and postconditions), `SecretVault`, `RuntimeContextBuilder`, `UiActionCoordinator`. New tables: `agent_tool_calls`, `agent_ui_actions`, `agent_secure_inputs`.
 - Frontend: event-driven `AssistantContext`, acknowledged `actionBridge`, semantic `orbitTargets`, voice-first HUD, masked secure input, single TTS channel with barge-in, articulated SVG Orbit rig.
+
+---
+
+## Automation engine upgrade: relations, images, scheduling, review (2026-10-16)
+
+**Goal.** Make every automation (blog, article, news, FAQ, product, any eligible table) correct by construction: relational parents resolved or created in the right order, real context-aware images, a precise schedule (one-time / daily / weekly with start and end dates, timezone, 15-minute generation gap), a detailed review email, and rendered previews everywhere.
+
+**Existing work found before starting** (kept and built on): `SafeDatabaseExecutor` (transactional insert, FK resolution, idempotency), `RelationshipResolverService`, `MediaService` (magic-byte validation, per-user dedup), fair-queue scheduler with lease recovery, signed one-time approval tokens, Orbit surfaces on the builder.
+
+**Defects found and fixed in this slice**
+- WEEKLY schedules ran every day; ONE_TIME never finished and re-ran daily when no start date was set; no end date existed.
+- Lead time was 30 minutes; the product rule is now a 15-minute minimum, publication strictly after generation.
+- An unresolvable NOT NULL foreign key silently fell back to ID `1` (wrong parent). Parent rows were created without the parent's other required columns.
+- Image columns were filled with hardcoded stock-photo URLs (AI service, executor and preview), i.e. fabricated content written to customer tables.
+- Ollama generation was capped at ~450 tokens and invented filler text ("Healthy Dietary Practices…", FK = 1) when the model omitted a field.
+- Manual "schedule for later" parsed the browser's local time as UTC.
+- Approval email was a plain-text link and was recorded as sent even when the transport failed.
+
+| # | Slice | Status |
+|---|---|---|
+| 1 | `ScheduleCalculator` (occurrences, next run, completion), scheduler rewrite, end date / weekdays / completion columns, 15-min gap, occupancy API | DONE (tested) |
+| 2 | Field plan from live schema: AI text, AI-chosen parent (reuse or create), fixed parent, AI image, slug, timestamps; honest AI output validation | DONE (tested) |
+| 3 | Parent-row creation fills the parent's required columns; never falls back to a guessed ID; blocked/read-only/secret guards | DONE (tested) |
+| 4 | AI service: field specs, no fabricated defaults, bigger budget, repair pass; `/v1/ai/generate-image` (OpenAI, Gemini, local designed cover) | DONE (tested) |
+| 5 | Dry-run write plan (read-only) used by preview, email and review page | DONE (tested) |
+| 6 | HTML review email with rendered content, write plan, schedule and timeout policy; honest delivery status | DONE (tested) |
+| 7 | Frontend: custom date / time / timezone pickers, schedule calendar with existing runs, rendered content preview, builder steps 2–5, manual publish, execution history, approvals, mobile navigation drawer | DONE (typecheck, lint, build, headless screenshots at 390px and 1280px) |
+| 8 | Tests, docs | DONE |
+
+
+**Known limitations / open decisions**
+- Connection `access_mode` is not applied to automations (ADR-010 keeps automations on eligibility tiers). Decide whether automations should require `read_write`.
+- Without an OpenAI/Gemini key, images are locally designed covers (title + category), not AI paintings. Ollama image models are not used.
+- On a CPU-only machine a full article from a 3B local model can take several minutes; generation runs in the background, and the preview shows a live timer.
+- Many-to-many links (e.g. tags) are still only handled for the `posts`/`tags`/`post_tags` naming convention.
+- Existing tests that target a MySQL on port 3308 (`demo_blog_cms`) still fail when that database is not running; the new suites use the fixture container on 3317 and skip cleanly without it.

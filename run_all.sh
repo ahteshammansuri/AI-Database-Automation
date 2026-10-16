@@ -29,6 +29,10 @@ fuser -k 8000/tcp 8001/tcp 5173/tcp 8080/tcp 2>/dev/null || true
 pkill -f "artisan (queue:work|schedule:work|reverb:start)" 2>/dev/null || true
 sleep 0.5
 
+# Generated images are stored on the platform and must be reachable at a public URL.
+export MEDIA_PUBLIC_URL="${MEDIA_PUBLIC_URL:-http://127.0.0.1:8000}"
+(cd "$DIR/laravel" && { [ -e public/storage ] || php artisan storage:link >/dev/null 2>&1; }) || true
+
 # 1. Start Python AI Microservice
 echo "[+] Starting Python AI Microservice on http://127.0.0.1:8001..."
 "$DIR/.venv/bin/python" -m uvicorn ai_service.app.main:app --host 127.0.0.1 --port 8001 --reload &

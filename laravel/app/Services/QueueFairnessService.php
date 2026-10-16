@@ -6,10 +6,11 @@ use App\Models\Automation;
 use App\Models\AutomationExecution;
 use App\Jobs\GenerateAutomationContentJob;
 use App\Jobs\PublishAutomationContentJob;
+use App\Services\Automation\ScheduleCalculator;
+use Carbon\CarbonImmutable;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
-use Carbon\Carbon;
 
 class QueueFairnessService
 {
@@ -19,25 +20,34 @@ class QueueFairnessService
     public const DEFAULT_TENANT_CONCURRENCY_CAP = 3;
 
     /**
-     * Fair round-robin dispatch across tenants for automations due in the same cohort.
+     * Fair round-robin dispatch across tenants for runs due in the same cohort.
+     *
+     * Each item is either ['automation' => Automation, 'occurrence' => array] (from the
+     * ScheduleCalculator) or a bare Automation, in which case today's local occurrence is used.
      */
-    public function dispatchDueCohort(Collection $dueAutomations, int $concurrencyCap = self::DEFAULT_TENANT_CONCURRENCY_CAP): array
+    public function dispatchDueCohort(Collection $dueItems, int $concurrencyCap = self::DEFAULT_TENANT_CONCURRENCY_CAP): array
     {
-        if ($dueAutomations->isEmpty()) {
+        if ($dueItems->isEmpty()) {
             return ['dispatched' => 0, 'queued' => 0];
         }
 
-        // 1. Group automations by tenant (user_id)
-        $tenants = $dueAutomations->groupBy('user_id');
+        $calculator = app(ScheduleCalculator::class);
+        $items = $dueItems->map(function ($item) use ($calculator) {
+            if ($item instanceof Automation) {
+                $today = CarbonImmutable::now($calculator->timezone($item))->toDateString();
+                return ['automation' => $item, 'occurrence' => $calculator->occurrenceOn($item, $today)];
+            }
+            return $item;
+        })->values();
 
-        // 2. Interleave across tenants using strict round-robin
+        // 1. Group by tenant (user_id) and 2. interleave with strict round-robin
+        $tenants = $items->groupBy(fn($i) => $i['automation']->user_id);
         $interleaved = [];
         $maxItems = $tenants->map(fn($group) => $group->count())->max() ?: 0;
-
         for ($i = 0; $i < $maxItems; $i++) {
-            foreach ($tenants as $userId => $userAutomations) {
-                if (isset($userAutomations[$i])) {
-                    $interleaved[] = $userAutomations[$i];
+            foreach ($tenants as $group) {
+                if (isset($group[$i])) {
+                    $interleaved[] = $group[$i];
                 }
             }
         }
@@ -45,92 +55,114 @@ class QueueFairnessService
         $dispatchedCount = 0;
         $queuedCount = 0;
 
-        // 3. Process interleaved jobs with per-tenant concurrency checks
-        foreach ($interleaved as $index => $automation) {
-            $userTz = $automation->timezone ?: 'UTC';
-            if ($userTz === 'Asia/Calcutta') {
-                $userTz = 'Asia/Kolkata';
-            }
-            try {
-                $nowInUserTz = Carbon::now($userTz);
-            } catch (\Throwable) {
-                $userTz = 'UTC';
-                $nowInUserTz = Carbon::now('UTC');
-            }
-            $todayDate = $nowInUserTz->toDateString();
+        // 3. Create one execution per occurrence with per-tenant concurrency checks
+        foreach ($interleaved as $index => $item) {
+            $automation = $item['automation'];
+            $occ = $item['occurrence'];
+            $runDate = $occ['run_date'];
+            $idempotencyKey = "auto_{$automation->id}_{$runDate}_gen";
 
-            $idempotencyKey = "auto_{$automation->id}_{$todayDate}_gen";
-
-            // Enforce database-level idempotency
             if (AutomationExecution::where('idempotency_key', $idempotencyKey)->exists()) {
                 continue;
             }
 
-            // Concurrency lock to prevent distributed race conditions
-            $lockKey = "auto_sched_lock_{$automation->id}_{$todayDate}";
-            $lock = Cache::lock($lockKey, 30);
+            $lock = Cache::lock("auto_sched_lock_{$automation->id}_{$runDate}", 30);
+            if (!$lock->get()) {
+                continue;
+            }
 
-            if ($lock->get()) {
-                try {
-                    // Double check inside distributed lock
-                    if (AutomationExecution::where('idempotency_key', $idempotencyKey)->exists()) {
-                        continue;
-                    }
-
-                    $genTimeToday = Carbon::parse("{$todayDate} {$automation->generation_time}", $userTz);
-                    $pubTimeToday = Carbon::parse("{$todayDate} {$automation->publication_time}", $userTz)->utc();
-                    if ($pubTimeToday->lessThanOrEqualTo($genTimeToday->utc())) {
-                        $pubTimeToday = $pubTimeToday->addDay();
-                    }
-
-                    // Check active running jobs for this tenant
-                    $activeTenantJobs = AutomationExecution::where('user_id', $automation->user_id)
-                        ->whereIn('status', ['RUNNING', 'GENERATING', 'PUBLISHING'])
-                        ->count();
-
-                    $isImmediate = $activeTenantJobs < $concurrencyCap;
-
-                    $execution = AutomationExecution::create([
-                        'user_id' => $automation->user_id,
-                        'automation_id' => $automation->id,
-                        'status' => 'QUEUED',
-                        'idempotency_key' => $idempotencyKey,
-                        'publication_time' => $pubTimeToday,
-                        'max_retries' => 3,
-                        'retry_count' => 0,
-                    ]);
-
-                    $execution->addTimelineEvent(
-                        'SCHEDULED_FAIR_DISPATCH',
-                        "Dispatched in due cohort via tenant round-robin (Slot #{$index}). Active tenant workers: {$activeTenantJobs}/{$concurrencyCap}.",
-                        [
-                            'timezone' => $userTz,
-                            'publication_time' => $pubTimeToday->toIso8601String(),
-                            'round_robin_index' => $index,
-                            'immediate' => $isImmediate,
-                        ]
-                    );
-
-                    LiveEventService::publish($automation->user_id, 'execution.created', [
-                        'execution_id' => $execution->id,
-                        'automation_id' => $automation->id,
-                        'status' => 'QUEUED',
-                        'publication_time' => $pubTimeToday->toIso8601String(),
-                    ], 'AutomationExecution', (string) $execution->id);
-
-                    if ($isImmediate) {
-                        GenerateAutomationContentJob::dispatch($execution->id);
-                        $dispatchedCount++;
-                    } else {
-                        $queuedCount++;
-                    }
-                } finally {
-                    $lock->release();
+            try {
+                if (AutomationExecution::where('idempotency_key', $idempotencyKey)->exists()) {
+                    continue;
                 }
+
+                $activeTenantJobs = AutomationExecution::where('user_id', $automation->user_id)
+                    ->whereIn('status', ['RUNNING', 'GENERATING', 'PUBLISHING'])
+                    ->count();
+                $isImmediate = $activeTenantJobs < $concurrencyCap;
+
+                $execution = AutomationExecution::create([
+                    'user_id' => $automation->user_id,
+                    'automation_id' => $automation->id,
+                    'status' => 'QUEUED',
+                    'trigger_type' => 'SCHEDULE',
+                    'occurrence_date' => $runDate,
+                    'scheduled_generation_at' => $occ['generation_at'],
+                    'idempotency_key' => $idempotencyKey,
+                    'publication_time' => $occ['publication_at'],
+                    'max_retries' => 3,
+                    'retry_count' => 0,
+                ]);
+
+                $tz = $occ['timezone'];
+                $execution->addTimelineEvent(
+                    'SCHEDULED_FAIR_DISPATCH',
+                    "Scheduled run for {$runDate}: generation at {$occ['generation_at']->setTimezone($tz)->format('H:i')}, publication at {$occ['publication_at']->setTimezone($tz)->format('D j M H:i')} ({$tz}). Queue slot #{$index}; active tenant workers {$activeTenantJobs}/{$concurrencyCap}.",
+                    [
+                        'timezone' => $tz,
+                        'run_date' => $runDate,
+                        'generation_at' => $occ['generation_at']->toIso8601String(),
+                        'publication_time' => $occ['publication_at']->toIso8601String(),
+                        'round_robin_index' => $index,
+                        'immediate' => $isImmediate,
+                    ]
+                );
+
+                LiveEventService::publish($automation->user_id, 'execution.created', [
+                    'execution_id' => $execution->id,
+                    'automation_id' => $automation->id,
+                    'status' => 'QUEUED',
+                    'publication_time' => $occ['publication_at']->toIso8601String(),
+                ], 'AutomationExecution', (string) $execution->id);
+
+                if ($isImmediate) {
+                    // The lease marks "job handed to the queue" so the waiting-run sweep never dispatches it twice.
+                    $execution->update(['lease_expires_at' => now()->addMinutes(15)]);
+                    GenerateAutomationContentJob::dispatch($execution->id);
+                    $dispatchedCount++;
+                } else {
+                    $queuedCount++;
+                }
+            } finally {
+                $lock->release();
             }
         }
 
         return ['dispatched' => $dispatchedCount, 'queued' => $queuedCount];
+    }
+
+    /**
+     * Dispatch scheduled runs that were held back by the per-tenant concurrency cap, oldest first,
+     * once that tenant has free capacity. Runs already handed to the queue carry a lease and are skipped.
+     */
+    public function dispatchWaitingRuns(int $concurrencyCap = self::DEFAULT_TENANT_CONCURRENCY_CAP): int
+    {
+        $waiting = AutomationExecution::where('status', 'QUEUED')
+            ->whereNull('lease_expires_at')
+            ->orderBy('id')
+            ->limit(200)
+            ->get()
+            ->groupBy('user_id');
+
+        $dispatched = 0;
+        foreach ($waiting as $userId => $runs) {
+            $active = AutomationExecution::where('user_id', $userId)
+                ->whereIn('status', ['RUNNING', 'GENERATING', 'PUBLISHING'])
+                ->count();
+            $free = max(0, $concurrencyCap - $active);
+            foreach ($runs->take($free) as $run) {
+                $claimed = AutomationExecution::where('id', $run->id)
+                    ->where('status', 'QUEUED')
+                    ->whereNull('lease_expires_at')
+                    ->update(['lease_expires_at' => now()->addMinutes(15)]);
+                if ($claimed) {
+                    GenerateAutomationContentJob::dispatch($run->id);
+                    $dispatched++;
+                }
+            }
+        }
+
+        return $dispatched;
     }
 
     /**
@@ -156,9 +188,11 @@ class QueueFairnessService
 
                     if ($fresh->retry_count < $fresh->max_retries) {
                         $newAttempt = $fresh->retry_count + 1;
+                        // A stuck publish is retried as a publish (idempotent), never re-generated.
+                        $wasPublishing = $fresh->status === 'PUBLISHING';
                         $fresh->update([
                             'retry_count' => $newAttempt,
-                            'status' => 'QUEUED',
+                            'status' => $wasPublishing ? 'PUBLISHING' : 'QUEUED',
                             'lease_expires_at' => now()->addMinutes($leaseTimeoutMinutes),
                         ]);
 
@@ -170,11 +204,11 @@ class QueueFairnessService
 
                         LiveEventService::publish($fresh->user_id, 'execution.stage_changed', [
                             'execution_id' => $fresh->id,
-                            'status' => 'QUEUED',
+                            'status' => $fresh->status,
                             'recovered' => true,
                         ], 'AutomationExecution', (string) $fresh->id);
 
-                        if ($fresh->status === 'PUBLISHING') {
+                        if ($wasPublishing) {
                             PublishAutomationContentJob::dispatch($fresh->id);
                         } else {
                             GenerateAutomationContentJob::dispatch($fresh->id);

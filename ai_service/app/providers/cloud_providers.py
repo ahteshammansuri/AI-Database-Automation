@@ -18,6 +18,16 @@ def _clean_json_output(raw_text: str) -> str:
     return cleaned.strip()
 
 
+def _structured_system(system_prompt: str, target_table: str, required_fields: List[str], field_contract: Optional[str]) -> str:
+    """System prompt for record generation: the precise field contract when the control plane sent one."""
+    if field_contract:
+        return f"{system_prompt}\nYou are writing one new record for the '{target_table}' table.\n{field_contract}"
+    return (
+        f"{system_prompt}\nTarget table: '{target_table}'. You MUST respond with ONLY a valid JSON object "
+        f"matching these fields: {', '.join(required_fields)}."
+    )
+
+
 def _schema_instruction(json_schema: Dict[str, Any]) -> str:
     return (
         "\n\nRespond with ONLY one JSON object (no prose, no markdown) that validates against this JSON schema:\n"
@@ -171,14 +181,17 @@ class OpenAIProvider(BaseAIProvider):
         system_prompt: str,
         target_table: str,
         required_fields: List[str],
-        rejection_feedback: Optional[str] = None
+        rejection_feedback: Optional[str] = None,
+        **kwargs: Any
     ) -> Dict[str, Any]:
         if not self.api_key:
             raise ValueError("OpenAI API key is not configured for this user workspace.")
 
-        full_system = f"{system_prompt}\nTarget table: '{target_table}'. You MUST respond with ONLY a valid JSON object matching these fields: {', '.join(required_fields)}."
+        full_system = _structured_system(system_prompt, target_table, required_fields, kwargs.get("field_contract"))
         if rejection_feedback:
             full_system += f"\nIMPORTANT: Prior version was rejected with feedback: '{rejection_feedback}'. Address this thoroughly."
+        if kwargs.get("recent_titles"):
+            full_system += "\nDo not repeat or closely imitate these recent titles: " + "; ".join(kwargs["recent_titles"][:10]) + "."
 
         payload = {
             "model": self.model_name,
@@ -190,7 +203,7 @@ class OpenAIProvider(BaseAIProvider):
             "temperature": 0.7
         }
 
-        with httpx.Client(timeout=45.0) as client:
+        with httpx.Client(timeout=180.0) as client:
             res = client.post(
                 "https://api.openai.com/v1/chat/completions",
                 headers={
@@ -324,15 +337,19 @@ class GeminiProvider(BaseAIProvider):
         system_prompt: str,
         target_table: str,
         required_fields: List[str],
-        rejection_feedback: Optional[str] = None
+        rejection_feedback: Optional[str] = None,
+        **kwargs: Any
     ) -> Dict[str, Any]:
         if not self.api_key:
             raise ValueError("Gemini API key is not configured for this user workspace.")
 
         full_prompt = (
-            f"{system_prompt}\nTarget table: '{target_table}'. You MUST respond with ONLY a valid JSON object matching these fields: {', '.join(required_fields)}.\n\n"
-            f"User Topic / Prompt: {prompt}"
+            _structured_system(system_prompt, target_table, required_fields, kwargs.get("field_contract"))
+            + f"\n\nUser Topic / Prompt: {prompt}"
         )
+        if kwargs.get("recent_titles"):
+            full_prompt += "\nDo not repeat or closely imitate these recent titles: " + "; ".join(kwargs["recent_titles"][:10]) + "."
+
         if rejection_feedback:
             full_prompt += f"\n\nAddress reviewer feedback: '{rejection_feedback}'."
 
@@ -356,7 +373,7 @@ class GeminiProvider(BaseAIProvider):
                     f"https://generativelanguage.googleapis.com/v1beta/models/{mod}:generateContent",
                     {"Content-Type": "application/json", "x-goog-api-key": self.api_key},
                     payload,
-                    45.0,
+                    180.0,
                     f"Gemini ({mod})",
                 )
                 candidates_list = data.get("candidates", [])
@@ -465,25 +482,28 @@ class ClaudeProvider(BaseAIProvider):
         system_prompt: str,
         target_table: str,
         required_fields: List[str],
-        rejection_feedback: Optional[str] = None
+        rejection_feedback: Optional[str] = None,
+        **kwargs: Any
     ) -> Dict[str, Any]:
         if not self.api_key:
             raise ValueError("Anthropic API key is not configured for this user workspace.")
 
-        full_system = f"{system_prompt}\nTarget table: '{target_table}'. You MUST respond with ONLY a valid JSON object matching these fields: {', '.join(required_fields)}."
+        full_system = _structured_system(system_prompt, target_table, required_fields, kwargs.get("field_contract"))
         if rejection_feedback:
             full_system += f"\nIMPORTANT: Prior version was rejected with feedback: '{rejection_feedback}'. Address this thoroughly."
+        if kwargs.get("recent_titles"):
+            full_system += "\nDo not repeat or closely imitate these recent titles: " + "; ".join(kwargs["recent_titles"][:10]) + "."
 
         payload = {
             "model": self.model_name,
-            "max_tokens": 2048,
+            "max_tokens": max(2048, int(kwargs.get("max_output_tokens") or 0)),
             "system": full_system,
             "messages": [
                 {"role": "user", "content": f"{prompt}\nReturn JSON object with keys: {', '.join(required_fields)}."}
             ]
         }
 
-        with httpx.Client(timeout=45.0) as client:
+        with httpx.Client(timeout=180.0) as client:
             res = client.post(
                 "https://api.anthropic.com/v1/messages",
                 headers={

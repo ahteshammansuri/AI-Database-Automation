@@ -268,3 +268,40 @@ The old `/v1/ai/agent/plan`, `/evaluate-correction` and `/synthesize-response` e
 | `POST /api/agent/tasks/{id}/continue` | `surface`, `field` (a `secret` field of that surface), optional `page_context`. **Secret values are rejected (422).** | **202**: queues the next turn with the note "I typed the … myself". |
 
 UI actions requested by the agent loop arrive as `agent.ui_action` events: `surface.go_to_page`, `surface.open_form`, `surface.read_screen`, `surface.fill_fields`, `surface.choose_option`, `surface.press`, `surface.ask_secret_in_form`, `surface.show_me`. The browser acknowledges each one via `POST /api/agent/ui-actions/{correlationId}/ack` with `{status, result}`, where `result` may contain `success`, `message`, `resource{type,id}`, `missing_required`, `fields`, `candidates` and `data`. The server sanitises it (secret-like keys dropped, size capped).
+
+
+---
+
+## Automation engine endpoints (2026-10-16)
+
+All require a Sanctum bearer token and only see the caller's own connections and automations (other users get 404).
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/api/automations/field-plan` | `{connection_id, target_table}` → every writable column with `kind`, constraints, `relation` (referenced table, label column, existing count and names, `can_create`, `protected`, parent's required columns) and a `suggested` mapping; plus the image provider that would be used. |
+| POST | `/api/automations/preview` | Full draft config → `{payload, meta, events, schedule, schedule_errors}`. Runs the real pipeline (text, parent decisions, images, read-only write plan). Never writes to the customer DB. Throttled 20/min. |
+| POST | `/api/automations/schedule-preview` | `{schedule_type, start_date, end_date, weekly_days, generation_time, publication_time, timezone}` → `{valid, errors, values, summary, occurrences}`. |
+| GET | `/api/automations/schedule-occupancy?from&to&timezone&exclude_id` | Per local date: other automations' runs, scheduled manual posts and published runs (max 93 days). |
+| POST | `/api/automations` / PUT `/api/automations/{id}` | Create/update. Validates the schedule (15-minute gap, dates, weekdays, timezone, future run) and the mappings against the live schema. Responses include `schedule_summary`. |
+| POST | `/api/automations/manual-publish` | `dry_run: true` returns the write plan only; otherwise publishes now or schedules for `scheduled_at` (ISO-8601 with offset) or `scheduled_time` + `timezone`. `relation_policies: {column: CREATE_IF_MISSING}` allows creating a named parent. Always plans first; refuses when the plan has errors. |
+| POST | `/api/media/upload` | Multipart `file` (JPEG/PNG/WebP/GIF ≤ 10 MB) → `{id, url, path}`. Throttled 30/min. |
+
+### Field mapping format
+```json
+{ "field_name": "category_id", "mapping_type": "AI_GENERATED",
+  "relation_config": { "referenced_table": "categories", "referenced_column": "id", "creation_policy": "CREATE_IF_MISSING" } }
+```
+`mapping_type`: `AI_GENERATED` (text, image, or an AI-chosen parent depending on the column), `FIXED_VALUE`, `RELATIONAL_LOOKUP` (fixed parent id), `DERIVED_SLUG`, `RUNTIME_NOW`, `LEAVE_EMPTY`, `DB_DEFAULT`.
+
+### Automation fields added
+`end_date`, `weekly_days` (ISO 1–7), `schedule_anchor_at`, `completed_at`, `generation_options` (`tone`, `length` short|medium|long, `content_format` markdown|html, `image_provider` auto|openai|gemini|local, `image_style`, `image_model`). `schedule_type` may be `NONE` for manual-publishing containers.
+
+### Content version `meta`
+`fields` (column/kind/source), `relations` (column, table, entity, label, decision reuse|create|fixed), `relation_options` (used verbatim at publish), `media` (column, role, url, provider, model, size, prompt, fallback_reason), `write_plan` (`steps` in order, `row`, `columns`, `issues`, `can_publish`), `runtime_now`, `rag`, `provider`, `model`, `issues`.
+
+### Public review endpoint
+`GET /api/approvals/{token}` now also returns `meta`, `reviewable`, `execution_status`, `timezone`, `timeout_policy`. Approve/reject are refused (422) once the run has finished or the version is no longer pending.
+
+### AI service additions
+- `POST /v1/ai/generate` accepts `field_specs` (name, kind, max_length, enum_values, options, allow_new, entity, required, instructions), `length` and `max_output_tokens`; returns `missing_fields` instead of inventing values (one repair pass first).
+- `POST /v1/ai/generate-image` `{provider: openai|gemini|local, api_key?, model?, prompt, width, height, title?, label?, seed?}` → `{image_base64, mime_type, width, height, provider_used, model_used}`. Output is always re-encoded to the exact size.

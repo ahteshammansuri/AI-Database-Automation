@@ -430,7 +430,8 @@ MD;
             }
 
             // 2. Pick best label candidate
-            $labelCandidates = ['name', 'title', 'label', 'display_name', 'username', 'slug', 'category_name', 'topic', 'email', 'description'];
+            // Never label records by e-mail/phone (PII) or secret columns.
+            $labelCandidates = ['name', 'title', 'label', 'display_name', 'category_name', 'tag_name', 'topic', 'username', 'slug', 'description'];
             $labelCol = $pkCol;
             foreach ($labelCandidates as $cand) {
                 if (in_array($cand, $allCols, true)) {

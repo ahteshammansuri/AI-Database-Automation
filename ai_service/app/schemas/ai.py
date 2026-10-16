@@ -15,6 +15,12 @@ class GenerateRequest(BaseModel):
     schema_constraints: Optional[Dict[str, Any]] = Field(default=None, description="Per-column schema constraints (types, max_length, enums)")
     relation_catalog: Optional[Dict[str, Any]] = Field(default=None, description="Allowed reference values for FK columns")
     recent_titles: Optional[List[str]] = Field(default=None, description="Recent published titles to prevent duplicates")
+    field_specs: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="Per-field contract built by the control plane from the live schema: name, kind, max_length, enum_values, options, allow_new, entity, required, instructions",
+    )
+    length: Optional[str] = Field(default="medium", description="Body length: short, medium or long")
+    max_output_tokens: Optional[int] = Field(default=None, description="Override for the output token budget")
 
 
 class GenerateResponse(BaseModel):
@@ -24,6 +30,7 @@ class GenerateResponse(BaseModel):
     latency_seconds: float
     data: Dict[str, Any]
     error: Optional[str] = None
+    missing_fields: List[str] = Field(default_factory=list, description="Required fields the model did not return")
 
 
 class NoveltyCheckRequest(BaseModel):

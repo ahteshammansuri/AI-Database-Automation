@@ -7,40 +7,39 @@ use App\Models\DbConnection;
 use App\Models\Automation;
 use App\Models\AutomationExecution;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\Concerns\UsesAutomationFixtureDatabase;
 use Tests\TestCase;
 
 class AutomationLeadTimeAndFieldAssistTest extends TestCase
 {
-    use RefreshDatabase;
+    use RefreshDatabase, UsesAutomationFixtureDatabase;
 
-    public function test_automation_creation_enforces_minimum_30_minute_lead_time()
+    protected function tearDown(): void
+    {
+        $this->dropFixtureBlogDatabase();
+        parent::tearDown();
+    }
+
+    public function test_automation_creation_enforces_minimum_15_minute_lead_time()
     {
         $user = User::factory()->create();
+        $connection = $this->fixtureConnection($user, $this->createFixtureBlogDatabase());
 
-        $connection = DbConnection::create([
-            'user_id' => $user->id,
-            'name' => 'Demo Connection',
-            'db_type' => 'mysql',
-            'host' => '127.0.0.1',
-            'port' => 3306,
-            'database_name' => 'demo_db',
-            'username' => 'root',
-            'encrypted_password' => 'secret',
-            'ssl_mode' => 'prefer',
-        ]);
-
-        // Attempt creation with only a 15-minute planning gap (08:45 -> 09:00)
+        // 10-minute gap (08:50 -> 09:00) is below the 15-minute minimum
         $invalidPayload = [
             'name' => 'Tight Schedule Pipeline',
             'connection_id' => $connection->id,
             'target_table' => 'posts',
             'operation_mode' => 'AI_CREATE',
             'schedule_type' => 'DAILY',
-            'generation_time' => '08:45',
+            'generation_time' => '08:50',
             'publication_time' => '09:00',
             'timezone' => 'UTC',
             'field_mappings' => [
                 ['field_name' => 'title', 'mapping_type' => 'AI_GENERATED'],
+                ['field_name' => 'slug', 'mapping_type' => 'DERIVED_SLUG', 'source_field' => 'title'],
+                ['field_name' => 'content', 'mapping_type' => 'AI_GENERATED'],
+                ['field_name' => 'category_id', 'mapping_type' => 'RELATIONAL_LOOKUP', 'fixed_value' => 1],
             ],
         ];
 
@@ -48,10 +47,10 @@ class AutomationLeadTimeAndFieldAssistTest extends TestCase
         $response->assertStatus(422);
         $response->assertJsonValidationErrors(['publication_time']);
 
-        // Valid creation with safe 60-minute planning gap (08:00 -> 09:00)
+        // Exactly 15 minutes is allowed (08:45 -> 09:00)
         $validPayload = array_merge($invalidPayload, [
             'name' => 'Safe Schedule Pipeline',
-            'generation_time' => '08:00',
+            'generation_time' => '08:45',
             'publication_time' => '09:00',
         ]);
 
@@ -60,7 +59,7 @@ class AutomationLeadTimeAndFieldAssistTest extends TestCase
         $this->assertDatabaseHas('automations', [
             'user_id' => $user->id,
             'name' => 'Safe Schedule Pipeline',
-            'generation_time' => '08:00',
+            'generation_time' => '08:45',
             'publication_time' => '09:00',
         ]);
     }
@@ -68,20 +67,7 @@ class AutomationLeadTimeAndFieldAssistTest extends TestCase
     public function test_future_scheduled_manual_publish_holds_in_approved_state()
     {
         $user = User::factory()->create();
-
-        $connection = DbConnection::create([
-            'user_id' => $user->id,
-            'name' => 'Demo Target DB',
-            'db_type' => 'mysql',
-            'host' => '127.0.0.1',
-            'port' => 3306,
-            'database_name' => 'demo_blog_cms',
-            'username' => 'root',
-            'encrypted_password' => 'secret',
-            'ssl_mode' => 'prefer',
-        ]);
-
-        $futureTime = now()->addHours(2)->toIso8601String();
+        $connection = $this->fixtureConnection($user, $this->createFixtureBlogDatabase());
 
         $response = $this->actingAs($user)->postJson('/api/automations/manual-publish', [
             'connection_id' => $connection->id,
@@ -90,9 +76,10 @@ class AutomationLeadTimeAndFieldAssistTest extends TestCase
                 'title' => 'Future Scheduled Article',
                 'slug' => 'future-scheduled-article',
                 'content' => 'Sample body awaiting schedule window',
+                'category_id' => 1,
             ],
             'publish_now' => false,
-            'scheduled_time' => $futureTime,
+            'scheduled_at' => now()->addHours(2)->toIso8601String(),
         ]);
 
         $response->assertStatus(202);
@@ -105,6 +92,8 @@ class AutomationLeadTimeAndFieldAssistTest extends TestCase
             'user_id' => $user->id,
             'status' => 'APPROVED',
         ]);
+        // Nothing is written until the scheduled time
+        $this->assertSame(0, $this->fixtureCount('posts', 'slug = ?', ['future-scheduled-article']));
     }
 
     public function test_inline_ai_field_assist_endpoint()

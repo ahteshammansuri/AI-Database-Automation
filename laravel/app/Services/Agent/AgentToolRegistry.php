@@ -398,7 +398,7 @@ class AgentToolRegistry
                         'field_mappings' => ['type' => 'array'],
                         'schedule_type' => ['type' => 'string', 'description' => 'DAILY, WEEKLY, or ONE_TIME'],
                         'generation_time' => ['type' => 'string', 'description' => 'HH:MM format'],
-                        'publication_time' => ['type' => 'string', 'description' => 'HH:MM format (>= 30m after generation_time)'],
+                        'publication_time' => ['type' => 'string', 'description' => 'HH:MM format (>= 15m after generation_time)'],
                         'timezone' => ['type' => 'string', 'description' => 'IANA timezone, e.g. Asia/Kolkata'],
                         'requires_approval' => ['type' => 'boolean'],
                         'is_active' => ['type' => 'boolean'],
@@ -2275,7 +2275,7 @@ class AgentToolRegistry
         $err = $failed->error_message ?: 'Unknown error occurred during execution.';
         $diag = 'Analysis: ';
         if (str_contains(strtolower($err), 'lead time')) {
-            $diag .= 'Generation lead time was under 30 minutes before publication. Safe fix: adjust publication time to be at least 30 minutes after generation.';
+            $diag .= 'Generation lead time was under 15 minutes before publication. Safe fix: adjust publication time to be at least 15 minutes after generation.';
         } elseif (str_contains(strtolower($err), 'connection')) {
             $diag .= 'Target database was unreachable. Safe fix: verify host, port, firewall rules, and password in Connections.';
         } elseif (str_contains(strtolower($err), 'restricted')) {
@@ -2614,21 +2614,18 @@ class AgentToolRegistry
 
     protected static function validateLeadTime(string $genTime, string $pubTime): array
     {
-        [$gH, $gM] = array_map('intval', explode(':', $genTime));
-        [$pH, $pM] = array_map('intval', explode(':', $pubTime));
-
-        $genMins = $gH * 60 + $gM;
-        $pubMins = $pH * 60 + $pM;
-
-        $diff = $pubMins - $genMins;
-        if ($diff < 0) {
-            $diff += 1440; // Next day
+        $min = \App\Services\Automation\ScheduleCalculator::MIN_GAP_MINUTES;
+        $diff = \App\Services\Automation\ScheduleCalculator::gapMinutes($genTime, $pubTime);
+        if ($diff === null) {
+            return ['valid' => false, 'error' => 'Times must be HH:MM (24-hour).'];
         }
-
-        if ($diff < 30) {
+        if ($diff === 0) {
+            return ['valid' => false, 'error' => "Publication time ({$pubTime}) must be after generation time ({$genTime})."];
+        }
+        if ($diff < $min) {
             return [
                 'valid' => false,
-                'error' => "Publication time ({$pubTime}) must be at least 30 minutes after generation time ({$genTime}) to allow AI draft preparation and review (current gap: {$diff}m).",
+                'error' => "Publication time ({$pubTime}) must be at least {$min} minutes after generation time ({$genTime}) to allow generation and review (current gap: {$diff}m).",
             ];
         }
 

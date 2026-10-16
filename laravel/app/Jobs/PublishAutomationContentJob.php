@@ -19,6 +19,9 @@ class PublishAutomationContentJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
+    public int $timeout = 300;
+    public int $tries = 1;
+
     public function __construct(
         public int $executionId
     ) {}
@@ -33,9 +36,9 @@ class PublishAutomationContentJob implements ShouldQueue
             return;
         }
 
-        // Idempotency check: if already published, skip
-        if ($execution->status === 'PUBLISHED') {
-            Log::info("PublishAutomationContentJob: Execution #{$this->executionId} already published. Skipping.");
+        // Never act on a finished run (published, failed, cancelled, skipped, missed, rejected).
+        if (in_array($execution->status, AutomationExecution::TERMINAL_STATUSES, true)) {
+            Log::info("PublishAutomationContentJob: Execution #{$this->executionId} is already {$execution->status}. Skipping.");
             return;
         }
 
@@ -100,8 +103,9 @@ class PublishAutomationContentJob implements ShouldQueue
             $policy = $automation->safe_deadline_policy ?? 'notify_and_wait';
 
             if ($policy === 'publish_last_valid') {
+                // Only a reviewable, unrejected draft qualifies (never INVALID or superseded versions).
                 $candidate = ContentVersion::where('execution_id', $execution->id)
-                    ->where('status', '!=', 'REJECTED')
+                    ->where('status', 'PENDING_APPROVAL')
                     ->latest('version_number')
                     ->first();
 
@@ -203,25 +207,35 @@ class PublishAutomationContentJob implements ShouldQueue
         ], 'AutomationExecution', (string) $execution->id);
 
         try {
-            // Extract relation options from automation field_mappings
-            $relationOptions = [];
-            if (!empty($automation->field_mappings)) {
-                foreach ($automation->field_mappings as $mapping) {
-                    $fieldName = $mapping['field_name'] ?? null;
+            // Relation policies come from the version that was reviewed, so the write matches the preview.
+            $versionMeta = is_array($version->meta) ? $version->meta : [];
+            $relationOptions = $versionMeta['relation_options'] ?? null;
+            if (!is_array($relationOptions)) {
+                $relationOptions = [];
+                foreach ($automation->field_mappings ?? [] as $mapping) {
+                    $fieldName = is_array($mapping) ? ($mapping['field_name'] ?? null) : null;
                     if ($fieldName && !empty($mapping['relation_config'])) {
                         $relationOptions[$fieldName] = $mapping['relation_config'];
                     }
                 }
             }
+            $relationOptions['idempotency_key'] = "publish_exec_{$execution->id}";
+
+            // "Publication time" columns get the actual moment of writing.
+            $payload = $version->payload;
+            foreach ($versionMeta['runtime_now'] ?? [] as $col) {
+                $payload[$col] = now($connection->data_timezone ?: 'UTC')->format('Y-m-d H:i:s');
+            }
 
             $result = $executor->executeInsert(
                 $connection,
                 $automation->target_table,
-                $version->payload,
+                $payload,
                 $relationOptions
             );
 
-            $result['payload'] = $version->payload;
+            $result['payload'] = $payload;
+            $result['version_number'] = $version->version_number;
             $recordId = (string) ($result['record_id'] ?? 'published');
             $resolutions = $result['relation_resolutions'] ?? [];
             $publishDurationMs = (int) round((microtime(true) - $startTime) * 1000);
@@ -246,7 +260,7 @@ class PublishAutomationContentJob implements ShouldQueue
 
             $execution->addTimelineEvent(
                 'TARGET_TRANSACTION_COMMITTED',
-                "Successfully committed record #{$recordId} to MySQL table '{$automation->target_table}' ({$publishDurationMs}ms).",
+                (!empty($result['idempotent_replayed']) ? "Already written earlier as record #{$recordId}; not inserted again. " : "Inserted record #{$recordId} into `{$automation->target_table}` ({$publishDurationMs}ms)."),
                 [
                     'target_table' => $automation->target_table,
                     'record_id' => $recordId,

@@ -44,6 +44,7 @@ class MediaAsset extends Model
             return $this->path;
         }
 
-        return asset('storage/' . ltrim($this->path, '/'));
+        $base = config("filesystems.disks.{$this->disk}.url") ?: asset('storage');
+        return rtrim($base, '/') . '/' . ltrim($this->path, '/');
     }
 }

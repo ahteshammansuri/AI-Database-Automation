@@ -8,11 +8,17 @@ use App\Models\AutomationExecution;
 use App\Models\DbConnection;
 use App\Models\AuditLog;
 use App\Jobs\GenerateAutomationContentJob;
+use App\Services\Automation\ContentPipeline;
+use App\Services\Automation\FieldPlanBuilder;
+use App\Services\Automation\ImageFieldService;
+use App\Services\Automation\ScheduleCalculator;
 use App\Services\DatabaseSafetyService;
+use App\Services\Data\DataAccessPolicy;
 use App\Models\ContentVersion;
 use App\Services\SafeDatabaseExecutor;
 use App\Services\LiveEventService;
 use App\Models\FieldMapping;
+use Carbon\CarbonImmutable;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Str;
@@ -22,7 +28,8 @@ class AutomationController extends Controller
 {
     public function __construct(
         protected DatabaseSafetyService $safetyService,
-        protected SafeDatabaseExecutor $executor
+        protected SafeDatabaseExecutor $executor,
+        protected ScheduleCalculator $schedule,
     ) {}
 
     public function index(Request $request)
@@ -33,101 +40,199 @@ class AutomationController extends Controller
             ->orderBy('created_at', 'desc')
             ->get();
 
+        $automations->each(fn(Automation $a) => $a->setAttribute('schedule_summary', $a->scheduleSummary()));
+
         return response()->json($automations);
+    }
+
+    /**
+     * Shared validation for create/update. Returns [errors, normalised attributes].
+     */
+    private function validateConfiguration(Request $request, ?Automation $existing = null): array
+    {
+        $rules = [
+            'name' => ($existing ? 'sometimes|' : 'required|') . 'string|max:255',
+            'connection_id' => ($existing ? 'sometimes|integer' : 'required|integer'),
+            'target_table' => ($existing ? 'sometimes|string|max:64' : 'required|string|max:64|regex:/^[A-Za-z0-9_]+$/'),
+            'operation_mode' => ($existing ? 'sometimes|' : 'required|') . 'string|in:AI_CREATE,AI_ENRICH,MANUAL_SCHEDULE',
+            'field_mappings' => ($existing ? 'sometimes|' : 'required|') . 'array|min:1|max:200',
+            'field_mappings.*.field_name' => 'required_with:field_mappings|string|max:64',
+            'field_mappings.*.mapping_type' => 'required_with:field_mappings|string|in:' . implode(',', FieldPlanBuilder::MAPPING_TYPES) . ',RUNTIME_VALUE',
+            'field_mappings.*.instructions' => 'nullable|string|max:500',
+            'ai_provider' => 'sometimes|nullable|string|max:32',
+            'ai_model' => 'sometimes|nullable|string|max:120',
+            'prompt_context' => 'sometimes|nullable|string|max:4000',
+            'generation_options' => 'sometimes|nullable|array',
+            'generation_options.tone' => 'nullable|string|max:200',
+            'generation_options.audience' => 'nullable|string|max:200',
+            'generation_options.content_format' => 'nullable|string|in:markdown,html',
+            'generation_options.length' => 'nullable|string|in:short,medium,long',
+            'generation_options.image_provider' => 'nullable|string|in:' . implode(',', ImageFieldService::PROVIDERS),
+            'generation_options.image_style' => 'nullable|string|max:300',
+            'generation_options.image_model' => 'nullable|string|max:80',
+            'knowledge_document_ids' => 'sometimes|nullable|array',
+            'knowledge_document_ids.*' => 'integer',
+            'schedule_type' => ($existing ? 'sometimes|' : 'required|') . 'string|in:ONE_TIME,DAILY,WEEKLY',
+            'start_date' => 'sometimes|nullable|string',
+            'end_date' => 'sometimes|nullable|string',
+            'weekly_days' => 'sometimes|nullable|array|max:7',
+            'weekly_days.*' => 'integer|min:1|max:7',
+            'generation_time' => ($existing ? 'sometimes|' : 'required|') . 'string',
+            'publication_time' => ($existing ? 'sometimes|' : 'required|') . 'string',
+            'timezone' => 'sometimes|nullable|string|max:64',
+            'requires_approval' => 'sometimes|nullable|boolean',
+            'reviewer_email' => 'sometimes|nullable|email',
+            'timeout_policy' => 'sometimes|nullable|string|in:AUTO_PUBLISH_LATEST,KEEP_DRAFT,CANCEL',
+            'safe_deadline_policy' => 'sometimes|nullable|string|in:skip,publish_last_valid,notify_and_wait',
+            'is_active' => 'sometimes|nullable|boolean',
+        ];
+        $validated = $request->validate($rules);
+        $errors = [];
+
+        // Schedule: validated as a whole whenever any schedule field is present
+        $scheduleKeys = array_intersect(array_keys($validated), Automation::SCHEDULE_FIELDS);
+        if (!$existing || !empty($scheduleKeys)) {
+            $input = [];
+            foreach (Automation::SCHEDULE_FIELDS as $k) {
+                $input[$k] = array_key_exists($k, $validated) ? $validated[$k] : $existing?->{$k};
+            }
+            $input['timezone'] = $input['timezone'] ?: 'UTC';
+            if ($existing && $input['start_date'] instanceof \DateTimeInterface) {
+                $input['start_date'] = $input['start_date']->format('Y-m-d');
+            }
+            $check = $this->schedule->validate($input);
+            $errors = array_merge($errors, array_map(fn($m) => [$m], $check['errors']));
+            foreach ($check['values'] as $k => $v) {
+                $validated[$k] = $v;
+            }
+        }
+
+        // Tone may arrive at the top level from older clients
+        if ($request->filled('tone')) {
+            $validated['generation_options'] = array_merge(['tone' => mb_substr((string) $request->input('tone'), 0, 200)], $validated['generation_options'] ?? []);
+        }
+
+        // Mapping types: accept the legacy RUNTIME_VALUE alias
+        if (isset($validated['field_mappings'])) {
+            $validated['field_mappings'] = array_map(function ($m) {
+                if (($m['mapping_type'] ?? null) === 'RUNTIME_VALUE') {
+                    $m['mapping_type'] = 'DERIVED_SLUG';
+                }
+                return $m;
+            }, $request->input('field_mappings'));
+        }
+
+        return [$errors, $validated];
+    }
+
+    /**
+     * Validate mappings against the live schema (columns exist, no secrets, parents usable).
+     */
+    private function validateAgainstSchema(Automation $draft): array
+    {
+        $connection = $draft->connection;
+        try {
+            $pdo = $connection->createTargetPdo();
+        } catch (\Throwable $e) {
+            return ['field_mappings' => ["Could not reach '{$connection->name}' to check the table: " . Str::limit($e->getMessage(), 160)]];
+        }
+        try {
+            $plan = app(FieldPlanBuilder::class)->build($draft, $connection, $pdo);
+        } catch (\Throwable $e) {
+            return ['target_table' => [$e->getMessage()]];
+        } finally {
+            $pdo = null;
+        }
+        $errors = array_values(array_filter($plan['issues'], fn($i) => $i['level'] === 'error'));
+        return empty($errors) ? [] : ['field_mappings' => array_map(fn($i) => $i['message'], $errors)];
+    }
+
+    private function assertTableAutomatable(DbConnection $connection, string $table): ?string
+    {
+        if (!in_array(strtolower((string) ($connection->db_type ?: 'mysql')), ['mysql', 'mariadb'], true)) {
+            return "Automations can write to MySQL connections only; '{$connection->name}' is {$connection->db_type}.";
+        }
+        if ($this->safetyService->isTableSensitive($table)) {
+            return "Table '{$table}' is restricted (accounts, credentials, payments and similar) and cannot be automated.";
+        }
+        $class = app(DataAccessPolicy::class)->getTableClass($connection, $table);
+        if ($class !== 'writable') {
+            return "Table '{$table}' is {$class} for this connection and cannot be automated.";
+        }
+        return null;
     }
 
     public function store(Request $request)
     {
-        $validated = $request->validate([
-            'name' => 'required|string|max:255',
-            'connection_id' => 'required|integer',
-            'target_table' => 'required|string',
-            'operation_mode' => 'required|string|in:AI_CREATE,AI_ENRICH,MANUAL_SCHEDULE',
-            'field_mappings' => 'required|array',
-            'ai_provider' => 'nullable|string',
-            'ai_model' => 'nullable|string',
-            'prompt_context' => 'nullable|string',
-            'knowledge_document_ids' => 'nullable|array',
-            'schedule_type' => 'required|string|in:ONE_TIME,DAILY,WEEKLY',
-            'start_date' => 'nullable|string',
-            'generation_time' => 'required|string',
-            'publication_time' => 'required|string',
-            'timezone' => 'nullable|string',
-            'requires_approval' => 'nullable|boolean',
-            'reviewer_email' => 'nullable|email',
-            'timeout_policy' => 'nullable|string|in:AUTO_PUBLISH_LATEST,KEEP_DRAFT,CANCEL',
-            'safe_deadline_policy' => 'nullable|string|in:skip,publish_last_valid,notify_and_wait',
-            'is_active' => 'nullable|boolean',
-        ]);
+        [$errors, $validated] = $this->validateConfiguration($request);
 
-        // Enforce 30-minute generation lead-time policy
-        $leadTimeError = $this->validateLeadTime(
-            $validated['generation_time'],
-            $validated['publication_time'],
-            $validated['timezone'] ?? 'UTC'
-        );
-        if ($leadTimeError) {
-            return response()->json([
-                'message' => $leadTimeError,
-                'errors' => [
-                    'publication_time' => [$leadTimeError],
-                ],
-            ], 422);
-        }
-
-        // Verify connection ownership
         $connection = DbConnection::where('user_id', $request->user()->id)
             ->where('id', $validated['connection_id'])
             ->firstOrFail();
 
-        // Safety verification: cannot target restricted tables
-        if ($this->safetyService->isTableSensitive($validated['target_table'])) {
-            return response()->json([
-                'message' => "Security violation: Table '{$validated['target_table']}' is restricted and cannot be automated.",
-            ], 422);
+        if ($msg = $this->assertTableAutomatable($connection, $validated['target_table'])) {
+            return response()->json(['message' => $msg, 'errors' => ['target_table' => [$msg]]], 422);
+        }
+        if (!empty($errors)) {
+            return response()->json(['message' => reset($errors)[0], 'errors' => $errors], 422);
         }
 
-        $requiresApproval = isset($validated['requires_approval']) ? (bool) $validated['requires_approval'] : false;
+        $requiresApproval = (bool) ($validated['requires_approval'] ?? false);
+        $isManual = $validated['operation_mode'] === 'MANUAL_SCHEDULE';
 
-        $automation = Automation::create([
+        $automation = new Automation([
             'user_id' => $request->user()->id,
             'connection_id' => $connection->id,
             'name' => $validated['name'],
             'target_table' => $validated['target_table'],
             'operation_mode' => $validated['operation_mode'],
             'field_mappings' => $validated['field_mappings'],
-            'ai_provider' => $validated['ai_provider'] ?? 'ollama',
-            'ai_model' => $validated['ai_model'] ?? 'llama3.2:1b',
+            'ai_provider' => $isManual ? 'none' : ($validated['ai_provider'] ?? 'ollama'),
+            'ai_model' => $isManual ? null : ($validated['ai_model'] ?? null),
             'prompt_context' => $validated['prompt_context'] ?? null,
+            'generation_options' => $validated['generation_options'] ?? null,
             'knowledge_document_ids' => $validated['knowledge_document_ids'] ?? [],
             'schedule_type' => $validated['schedule_type'],
-            'start_date' => $validated['start_date'] ?? null,
+            'start_date' => $validated['start_date'],
+            'end_date' => $validated['end_date'],
+            'weekly_days' => $validated['weekly_days'],
             'generation_time' => $validated['generation_time'],
             'publication_time' => $validated['publication_time'],
-            'timezone' => $validated['timezone'] ?? 'UTC',
+            'timezone' => $validated['timezone'],
             'requires_approval' => $requiresApproval,
             'reviewer_email' => $validated['reviewer_email'] ?? $request->user()->email,
-            'timeout_policy' => $validated['timeout_policy'] ?? 'AUTO_PUBLISH_LATEST',
+            'timeout_policy' => $validated['timeout_policy'] ?? 'KEEP_DRAFT',
             'safe_deadline_policy' => $validated['safe_deadline_policy'] ?? 'notify_and_wait',
             'is_active' => $validated['is_active'] ?? true,
         ]);
+        $automation->setRelation('connection', $connection);
+
+        if ($schemaErrors = $this->validateAgainstSchema($automation)) {
+            return response()->json(['message' => reset($schemaErrors)[0], 'errors' => $schemaErrors], 422);
+        }
+
+        $automation->schedule_anchor_at = now();
+        $automation->save();
 
         AuditLog::log($request->user()->id, 'AUTOMATION_CREATED', 'Automation', (string) $automation->id, [
             'name' => $automation->name,
             'table' => $automation->target_table,
             'mode' => $automation->operation_mode,
+            'schedule' => $automation->schedule_type,
             'requires_approval' => $requiresApproval,
         ]);
 
-        \App\Services\LiveEventService::publish($request->user()->id, 'automation.created', [
+        LiveEventService::publish($request->user()->id, 'automation.created', [
             'id' => $automation->id,
             'name' => $automation->name,
             'target_table' => $automation->target_table,
             'requires_approval' => $requiresApproval,
         ], 'Automation', (string) $automation->id);
 
+        $automation->setAttribute('schedule_summary', $automation->scheduleSummary());
+
         return response()->json([
-            'message' => 'Automation workflow configured successfully',
+            'message' => 'Automation saved and scheduled.',
             'automation' => $automation,
         ], 201);
     }
@@ -136,8 +241,10 @@ class AutomationController extends Controller
     {
         $automation = Automation::where('user_id', $request->user()->id)
             ->where('id', $id)
-            ->with(['connection', 'executions.versions'])
+            ->with(['connection', 'executions' => fn($q) => $q->latest('id')->limit(50), 'executions.versions'])
             ->firstOrFail();
+
+        $automation->setAttribute('schedule_summary', $automation->scheduleSummary());
 
         return response()->json($automation);
     }
@@ -146,42 +253,42 @@ class AutomationController extends Controller
     {
         $automation = Automation::where('user_id', $request->user()->id)
             ->where('id', $id)
+            ->with('connection')
             ->firstOrFail();
 
-        $validated = $request->validate([
-            'name' => 'sometimes|string|max:255',
-            'is_active' => 'sometimes|boolean',
-            'prompt_context' => 'nullable|string',
-            'field_mappings' => 'sometimes|array',
-            'ai_provider' => 'sometimes|nullable|string',
-            'ai_model' => 'sometimes|nullable|string',
-            'knowledge_document_ids' => 'sometimes|nullable|array',
-            'requires_approval' => 'sometimes|boolean',
-            'generation_time' => 'sometimes|string',
-            'publication_time' => 'sometimes|string',
-            'timezone' => 'sometimes|nullable|string',
-            'reviewer_email' => 'nullable|email',
-            'safe_deadline_policy' => 'sometimes|nullable|string|in:skip,publish_last_valid,notify_and_wait',
-        ]);
+        [$errors, $validated] = $this->validateConfiguration($request, $automation);
+        if (!empty($errors)) {
+            return response()->json(['message' => reset($errors)[0], 'errors' => $errors], 422);
+        }
 
-        if (isset($validated['generation_time']) || isset($validated['publication_time'])) {
-            $genTime = $validated['generation_time'] ?? $automation->generation_time;
-            $pubTime = $validated['publication_time'] ?? $automation->publication_time;
-            $tz = $validated['timezone'] ?? $automation->timezone;
-            $leadTimeError = $this->validateLeadTime($genTime, $pubTime, $tz);
-            if ($leadTimeError) {
-                return response()->json([
-                    'message' => $leadTimeError,
-                    'errors' => [
-                        'publication_time' => [$leadTimeError],
-                    ],
-                ], 422);
+        // The connection and table of an existing automation never change; create a new one instead.
+        unset($validated['connection_id'], $validated['target_table']);
+        $wasActive = (bool) $automation->is_active;
+        $automation->fill($validated);
+
+        if (isset($validated['field_mappings']) || isset($validated['operation_mode'])) {
+            if ($schemaErrors = $this->validateAgainstSchema($automation)) {
+                return response()->json(['message' => reset($schemaErrors)[0], 'errors' => $schemaErrors], 422);
             }
         }
 
-        $automation->update($validated);
+        $scheduleChanged = $automation->isDirty(Automation::SCHEDULE_FIELDS);
+        $resumed = !$wasActive && $automation->is_active;
+        if ($scheduleChanged || $resumed) {
+            // Count runs from now: changing or resuming never back-fills or reports past runs as missed.
+            $automation->schedule_anchor_at = now();
+            if ($scheduleChanged) {
+                $automation->completed_at = null;
+            }
+        }
+        $automation->save();
 
-        AuditLog::log($request->user()->id, 'AUTOMATION_UPDATED', 'Automation', (string) $id);
+        AuditLog::log($request->user()->id, 'AUTOMATION_UPDATED', 'Automation', (string) $id, [
+            'fields' => array_keys($validated),
+            'schedule_changed' => $scheduleChanged,
+        ]);
+
+        $automation->setAttribute('schedule_summary', $automation->scheduleSummary());
 
         return response()->json([
             'message' => 'Automation updated successfully',
@@ -204,55 +311,311 @@ class AutomationController extends Controller
         ]);
     }
 
+    /**
+     * Run once now, outside the schedule. Publication happens after the automation's normal
+     * generation-to-publication gap (minimum 15 minutes) so a reviewer still gets time.
+     */
     public function trigger(Request $request, $id)
     {
         $automation = Automation::where('user_id', $request->user()->id)
             ->where('id', $id)
             ->firstOrFail();
 
-        $today = now()->format('Y-m-d_H-i-s');
-        $idempotencyKey = "manual_trig_{$automation->id}_{$today}_" . Str::random(6);
-
+        $gap = max(ScheduleCalculator::MIN_GAP_MINUTES, (int) (ScheduleCalculator::gapMinutes($automation->generation_time, $automation->publication_time) ?? 30));
         $execution = AutomationExecution::create([
             'user_id' => $request->user()->id,
             'automation_id' => $automation->id,
             'status' => 'PENDING_GENERATION',
-            'idempotency_key' => $idempotencyKey,
-            'publication_time' => now()->addMinutes(60),
+            'trigger_type' => 'MANUAL',
+            'idempotency_key' => "manual_trig_{$automation->id}_" . now()->format('Ymd_His') . '_' . Str::random(6),
+            'publication_time' => now()->addMinutes($gap),
+            'lease_expires_at' => now()->addMinutes(15),
         ]);
+        $execution->addTimelineEvent('MANUAL_TRIGGER', "Run started by you. It will publish at " . $execution->publication_time->setTimezone(ScheduleCalculator::normalizeTimezone($automation->timezone))->format('H:i T') . " ({$gap} minutes from now)" . ($automation->requires_approval ? ' after approval.' : '.'));
 
         GenerateAutomationContentJob::dispatch($execution->id);
 
         AuditLog::log($request->user()->id, 'AUTOMATION_TRIGGERED', 'AutomationExecution', (string) $execution->id);
 
         return response()->json([
-            'message' => 'Execution dispatched to background worker',
+            'message' => 'Run started in the background.',
             'execution' => $execution,
         ], 202);
     }
 
     /**
-     * Dynamic manual content publishing / scheduling directly to any target table
+     * Columns of a table with kinds, constraints, relation details and a suggested mapping each.
+     */
+    public function fieldPlan(Request $request, FieldPlanBuilder $builder): JsonResponse
+    {
+        $validated = $request->validate([
+            'connection_id' => 'required|integer',
+            'target_table' => 'required|string|max:64|regex:/^[A-Za-z0-9_]+$/',
+        ]);
+        $connection = DbConnection::where('user_id', $request->user()->id)->where('id', $validated['connection_id'])->firstOrFail();
+        if ($msg = $this->assertTableAutomatable($connection, $validated['target_table'])) {
+            return response()->json(['message' => $msg], 422);
+        }
+
+        try {
+            $pdo = $connection->createTargetPdo();
+            $plan = $builder->suggest($connection, $pdo, $validated['target_table']);
+        } catch (\Throwable $e) {
+            return response()->json(['message' => 'Could not read the table: ' . Str::limit($e->getMessage(), 200)], 422);
+        } finally {
+            $pdo = null;
+        }
+
+        $probe = new Automation(['user_id' => $request->user()->id, 'generation_options' => ['image_provider' => $request->input('image_provider', 'auto')]]);
+        $plan['image_provider'] = app(ImageFieldService::class)->resolveProvider($probe);
+        unset($plan['image_provider']['api_key']);
+
+        return response()->json($plan);
+    }
+
+    /**
+     * Live preview of a draft (unsaved) configuration: the same pipeline a scheduled run uses,
+     * including images and the read-only write plan. Never writes to the customer database.
+     */
+    public function preview(Request $request, ContentPipeline $pipeline): JsonResponse
+    {
+        $request->merge(['name' => $request->input('name') ?: 'Preview']);
+        [$errors, $validated] = $this->validateConfiguration($request);
+        $connection = DbConnection::where('user_id', $request->user()->id)->where('id', $validated['connection_id'])->firstOrFail();
+        if ($msg = $this->assertTableAutomatable($connection, $validated['target_table'])) {
+            return response()->json(['message' => $msg], 422);
+        }
+        // Schedule problems do not block a content preview; they are returned alongside it.
+        $scheduleErrors = $errors;
+
+        $draft = new Automation([
+            'user_id' => $request->user()->id,
+            'connection_id' => $connection->id,
+            'name' => $validated['name'],
+            'target_table' => $validated['target_table'],
+            'operation_mode' => $validated['operation_mode'],
+            'field_mappings' => $validated['field_mappings'],
+            'ai_provider' => $validated['ai_provider'] ?? 'ollama',
+            'ai_model' => $validated['ai_model'] ?? null,
+            'prompt_context' => $validated['prompt_context'] ?? null,
+            'generation_options' => $validated['generation_options'] ?? null,
+            'knowledge_document_ids' => $validated['knowledge_document_ids'] ?? [],
+            'schedule_type' => $validated['schedule_type'],
+            'start_date' => $validated['start_date'],
+            'end_date' => $validated['end_date'],
+            'weekly_days' => $validated['weekly_days'],
+            'generation_time' => $validated['generation_time'],
+            'publication_time' => $validated['publication_time'],
+            'timezone' => $validated['timezone'],
+            'requires_approval' => (bool) ($validated['requires_approval'] ?? false),
+            'is_active' => true,
+        ]);
+        $draft->setRelation('connection', $connection);
+
+        $next = empty($scheduleErrors) ? $this->schedule->nextOccurrence($draft) : null;
+        $events = [];
+        try {
+            $result = $pipeline->run(
+                $draft,
+                [
+                    'publication_time' => $next ? $next['publication_at'] : now(),
+                    'include_images' => $request->boolean('include_images', true),
+                ],
+                function (string $stage, string $message, ?array $meta = null) use (&$events) {
+                    $events[] = ['stage' => $stage, 'message' => $message, 'timestamp' => now()->toIso8601String()];
+                }
+            );
+        } catch (\Throwable $e) {
+            return response()->json([
+                'message' => $e->getMessage(),
+                'events' => $events,
+            ], 422);
+        }
+
+        AuditLog::log($request->user()->id, 'AUTOMATION_PREVIEW_GENERATED', 'Automation', null, [
+            'table' => $draft->target_table,
+            'images' => count($result['meta']['media'] ?? []),
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'payload' => $result['payload'],
+            'meta' => $result['meta'],
+            'events' => $events,
+            'schedule' => empty($scheduleErrors) ? $this->schedule->summary($draft) : null,
+            'schedule_errors' => $scheduleErrors,
+        ]);
+    }
+
+    /**
+     * Validate a draft schedule and describe it (state, next runs, total runs). No side effects.
+     */
+    public function schedulePreview(Request $request): JsonResponse
+    {
+        $input = $request->validate([
+            'schedule_type' => 'required|string',
+            'start_date' => 'nullable|string',
+            'end_date' => 'nullable|string',
+            'weekly_days' => 'nullable|array|max:7',
+            'generation_time' => 'nullable|string',
+            'publication_time' => 'nullable|string',
+            'timezone' => 'nullable|string|max:64',
+        ]);
+        $check = $this->schedule->validate($input);
+        $draft = new Automation();
+        $draft->forceFill($check['values'] + ['is_active' => true]);
+
+        $occurrences = [];
+        if (empty($check['errors'])) {
+            foreach ($this->schedule->upcoming($draft, 62) as $occ) {
+                $occurrences[] = ScheduleCalculator::occurrenceToArray($occ);
+            }
+        }
+
+        return response()->json([
+            'valid' => empty($check['errors']),
+            'errors' => $check['errors'],
+            'values' => $check['values'],
+            'summary' => empty($check['errors']) ? $this->schedule->summary($draft) : null,
+            'occurrences' => $occurrences,
+        ]);
+    }
+
+    /**
+     * Calendar occupancy: what this user's automations and scheduled manual posts do on each date.
+     */
+    public function scheduleOccupancy(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'from' => 'required|date_format:Y-m-d',
+            'to' => 'required|date_format:Y-m-d|after_or_equal:from',
+            'timezone' => 'nullable|string|max:64',
+            'exclude_id' => 'nullable|integer',
+        ]);
+        $tz = ScheduleCalculator::normalizeTimezone($validated['timezone'] ?? 'UTC');
+        $from = CarbonImmutable::createFromFormat('!Y-m-d', $validated['from'], $tz)->startOfDay()->utc();
+        $to = CarbonImmutable::createFromFormat('!Y-m-d', $validated['to'], $tz)->endOfDay()->utc();
+        if ($from->diffInDays($to) > 93) {
+            return response()->json(['message' => 'Choose a range of at most three months.'], 422);
+        }
+
+        $days = [];
+        $push = function (CarbonImmutable $at, array $item) use (&$days, $tz) {
+            $d = $at->setTimezone($tz)->toDateString();
+            $days[$d][] = $item;
+        };
+
+        $automations = Automation::where('user_id', $request->user()->id)
+            ->where('is_active', true)
+            ->whereNull('completed_at')
+            ->where('schedule_type', '!=', ScheduleCalculator::TYPE_NONE)
+            ->when(!empty($validated['exclude_id']), fn($q) => $q->where('id', '!=', $validated['exclude_id']))
+            ->get();
+        foreach ($automations as $a) {
+            foreach ($this->schedule->occurrencesBetween($a, $from, $to, 100) as $occ) {
+                $push($occ['publication_at'], [
+                    'type' => 'automation',
+                    'automation_id' => $a->id,
+                    'name' => $a->name,
+                    'target_table' => $a->target_table,
+                    'generation_local' => $occ['generation_at']->setTimezone($tz)->format('H:i'),
+                    'publication_local' => $occ['publication_at']->setTimezone($tz)->format('H:i'),
+                ]);
+            }
+        }
+
+        $executions = AutomationExecution::where('user_id', $request->user()->id)
+            ->whereBetween('publication_time', [$from, $to])
+            ->whereIn('status', ['APPROVED', 'READY_TO_PUBLISH', 'PENDING_APPROVAL', 'QUEUED', 'GENERATING', 'PUBLISHED'])
+            ->with('automation:id,name,target_table')
+            ->limit(500)
+            ->get();
+        foreach ($executions as $e) {
+            if ($e->trigger_type === 'SCHEDULE' && $e->status !== 'PUBLISHED') {
+                continue; // already shown as a projected occurrence
+            }
+            $push(CarbonImmutable::instance($e->publication_time), [
+                'type' => $e->status === 'PUBLISHED' ? 'published' : 'scheduled_run',
+                'execution_id' => $e->id,
+                'automation_id' => $e->automation_id,
+                'name' => $e->automation?->name ?? 'Manual publication',
+                'target_table' => $e->automation?->target_table,
+                'status' => $e->status,
+                'publication_local' => CarbonImmutable::instance($e->publication_time)->setTimezone($tz)->format('H:i'),
+            ]);
+        }
+
+        ksort($days);
+        return response()->json(['timezone' => $tz, 'days' => $days]);
+    }
+
+    /**
+     * Manual publishing (AI off). The same validation and write path as automations.
+     *  - dry_run=true returns the exact write plan and changes nothing (the UI shows it for confirmation);
+     *  - publish_now=true writes immediately in one transaction;
+     *  - otherwise schedules for scheduled_at (ISO-8601 with offset) or scheduled_time + timezone.
      */
     public function manualPublish(Request $request)
     {
         $validated = $request->validate([
             'connection_id' => 'required|integer',
-            'target_table' => 'required|string',
-            'payload' => 'required|array',
+            'target_table' => 'required|string|max:64|regex:/^[A-Za-z0-9_]+$/',
+            'payload' => 'required|array|max:200',
             'publish_now' => 'nullable|boolean',
+            'dry_run' => 'nullable|boolean',
+            'scheduled_at' => 'nullable|string',
             'scheduled_time' => 'nullable|string',
+            'timezone' => 'nullable|string|max:64',
+            'relation_policies' => 'nullable|array',
             'name' => 'nullable|string|max:255',
         ]);
 
         $connection = DbConnection::where('user_id', $request->user()->id)
             ->where('id', $validated['connection_id'])
             ->firstOrFail();
+        if ($msg = $this->assertTableAutomatable($connection, $validated['target_table'])) {
+            return response()->json(['message' => $msg], 422);
+        }
 
-        if ($this->safetyService->isTableSensitive($validated['target_table'])) {
+        $payload = $validated['payload'];
+        $relationOptions = [];
+        foreach ((array) ($validated['relation_policies'] ?? []) as $col => $policy) {
+            if (is_string($col) && in_array($policy, ['CREATE_IF_MISSING', 'REUSE_EXISTING_ONLY'], true)) {
+                $relationOptions[$col] = ['creation_policy' => $policy];
+            }
+        }
+
+        // Always plan first: nothing is written if the plan has errors.
+        try {
+            $plan = $this->executor->planInsert($connection, $validated['target_table'], $payload, $relationOptions);
+        } catch (\Throwable $e) {
+            return response()->json(['message' => 'Could not check this record against your database: ' . Str::limit($e->getMessage(), 240)], 422);
+        }
+        if ($request->boolean('dry_run')) {
+            return response()->json(['dry_run' => true, 'plan' => $plan]);
+        }
+        if (!$plan['can_publish']) {
+            $errs = array_values(array_filter($plan['issues'], fn($i) => $i['level'] === 'error'));
             return response()->json([
-                'message' => "Security violation: Table '{$validated['target_table']}' is classified as restricted and cannot receive manual writes.",
+                'message' => implode(' ', array_map(fn($i) => $i['message'], $errs)),
+                'plan' => $plan,
             ], 422);
+        }
+
+        $tz = ScheduleCalculator::normalizeTimezone($validated['timezone'] ?? 'UTC');
+        $publishNow = $request->boolean('publish_now', empty($validated['scheduled_at']) && empty($validated['scheduled_time']));
+        $pubTime = null;
+        if (!$publishNow) {
+            try {
+                $pubTime = !empty($validated['scheduled_at'])
+                    ? Carbon::parse($validated['scheduled_at'])->utc()
+                    : Carbon::parse($validated['scheduled_time'], $tz)->utc();
+            } catch (\Throwable) {
+                return response()->json(['message' => 'The scheduled date/time is not valid.', 'errors' => ['scheduled_at' => ['Invalid date/time.']]], 422);
+            }
+            if ($pubTime->lessThan(now()->addMinute())) {
+                return response()->json(['message' => 'Pick a time at least one minute in the future, or choose “Publish now”.', 'errors' => ['scheduled_at' => ['Must be in the future.']]], 422);
+            }
         }
 
         $pipelineName = $validated['name'] ?? ("Manual: " . ucwords(str_replace('_', ' ', $validated['target_table'])));
@@ -262,59 +625,60 @@ class AutomationController extends Controller
                 'connection_id' => $connection->id,
                 'target_table' => $validated['target_table'],
                 'operation_mode' => 'MANUAL_SCHEDULE',
+                'schedule_type' => ScheduleCalculator::TYPE_NONE,
             ],
             [
                 'name' => $pipelineName,
                 'field_mappings' => [],
                 'ai_provider' => 'none',
                 'ai_model' => 'manual',
-                'schedule_type' => 'ONE_TIME',
-                'generation_time' => now()->format('H:i'),
-                'publication_time' => now()->addHour()->format('H:i'),
+                'generation_time' => '00:00',
+                'publication_time' => '00:15',
+                'timezone' => $tz,
                 'requires_approval' => false,
                 'is_active' => true,
             ]
         );
 
-        $publishNow = isset($validated['publish_now'])
-            ? (bool) $validated['publish_now']
-            : (empty($validated['scheduled_time']) || Carbon::parse($validated['scheduled_time'])->isPast());
+        $meta = ['version' => 2, 'target_table' => $validated['target_table'], 'write_plan' => $plan, 'relation_options' => $relationOptions, 'manual' => true, 'timezone' => $tz];
         $idempotencyKey = "manual_direct_{$automation->id}_" . now()->format('Ymd_His') . "_" . Str::random(6);
 
         if ($publishNow) {
-            $writeResult = $this->executor->executeInsert($connection, $validated['target_table'], $validated['payload']);
+            $writeResult = $this->executor->executeInsert($connection, $validated['target_table'], $payload, $relationOptions + ['idempotency_key' => $idempotencyKey]);
 
             $execution = AutomationExecution::create([
                 'user_id' => $request->user()->id,
                 'automation_id' => $automation->id,
                 'status' => 'PUBLISHED',
+                'trigger_type' => 'MANUAL_PUBLISH',
                 'idempotency_key' => $idempotencyKey,
                 'generation_started_at' => now(),
                 'generation_completed_at' => now(),
                 'publication_time' => now(),
                 'published_at' => now(),
-                'result_details' => $writeResult,
+                'target_record_id' => (string) ($writeResult['record_id'] ?? ''),
+                'result_details' => $writeResult + ['payload' => $payload],
+                'relation_resolutions' => $writeResult['relation_resolutions'] ?? [],
             ]);
-
-            $version = ContentVersion::create([
+            ContentVersion::create([
                 'user_id' => $request->user()->id,
                 'execution_id' => $execution->id,
                 'version_number' => 1,
-                'payload' => $validated['payload'],
+                'payload' => $payload,
+                'meta' => $meta,
                 'status' => 'APPROVED',
             ]);
-
             $execution->addTimelineEvent(
                 'TARGET_TRANSACTION_COMMITTED',
-                "Direct manual publication committed to table '{$validated['target_table']}'.",
+                "Published by you to `{$validated['target_table']}` as record #" . ($writeResult['record_id'] ?? '?') . '.',
                 ['table' => $validated['target_table'], 'record_id' => $writeResult['record_id'] ?? null]
             );
 
             AuditLog::log($request->user()->id, 'MANUAL_PUBLISH_EXECUTED', 'AutomationExecution', (string) $execution->id, [
                 'table' => $validated['target_table'],
                 'record_id' => $writeResult['record_id'] ?? null,
+                'parents_created' => count(array_filter($writeResult['relation_resolutions'] ?? [], fn($r) => ($r['action'] ?? '') === 'CREATED_NEW')),
             ]);
-
             LiveEventService::publish($request->user()->id, 'execution.published', [
                 'execution_id' => $execution->id,
                 'status' => 'PUBLISHED',
@@ -324,146 +688,108 @@ class AutomationController extends Controller
             ], 'AutomationExecution', (string) $execution->id);
 
             return response()->json([
-                'message' => "Successfully published record to table '{$validated['target_table']}'!",
+                'status' => 'PUBLISHED',
+                'message' => "Published to '{$validated['target_table']}' as record #" . ($writeResult['record_id'] ?? '?') . '.',
                 'execution' => $execution->load('versions'),
                 'result' => $writeResult,
             ], 201);
-        } else {
-            $pubTime = !empty($validated['scheduled_time']) ? Carbon::parse($validated['scheduled_time']) : now()->addMinutes(30);
-
-            $execution = AutomationExecution::create([
-                'user_id' => $request->user()->id,
-                'automation_id' => $automation->id,
-                'status' => 'APPROVED',
-                'idempotency_key' => $idempotencyKey,
-                'publication_time' => $pubTime,
-            ]);
-
-            $version = ContentVersion::create([
-                'user_id' => $request->user()->id,
-                'execution_id' => $execution->id,
-                'version_number' => 1,
-                'payload' => $validated['payload'],
-                'status' => 'APPROVED',
-            ]);
-
-            $execution->addTimelineEvent(
-                'MANUAL_SCHEDULED',
-                "Manual publication scheduled for {$pubTime->toIso8601String()}.",
-                ['publication_time' => $pubTime->toIso8601String()]
-            );
-
-            LiveEventService::publish($request->user()->id, 'execution.created', [
-                'execution_id' => $execution->id,
-                'automation_id' => $automation->id,
-                'status' => 'APPROVED',
-                'publication_time' => $pubTime->toIso8601String(),
-            ], 'AutomationExecution', (string) $execution->id);
-
-            AuditLog::log($request->user()->id, 'MANUAL_PUBLISH_SCHEDULED', 'AutomationExecution', (string) $execution->id, [
-                'table' => $validated['target_table'],
-                'scheduled_for' => $pubTime->toIso8601String(),
-            ]);
-
-            return response()->json([
-                'message' => "Manual publication scheduled for " . $pubTime->toDateTimeString(),
-                'execution' => $execution->load('versions'),
-            ], 202);
         }
+
+        $execution = AutomationExecution::create([
+            'user_id' => $request->user()->id,
+            'automation_id' => $automation->id,
+            'status' => 'APPROVED',
+            'trigger_type' => 'MANUAL_PUBLISH',
+            'idempotency_key' => $idempotencyKey,
+            'publication_time' => $pubTime,
+        ]);
+        ContentVersion::create([
+            'user_id' => $request->user()->id,
+            'execution_id' => $execution->id,
+            'version_number' => 1,
+            'payload' => $payload,
+            'meta' => $meta,
+            'status' => 'APPROVED',
+        ]);
+        $local = $pubTime->copy()->setTimezone($tz);
+        $execution->addTimelineEvent(
+            'MANUAL_SCHEDULED',
+            'Scheduled by you to publish on ' . $local->format('D, j M Y \a\t H:i') . " ({$tz}).",
+            ['publication_time' => $pubTime->toIso8601String(), 'timezone' => $tz]
+        );
+
+        LiveEventService::publish($request->user()->id, 'execution.created', [
+            'execution_id' => $execution->id,
+            'automation_id' => $automation->id,
+            'status' => 'APPROVED',
+            'publication_time' => $pubTime->toIso8601String(),
+        ], 'AutomationExecution', (string) $execution->id);
+        AuditLog::log($request->user()->id, 'MANUAL_PUBLISH_SCHEDULED', 'AutomationExecution', (string) $execution->id, [
+            'table' => $validated['target_table'],
+            'scheduled_for' => $pubTime->toIso8601String(),
+        ]);
+
+        return response()->json([
+            'status' => 'SCHEDULED',
+            'message' => 'Scheduled to publish on ' . $local->format('D, j M Y \a\t H:i') . " ({$tz}).",
+            'execution' => $execution->load('versions'),
+            'plan' => $plan,
+        ], 202);
     }
 
     /**
-     * Generate structured AI content preview without modifying target database.
+     * Legacy single-call AI field preview (used by the manual-publishing AI helper). Returns the
+     * model's output or an honest error; it never substitutes invented content.
      */
     public function previewAi(Request $request, \App\Services\AiServiceClient $aiClient)
     {
         $validated = $request->validate([
-            'prompt' => 'nullable|string',
-            'topic' => 'nullable|string',
-            'target_table' => 'nullable|string',
-            'fields' => 'nullable|array',
-            'tone' => 'nullable|string',
+            'prompt' => 'nullable|string|max:4000',
+            'topic' => 'nullable|string|max:4000',
+            'target_table' => 'nullable|string|max:64',
+            'fields' => 'nullable|array|max:60',
+            'tone' => 'nullable|string|max:200',
             'context_document_ids' => 'nullable|array',
             'provider' => 'nullable|string',
             'model' => 'nullable|string',
         ]);
 
-        $topic = $validated['topic'] ?? $validated['prompt'] ?? 'Healthy Nutrition & Daily Food Diaries';
-        $targetTable = $validated['target_table'] ?? 'blogs';
-        $fields = $validated['fields'] ?? ['title', 'slug', 'content', 'excerpt'];
-
+        $topic = $validated['topic'] ?? $validated['prompt'] ?? null;
+        if (!$topic) {
+            return response()->json(['success' => false, 'message' => 'Describe what to write about first.'], 422);
+        }
+        $fields = array_values(array_filter($validated['fields'] ?? ['title', 'content'], fn($f) => is_string($f) && !\App\Services\Data\ColumnClassifier::isSecret($f)));
         $provider = $validated['provider'] ?? 'ollama';
-        $model = $validated['model'] ?? null;
-
-        $userProvider = \App\Models\AiProvider::where('user_id', $request->user()->id)
-            ->where('provider_type', $provider)
-            ->first();
-        $apiKey = $userProvider?->encrypted_api_key;
+        $apiKey = \App\Models\AiProvider::where('user_id', $request->user()->id)->where('provider_type', $provider)->first()?->encrypted_api_key;
 
         $contextPassages = [];
         if (!empty($validated['context_document_ids'])) {
             try {
-                $chunks = $aiClient->queryKnowledge($request->user()->id, $topic, 3);
-                foreach ($chunks as $c) {
+                foreach ($aiClient->queryKnowledge($request->user()->id, $topic, 3) as $c) {
                     if (!empty($c['text'])) {
                         $contextPassages[] = $c['text'];
                     }
                 }
-            } catch (\Throwable $e) {
-                // RAG query fallback
+            } catch (\Throwable) {
             }
         }
 
         try {
             $res = $aiClient->generateContent([
                 'provider' => $provider,
-                'model' => $model,
+                'model' => $validated['model'] ?? null,
                 'api_key' => $apiKey,
-                'prompt' => $topic,
-                'target_table' => $targetTable,
+                'prompt' => "Topic and direction: {$topic}\nTone: " . ($validated['tone'] ?? 'Professional and engaging'),
+                'target_table' => $validated['target_table'] ?? 'posts',
                 'required_fields' => $fields,
                 'context_passages' => $contextPassages,
             ]);
-
-            return response()->json([
-                'success' => true,
-                'data' => $res['data'] ?? [],
-            ]);
+            return response()->json(['success' => true, 'data' => $res['data'] ?? []]);
         } catch (\Throwable $e) {
-            $cleanTopic = ucwords(preg_replace('/[•|–—\s]+/', ' ', trim($topic)));
-            $slug = Str::slug($cleanTopic) . '-' . rand(100, 999);
-            $isFood = preg_match('/(food|meat|diet|diate|eat|meal|nutrition|recipe|health)/i', $topic);
-
-            $banner = $isFood
-                ? 'https://images.unsplash.com/photo-1498837167922-ddd27525d352?w=1200&auto=format&fit=crop&q=80'
-                : 'https://images.unsplash.com/photo-1518770660439-4636190af475?w=1200&auto=format&fit=crop&q=80';
-            $metaImg = $isFood
-                ? 'https://images.unsplash.com/photo-1540420773420-3366772f4999?w=800&auto=format&fit=crop&q=80'
-                : 'https://images.unsplash.com/photo-1451187580459-43490279c0fa?w=800&auto=format&fit=crop&q=80';
-
-            $fallback = [
-                'title' => "The Essential Guide to {$cleanTopic}",
-                'slug' => $slug,
-                'excerpt' => "A practical, evidence-based exploration of {$cleanTopic}, highlighting core principles and actionable takeaways.",
-                'short_description' => "A practical, evidence-based exploration of {$cleanTopic}, highlighting core principles and actionable takeaways.",
-                'content' => "# The Essential Guide to {$cleanTopic}\n\nDeveloping consistency with {$cleanTopic} requires a balanced, structured approach.\n\n## Core Principles\n- Intentional daily routines\n- High quality foundational building blocks\n- Sustainable long-term practices",
-                'description' => "# The Essential Guide to {$cleanTopic}\n\nDeveloping consistency with {$cleanTopic} requires a balanced, structured approach.\n\n## Core Principles\n- Intentional daily routines\n- High quality foundational building blocks\n- Sustainable long-term practices",
-                'banner' => $banner,
-                'meta_img' => $metaImg,
-                'meta_title' => substr("The Essential Guide to {$cleanTopic}", 0, 60),
-                'meta_description' => substr("A practical exploration of {$cleanTopic}.", 0, 160),
-                'meta_keywords' => $isFood ? 'healthy diet, nutrition, meal planning, lean meats, wellness' : 'database, automation, mysql, ai, devops',
-                'status' => '1',
-            ];
-            foreach ($fields as $f) {
-                if (!isset($fallback[$f])) {
-                    $fallback[$f] = "Dynamic {$f}";
-                }
-            }
             return response()->json([
-                'success' => true,
-                'data' => $fallback,
-            ]);
+                'success' => false,
+                'message' => 'The AI provider could not generate content: ' . Str::limit($e->getMessage(), 240),
+            ], 422);
         }
     }
 
@@ -552,36 +878,6 @@ class AutomationController extends Controller
                 ],
             ]);
         }
-    }
-
-    /**
-     * Enforce minimum 30-minute planning lead time between generation and publication.
-     */
-    protected function validateLeadTime(string $genTime, string $pubTime, ?string $timezone): ?string
-    {
-        $tz = $timezone ?: 'UTC';
-        if (!in_array($tz, timezone_identifiers_list(), true)) {
-            $tz = 'UTC';
-        }
-
-        try {
-            $today = now($tz)->toDateString();
-            $gen = Carbon::parse("{$today} {$genTime}", $tz);
-            $pub = Carbon::parse("{$today} {$pubTime}", $tz);
-
-            if ($pub->lessThanOrEqualTo($gen)) {
-                $pub = $pub->addDay();
-            }
-
-            $diffMinutes = $gen->diffInMinutes($pub, false);
-            if ($diffMinutes < 30) {
-                return "Publication time must be at least 30 minutes after generation time (current gap: {$diffMinutes} mins).";
-            }
-        } catch (\Throwable $e) {
-            return "Invalid time format: " . $e->getMessage();
-        }
-
-        return null;
     }
 
     /**

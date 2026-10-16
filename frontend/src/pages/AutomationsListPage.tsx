@@ -9,6 +9,7 @@ import { useToast } from "../context/ToastContext";
 import { orbitTargets } from "../services/orbitTargets";
 import { useOrbitSurface } from "../hooks/useOrbitSurface";
 import { pageStateService } from "../services/pageStateService";
+import { formatInstant, relativeFromNow } from "../lib/schedule";
 
 export const AutomationsListPage: React.FC = () => {
   const navigate = useNavigate();
@@ -49,7 +50,8 @@ export const AutomationsListPage: React.FC = () => {
       describe: () => automations.map((a: any) => ({
         id: a.id, name: a.name, table: a.target_table, schedule: a.schedule_type,
         active: a.is_active !== undefined ? !!a.is_active : a.status === "ACTIVE",
-        next_run: a.next_run_at ?? undefined,
+        state: a.schedule_summary?.state,
+        next_run: a.schedule_summary?.next_run?.generation_at ?? undefined,
       })),
       actions: {
         run_now: {
@@ -220,11 +222,22 @@ export const AutomationsListPage: React.FC = () => {
         <div className="space-y-4">
           {automations.map((a) => {
             const isActive = a.is_active !== undefined ? a.is_active : (a.status === "ACTIVE");
-            const opMode = a.operation_mode || a.mode || "AI_CREATE";
-            const genTime = a.generation_time || a.schedule_config?.generation_time || "--:--";
-            const pubTime = a.publication_time || a.schedule_config?.publication_time || "--:--";
-            const tz = a.timezone || a.schedule_config?.timezone || "UTC";
-            const reviewer = a.reviewer_email || a.approval_policy?.reviewer_email || "Not configured";
+            const sum = a.schedule_summary ?? null;
+            const tz = sum?.timezone || a.timezone || "UTC";
+            const state: string = sum?.state ?? (isActive ? "ACTIVE" : "PAUSED");
+            const isManualContainer = state === "MANUAL";
+            const stateStyle: Record<string, string> = {
+              ACTIVE: "bg-emerald-50 text-emerald-700 border-emerald-200",
+              SCHEDULED: "bg-sky-50 text-sky-700 border-sky-200",
+              FINISHING: "bg-amber-50 text-amber-700 border-amber-200",
+              COMPLETED: "bg-slate-100 text-slate-600 border-slate-200",
+              PAUSED: "bg-amber-50 text-amber-800 border-amber-200",
+              MANUAL: "bg-slate-50 text-slate-600 border-slate-200",
+            };
+            const stateLabel: Record<string, string> = {
+              ACTIVE: "Active", SCHEDULED: "Starts soon", FINISHING: "Last run in progress", COMPLETED: "Already done", PAUSED: "Paused", MANUAL: "Manual publishing",
+            };
+            const freq = sum?.frequency === "ONE_TIME" ? "One time" : sum?.frequency === "WEEKLY" ? "Weekly" : sum?.frequency === "DAILY" ? "Daily" : null;
 
             return (
               <motion.div
@@ -232,93 +245,94 @@ export const AutomationsListPage: React.FC = () => {
                 ref={(el: HTMLDivElement | null) =>
                   el ? orbitTargets.register(`automations.row.${a.id}`, el) : orbitTargets.unregister(`automations.row.${a.id}`)
                 }
-                whileHover={{ y: -3, transition: { duration: 0.2 } }}
-                className="bg-white border border-slate-200/90 hover:border-indigo-300 rounded-xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 transition shadow-xs hover:shadow-md hover:shadow-indigo-500/5 group"
+                className="group flex flex-col gap-4 rounded-xl border border-slate-200/90 bg-white p-4 shadow-xs transition hover:border-indigo-300 hover:shadow-md hover:shadow-indigo-500/5 sm:p-5 lg:flex-row lg:items-center lg:justify-between"
               >
-                <div className="space-y-2">
-                  <div className="flex items-center gap-3">
-                    <h4 className="font-bold text-slate-900 text-base group-hover:text-indigo-600 transition-colors">
-                      {a.name}
-                    </h4>
-                    <StatusPill status={isActive ? "ACTIVE" : "PAUSED"} size="sm" />
-                    <span className="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-100 text-slate-700 font-medium">
-                      v{a.version || 1}
+                <div className="min-w-0 space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h4 className="text-sm font-bold text-slate-900 transition-colors group-hover:text-indigo-600 sm:text-base">{a.name}</h4>
+                    <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-bold ${stateStyle[state] ?? stateStyle.ACTIVE}`}>
+                      {state === "COMPLETED" && <CheckCircle className="h-3 w-3" />}
+                      {stateLabel[state] ?? state}
                     </span>
+                    {freq && <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600">{freq}</span>}
                     {a.ai_provider && a.ai_provider !== "none" && (
-                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200">
-                        <Cpu className="w-3 h-3 text-indigo-600" />
-                        <span>AI: {a.ai_provider === "ollama" ? "Ollama (Local)" : a.ai_provider} ({a.ai_model || "default"})</span>
+                      <span className="inline-flex items-center gap-1 rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">
+                        <Cpu className="h-3 w-3" /> {a.ai_provider}{a.ai_model ? ` · ${a.ai_model}` : ""}
                       </span>
                     )}
                   </div>
 
-                  {a.prompt_context && (
-                    <div className="text-xs text-slate-600 bg-slate-50 border border-slate-100 rounded-lg px-2.5 py-1.5 flex items-center gap-1.5 max-w-2xl">
-                      <span className="font-semibold text-indigo-900 shrink-0">Topic Prompt:</span>
-                      <span className="truncate italic">"{a.prompt_context}"</span>
-                    </div>
-                  )}
+                  {sum?.description && <p className="max-w-3xl text-xs leading-relaxed text-slate-600">{sum.description}</p>}
 
-                  <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500 font-mono">
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
                     <span className="flex items-center gap-1.5 text-slate-700">
-                      <Database className="w-3.5 h-3.5 text-indigo-600" />
-                      Target: <strong className="text-indigo-600 font-bold">{a.target_table}</strong>
+                      <Database className="h-3.5 w-3.5 text-indigo-600" />
+                      <code className="font-semibold text-indigo-700">{a.target_table}</code>
+                      {a.connection?.name && <span className="text-slate-400">in {a.connection.name}</span>}
                     </span>
-                    <span>•</span>
-                    <span>Mode: <strong className="text-slate-800">{opMode}</strong></span>
-                    <span>•</span>
-                    <span className="flex items-center gap-1.5">
-                      <Clock className="w-3.5 h-3.5 text-slate-400" />
-                      Gen: {genTime} | Pub: {pubTime} ({tz})
-                    </span>
-                    <span>•</span>
-                    <span>Reviewer: {reviewer}</span>
+                    {!isManualContainer && sum?.next_run && state !== "PAUSED" && (
+                      <span className="flex items-center gap-1.5">
+                        <Clock className="h-3.5 w-3.5 text-slate-400" />
+                        Next: <strong className="text-slate-800">{formatInstant(sum.next_run.generation_at, tz, { withYear: false })}</strong>
+                        <span className="text-slate-400">({relativeFromNow(sum.next_run.generation_at)})</span>
+                      </span>
+                    )}
+                    {state === "COMPLETED" && sum?.completed_at && (
+                      <span className="flex items-center gap-1.5 text-slate-600">
+                        <CheckCircle className="h-3.5 w-3.5 text-emerald-600" /> Finished {formatInstant(sum.completed_at, tz, { withYear: false })}
+                      </span>
+                    )}
+                    {sum?.total_runs ? (
+                      <span>{sum.finished_runs ?? 0} of {sum.total_runs} run{sum.total_runs === 1 ? "" : "s"} done</span>
+                    ) : !isManualContainer && sum ? (
+                      <span>{sum.finished_runs ?? 0} run{(sum.finished_runs ?? 0) === 1 ? "" : "s"} so far</span>
+                    ) : null}
+                    {a.requires_approval && <span>Review by {a.reviewer_email || "email"}</span>}
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2 self-end md:self-center">
-                  <motion.button
-                    whileHover={{ scale: 1.04 }}
-                    whileTap={{ scale: 0.96 }}
-                    disabled={runningId === a.id}
-                    onClick={() => handleTrigger(a.id)}
-                    className="btn-primary-gradient flex items-center gap-1.5 px-3.5 py-2 text-white rounded-lg text-xs font-semibold transition shadow-xs cursor-pointer"
-                    title="Trigger execution"
-                  >
-                    {runningId === a.id ? (
-                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <Play className="w-3.5 h-3.5" />
-                    )}
-                    <span>{runningId === a.id ? "Running..." : "Run Now"}</span>
-                  </motion.button>
-
-                  <button
-                    onClick={() => {
-                      setEditingAutomation(a);
-                      setEditingProvider(a.ai_provider && a.ai_provider !== "none" ? a.ai_provider : "ollama");
-                      setEditingModel(a.ai_model && a.ai_model !== "default" ? a.ai_model : "llama3.2:1b");
-                      setEditingPrompt(a.prompt_context || "");
-                    }}
-                    className="p-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-lg text-xs transition shadow-2xs cursor-pointer"
-                    title="Configure AI Model & Prompt"
-                  >
-                    <Settings className="w-4 h-4 text-indigo-600" />
-                  </button>
-
-                  <button
-                    onClick={() => handleToggleStatus(a)}
-                    className="p-2 bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200 rounded-lg text-xs transition shadow-2xs cursor-pointer"
-                    title={isActive ? "Pause Automation" : "Resume Automation"}
-                  >
-                    {isActive ? <Pause className="w-4 h-4 text-amber-600" /> : <Play className="w-4 h-4 text-emerald-600" />}
-                  </button>
-                  <button
-                    onClick={() => handleDelete(a.id)}
-                    className="p-2 text-slate-400 hover:text-rose-600 rounded-lg hover:bg-rose-50 transition cursor-pointer"
-                    title="Delete"
-                  >
-                    <Trash2 className="w-4 h-4" />
+                <div className="flex shrink-0 items-center gap-2 self-stretch sm:self-end lg:self-center">
+                  {!isManualContainer && state !== "COMPLETED" && (
+                    <button
+                      disabled={runningId === a.id}
+                      onClick={() => handleTrigger(a.id)}
+                      className="btn-primary-gradient flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3.5 py-2 text-xs font-semibold text-white shadow-xs transition sm:flex-none"
+                      title="Generate one run now (publishes after the usual gap)"
+                    >
+                      {runningId === a.id ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+                      <span>{runningId === a.id ? "Starting…" : "Run now"}</span>
+                    </button>
+                  )}
+                  <Link to={`/executions?automation=${a.id}`} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 shadow-2xs transition hover:bg-slate-50" title="Run history">
+                    History
+                  </Link>
+                  {!isManualContainer && (
+                    <button
+                      onClick={() => {
+                        setEditingAutomation(a);
+                        setEditingProvider(a.ai_provider && a.ai_provider !== "none" ? a.ai_provider : "ollama");
+                        setEditingModel(a.ai_model && a.ai_model !== "default" ? a.ai_model : "");
+                        setEditingPrompt(a.prompt_context || "");
+                      }}
+                      className="rounded-lg border border-indigo-200 bg-indigo-50 p-2 text-indigo-700 shadow-2xs transition hover:bg-indigo-100"
+                      title="Change model and topic"
+                      aria-label="Change model and topic"
+                    >
+                      <Settings className="h-4 w-4" />
+                    </button>
+                  )}
+                  {!isManualContainer && state !== "COMPLETED" && (
+                    <button
+                      onClick={() => handleToggleStatus(a)}
+                      className="rounded-lg border border-slate-200 bg-slate-50 p-2 text-slate-700 shadow-2xs transition hover:bg-slate-100"
+                      title={isActive ? "Pause" : "Resume"}
+                      aria-label={isActive ? "Pause" : "Resume"}
+                    >
+                      {isActive ? <Pause className="h-4 w-4 text-amber-600" /> : <Play className="h-4 w-4 text-emerald-600" />}
+                    </button>
+                  )}
+                  <button onClick={() => handleDelete(a.id)} className="rounded-lg p-2 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600" title="Delete" aria-label="Delete">
+                    <Trash2 className="h-4 w-4" />
                   </button>
                 </div>
               </motion.div>

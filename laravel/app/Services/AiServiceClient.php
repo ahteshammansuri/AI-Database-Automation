@@ -37,7 +37,8 @@ class AiServiceClient
      */
     public function generateContent(array $params): array
     {
-        $res = $this->client()->post("{$this->baseUrl}/v1/ai/generate", [
+        // Long articles on a CPU-only local model can take several minutes; stay below the job timeout (690s).
+        $res = $this->client()->timeout((int) ($params['timeout'] ?? 600))->post("{$this->baseUrl}/v1/ai/generate", [
             'provider' => $params['provider'] ?? 'mock',
             'model' => $params['model'] ?? null,
             'api_key' => $params['api_key'] ?? null,
@@ -50,6 +51,9 @@ class AiServiceClient
             'schema_constraints' => $params['schema_constraints'] ?? null,
             'relation_catalog' => $params['relation_catalog'] ?? null,
             'recent_titles' => $params['recent_titles'] ?? null,
+            'field_specs' => $params['field_specs'] ?? null,
+            'length' => $params['length'] ?? 'medium',
+            'max_output_tokens' => $params['max_output_tokens'] ?? null,
         ]);
 
         if (!$res->successful()) {
@@ -61,6 +65,34 @@ class AiServiceClient
             throw new Exception("AI generation failed: " . ($data['error'] ?? 'Unknown error'));
         }
 
+        return $data;
+    }
+
+    /**
+     * Generate one image (OpenAI / Gemini with the user's key, or a local designed cover).
+     * Returns the AI service response: provider_used, model_used, mime_type, width, height, image_base64.
+     */
+    public function generateImage(array $params): array
+    {
+        $res = $this->client()->post("{$this->baseUrl}/v1/ai/generate-image", [
+            'provider' => $params['provider'] ?? 'local',
+            'api_key' => $params['api_key'] ?? null,
+            'model' => $params['model'] ?? null,
+            'prompt' => mb_substr((string) ($params['prompt'] ?? ''), 0, 5900),
+            'width' => (int) ($params['width'] ?? 1600),
+            'height' => (int) ($params['height'] ?? 900),
+            'title' => isset($params['title']) ? mb_substr((string) $params['title'], 0, 290) : null,
+            'label' => isset($params['label']) ? mb_substr((string) $params['label'], 0, 78) : null,
+            'seed' => isset($params['seed']) ? mb_substr((string) $params['seed'], 0, 290) : null,
+        ]);
+
+        if (!$res->successful()) {
+            throw new Exception("AI service image error ({$res->status()}).");
+        }
+        $data = $res->json();
+        if (!($data['success'] ?? false) || empty($data['image_base64'])) {
+            throw new Exception($data['error'] ?? 'Image generation failed.');
+        }
         return $data;
     }
 

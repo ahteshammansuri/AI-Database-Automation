@@ -79,8 +79,9 @@ async function request<T>(endpoint: string, options?: RequestOptions): Promise<T
 
       if (!response.ok) {
         let errMsg = `Request failed with status ${response.status}`;
+        let errData: any = null;
         try {
-          const errData = await response.json();
+          errData = await response.json();
           if (errData?.message) {
             errMsg = errData.message;
           } else if (errData?.error) {
@@ -92,7 +93,12 @@ async function request<T>(endpoint: string, options?: RequestOptions): Promise<T
         } catch {
           // Ignore non-json body error
         }
-        throw new Error(errMsg);
+        // Keep the status, per-field validation errors and body for callers that show them inline.
+        const err: any = new Error(errMsg);
+        err.status = response.status;
+        err.errors = errData?.errors ?? null;
+        err.data = errData;
+        throw err;
       }
 
       if (response.status === 204) {
@@ -264,8 +270,8 @@ export const api = {
   triggerAutomation: (id: number) => request<any>(`/automations/${id}/trigger`, { method: "POST" }),
 
   // Executions
-  listExecutions: (page = 1, pageSize = 25, status?: string) =>
-    request<any>(`/executions?page=${page}${status ? `&status=${status}` : ""}`),
+  listExecutions: (page = 1, pageSize = 25, status?: string, automationId?: number) =>
+    request<any>(`/executions?page=${page}&pageSize=${pageSize}${status ? `&status=${status}` : ""}${automationId ? `&automation_id=${automationId}` : ""}`),
   getExecution: (id: number) => request<any>(`/executions/${id}`),
   publishNow: (id: number) => request<any>(`/executions/${id}/publish-now`, { method: "POST" }),
   retryExecution: (id: number) => request<any>(`/executions/${id}/retry`, { method: "POST" }),
@@ -291,12 +297,44 @@ export const api = {
     target_table: string;
     payload: Record<string, any>;
     publish_now?: boolean;
+    dry_run?: boolean;
+    scheduled_at?: string;
     scheduled_time?: string;
+    timezone?: string;
+    relation_policies?: Record<string, "CREATE_IF_MISSING" | "REUSE_EXISTING_ONLY">;
     name?: string;
   }) => request<any>("/automations/manual-publish", {
     method: "POST",
     body: JSON.stringify(data),
   }),
+  /** Upload an image; returns its public URL to store in an image column. */
+  uploadMedia: (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return request<{ id: number; url: string; path: string; width?: number; height?: number }>("/media/upload", { method: "POST", body: form });
+  },
+  /** Columns of a table with kinds, constraints, relations and a suggested mapping each. */
+  getFieldPlan: (connectionId: number, targetTable: string, imageProvider?: string) =>
+    request<any>("/automations/field-plan", {
+      method: "POST",
+      body: JSON.stringify({ connection_id: connectionId, target_table: targetTable, image_provider: imageProvider }),
+    }),
+  /** Full dry run of a draft automation: content, images, relations and the exact write plan. Never writes. */
+  previewAutomation: (data: any) =>
+    request<any>("/automations/preview", { method: "POST", body: JSON.stringify(data) }),
+  /** Validate and describe a draft schedule (next runs, total runs). */
+  previewSchedule: (data: {
+    schedule_type: string;
+    start_date?: string | null;
+    end_date?: string | null;
+    weekly_days?: number[];
+    generation_time: string;
+    publication_time: string;
+    timezone: string;
+  }) => request<any>("/automations/schedule-preview", { method: "POST", body: JSON.stringify(data) }),
+  /** What the user's automations and scheduled posts do on each date in a range. */
+  getScheduleOccupancy: (from: string, to: string, timezone: string, excludeId?: number) =>
+    request<any>(`/automations/schedule-occupancy?from=${from}&to=${to}&timezone=${encodeURIComponent(timezone)}${excludeId ? `&exclude_id=${excludeId}` : ""}`),
 
   // Approvals & Decisions
   listApprovals: () => request<any[]>("/approvals"),

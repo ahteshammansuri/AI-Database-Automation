@@ -41,7 +41,9 @@ return [
         'public' => [
             'driver' => 'local',
             'root' => storage_path('app/public'),
-            'url' => env('APP_URL').'/storage',
+            // Public base for stored media (generated images). Must be reachable by the sites that render
+            // the published rows, so it can differ from APP_URL (e.g. a CDN or the API host with its port).
+            'url' => rtrim(env('MEDIA_PUBLIC_URL', env('APP_URL', 'http://localhost')), '/').'/storage',
             'visibility' => 'public',
             'throw' => false,
             'report' => false,

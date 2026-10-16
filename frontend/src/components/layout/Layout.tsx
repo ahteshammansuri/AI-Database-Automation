@@ -11,6 +11,18 @@ export const Layout: React.FC = () => {
   const location = useLocation();
   const [pendingCount, setPendingCount] = useState<number>(0);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState<boolean>(false);
+
+  // Close the mobile drawer on navigation and on Escape
+  useEffect(() => {
+    setMobileNavOpen(false);
+  }, [location.pathname]);
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setMobileNavOpen(false);
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [mobileNavOpen]);
 
   const fetchGlobalStats = async () => {
     try {
@@ -32,10 +44,10 @@ export const Layout: React.FC = () => {
 
   return (
     <div className="flex h-screen bg-slate-50 text-slate-800 overflow-hidden font-sans relative">
-      <Sidebar pendingApprovalsCount={pendingCount} />
+      <Sidebar pendingApprovalsCount={pendingCount} mobileOpen={mobileNavOpen} onClose={() => setMobileNavOpen(false)} />
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <Navbar onRefresh={fetchGlobalStats} isRefreshing={isRefreshing} />
-        <main className="flex-1 overflow-y-auto p-6 md:p-8 bg-slate-50/70">
+        <Navbar onRefresh={fetchGlobalStats} isRefreshing={isRefreshing} onOpenMenu={() => setMobileNavOpen(true)} menuOpen={mobileNavOpen} />
+        <main className="flex-1 overflow-y-auto overflow-x-hidden p-4 sm:p-6 lg:p-8 bg-slate-50/70">
           <div className="max-w-7xl mx-auto">
             {/* Active task guard banner during write operations */}
             <ActiveTaskGuardBanner />

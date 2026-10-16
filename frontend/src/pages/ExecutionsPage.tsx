@@ -38,6 +38,11 @@ import { useLiveEvents } from "../context/LiveEventsContext";
 import { useToast } from "../context/ToastContext";
 import { useOrbitSurface } from "../hooks/useOrbitSurface";
 import { orbitTargets } from "../services/orbitTargets";
+import { useSearchParams } from "react-router-dom";
+import { ContentPreview } from "../components/content/ContentPreview";
+import { formatInstant, relativeFromNow } from "../lib/schedule";
+
+const TRIGGER_LABEL: Record<string, string> = { SCHEDULE: "Scheduled", MANUAL: "Run now", MANUAL_PUBLISH: "Manual post" };
 
 export const ExecutionsPage: React.FC = () => {
   const [executions, setExecutions] = useState<any[]>([]);
@@ -56,11 +61,14 @@ export const ExecutionsPage: React.FC = () => {
 
   const { addListener } = useLiveEvents();
   const { toast, showAlert } = useToast();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const automationFilter = searchParams.get("automation") ? Number(searchParams.get("automation")) : undefined;
+  const [versionIdx, setVersionIdx] = useState<number>(0);
 
   const loadData = async (silent = false) => {
     try {
       if (!silent && executions.length === 0) setLoading(true);
-      const res = await api.listExecutions(page, 15, selectedStatus || undefined);
+      const res = await api.listExecutions(page, 15, selectedStatus || undefined, automationFilter);
       const items = Array.isArray(res?.data)
         ? res.data
         : Array.isArray(res?.items)
@@ -82,7 +90,7 @@ export const ExecutionsPage: React.FC = () => {
 
   useEffect(() => {
     loadData();
-  }, [page, selectedStatus]);
+  }, [page, selectedStatus, automationFilter]);
 
   // Subscribe to live SSE events to update table state in real time
   useEffect(() => {
@@ -148,6 +156,7 @@ export const ExecutionsPage: React.FC = () => {
   const handleViewExecution = async (execSummary: any) => {
     setSelectedExecution(execSummary);
     setActiveModalTab("preview");
+    setVersionIdx(0);
     setCopiedJson(false);
     const initialPayload = execSummary?.versions?.[0]?.payload || execSummary?.payload || {};
     setEditRecordPayload(initialPayload);
@@ -268,13 +277,22 @@ export const ExecutionsPage: React.FC = () => {
             </span>
             <span className="text-xs text-slate-500">• Equal Priority & Fair Dispatch</span>
           </div>
-          <h2 className="text-xl font-bold text-slate-900 tracking-tight">Automation Runs & Queue Monitor</h2>
+          <h2 className="text-xl font-bold text-slate-900 tracking-tight">Execution history</h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Real-time observable state machine with round-robin tenant interleaving and crash lease recovery.
+            Every run: what was generated, when it publishes, and exactly what was written to your database.
           </p>
+          {automationFilter && (
+            <button
+              type="button"
+              onClick={() => { searchParams.delete("automation"); setSearchParams(searchParams); setPage(1); }}
+              className="mt-2 inline-flex items-center gap-1 rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-0.5 text-[11px] font-semibold text-indigo-700 hover:bg-indigo-100"
+            >
+              Showing one automation · <span className="underline">show all</span>
+            </button>
+          )}
         </div>
 
-        <div className="flex items-center gap-2 text-xs w-56">
+        <div className="flex items-center gap-2 text-xs w-full sm:w-56">
           <span className="text-slate-500 font-medium shrink-0">Filter Status:</span>
           <SearchableSelect
             value={selectedStatus}
@@ -346,15 +364,14 @@ export const ExecutionsPage: React.FC = () => {
             <table className="w-full text-left text-xs">
               <thead className="bg-slate-50/80 text-slate-600 font-semibold border-b border-slate-200">
                 <tr>
-                  <th className="py-3 px-4">Run ID</th>
-                  <th className="py-3 px-4">Automation</th>
-                  <th className="py-3 px-4">Status</th>
-                  <th className="py-3 px-4">Queue Wait</th>
-                  <th className="py-3 px-4">Execution Time</th>
-                  <th className="py-3 px-4">Retries</th>
-                  <th className="py-3 px-4">Target Record</th>
-                  <th className="py-3 px-4">Timestamp</th>
-                  <th className="py-3 px-4 text-right">Actions</th>
+                  <th className="py-3 px-3 sm:px-4">Run</th>
+                  <th className="py-3 px-3 sm:px-4">Automation</th>
+                  <th className="py-3 px-3 sm:px-4">Status</th>
+                  <th className="py-3 px-3 sm:px-4 hidden md:table-cell">Publishes</th>
+                  <th className="py-3 px-4 hidden xl:table-cell">Generation time</th>
+                  <th className="py-3 px-4 hidden xl:table-cell">Retries</th>
+                  <th className="py-3 px-4 hidden lg:table-cell">Record</th>
+                  <th className="py-3 px-3 sm:px-4 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -366,17 +383,22 @@ export const ExecutionsPage: React.FC = () => {
                   return (
                     <tr
                       key={e.id}
+                      title={e.created_at ? `Created ${new Date(e.created_at).toLocaleString()}` : undefined}
                       ref={(el: HTMLTableRowElement | null) =>
                         el ? orbitTargets.register(`executions.row.${e.id}`, el) : orbitTargets.unregister(`executions.row.${e.id}`)
                       }
                       className="hover:bg-slate-50/70 transition-colors font-mono"
                     >
-                      <td className="py-3 px-4 font-bold text-slate-900">#{e.id}</td>
-                      <td className="py-3 px-4 font-sans text-slate-800 font-medium">
-                        {e.automation?.name || `Automation #${e.automation_id}`}
+                      <td className="py-3 px-3 sm:px-4 align-top">
+                        <span className="font-bold text-slate-900">#{e.id}</span>
+                        <span className="block font-sans text-[10px] text-slate-400">{TRIGGER_LABEL[e.trigger_type] ?? "Run"}{e.occurrence_date ? ` · ${String(e.occurrence_date).slice(0, 10)}` : ""}</span>
                       </td>
-                      <td className="py-3 px-4 font-sans">
-                        <div className="flex items-center gap-1.5">
+                      <td className="py-3 px-3 sm:px-4 font-sans text-slate-800 font-medium align-top">
+                        <span className="line-clamp-2">{e.automation?.name || `Automation #${e.automation_id}`}</span>
+                        {e.automation?.target_table && <span className="block font-mono text-[10px] text-slate-400">{e.automation.target_table}</span>}
+                      </td>
+                      <td className="py-3 px-3 sm:px-4 font-sans align-top">
+                        <div className="flex flex-wrap items-center gap-1.5">
                           <StatusPill status={e.status} size="sm" />
                           {e.failure_category && (
                             <span className="text-[9px] bg-rose-100 text-rose-800 px-1.5 py-0.5 rounded font-mono font-bold">
@@ -385,18 +407,23 @@ export const ExecutionsPage: React.FC = () => {
                           )}
                         </div>
                       </td>
-                      <td className="py-3 px-4 text-slate-600 font-mono text-[11px]">{queueWait}</td>
-                      <td className="py-3 px-4 text-slate-600 font-mono text-[11px]">{execDuration}</td>
-                      <td className="py-3 px-4 text-slate-600 font-mono text-[11px]">
+                      <td className="py-3 px-3 sm:px-4 text-slate-600 font-sans text-[11px] hidden md:table-cell align-top">
+                        {e.publication_time ? (
+                          <>
+                            <span className="block font-semibold text-slate-800">{formatInstant(e.published_at || e.publication_time, e.automation?.timezone || "UTC", { withYear: false })}</span>
+                            <span className="text-slate-400">{e.published_at ? "published" : relativeFromNow(e.publication_time)}</span>
+                          </>
+                        ) : "-"}
+                      </td>
+                      <td className="py-3 px-4 text-slate-600 font-mono text-[11px] hidden xl:table-cell align-top">{execDuration}<span className="block text-slate-400">wait {queueWait}</span></td>
+                      <td className="py-3 px-4 text-slate-600 font-mono text-[11px] hidden xl:table-cell align-top">
                         {e.retry_count > 0 ? `${e.retry_count}/${e.max_retries || 3}` : "-"}
                       </td>
-                      <td className="py-3 px-4 text-indigo-600 font-semibold">
+                      <td className="py-3 px-4 text-indigo-600 font-semibold hidden lg:table-cell align-top">
                         {e.target_record_id ? `#${e.target_record_id}` : "-"}
                       </td>
-                      <td className="py-3 px-4 text-slate-500 font-sans text-[11px]">
-                        {new Date(e.created_at).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}
-                      </td>
-                      <td className="py-3 px-4 text-right space-x-1.5 font-sans">
+                      <td className="py-3 px-3 sm:px-4 text-right font-sans align-top">
+                        <div className="flex flex-wrap justify-end gap-1.5">
                         <motion.button
                           whileHover={{ scale: 1.05 }}
                           whileTap={{ scale: 0.95 }}
@@ -471,6 +498,7 @@ export const ExecutionsPage: React.FC = () => {
                             <XCircle className="w-3 h-3" />
                           </motion.button>
                         )}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -506,16 +534,16 @@ export const ExecutionsPage: React.FC = () => {
       {/* Comprehensive Execution Inspector Modal with Visual Preview, RAG & Timeline */}
       <AnimatePresence>
         {selectedExecution && (
-          <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4">
+          <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
             <motion.div
               initial={{ opacity: 0, scale: 0.95, y: 10 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 10 }}
               transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
-              className="bg-white border border-slate-200 rounded-2xl max-w-4xl w-full p-5 sm:p-6 shadow-2xl space-y-4 max-h-[90vh] flex flex-col"
+              className="bg-white border border-slate-200 rounded-t-2xl sm:rounded-2xl max-w-4xl w-full p-4 sm:p-6 shadow-2xl space-y-4 max-h-[94vh] sm:max-h-[90vh] flex flex-col"
             >
               {/* Modal Header */}
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3">
+              <div className="flex shrink-0 flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3">
                 <div className="flex items-center gap-3">
                   <div className="p-2 bg-indigo-50 text-indigo-600 rounded-xl">
                     <Layers className="w-5 h-5" />
@@ -548,7 +576,7 @@ export const ExecutionsPage: React.FC = () => {
               </div>
 
               {/* Top Metrics Ribbon */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-mono">
+              <div className="hidden shrink-0 grid-cols-2 sm:grid sm:grid-cols-4 gap-2 text-xs font-mono">
                 <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5">
                   <span className="text-[10px] text-slate-400 uppercase font-sans font-bold block">Target Record</span>
                   <span className="font-bold text-slate-900 text-xs">
@@ -580,23 +608,23 @@ export const ExecutionsPage: React.FC = () => {
               </div>
 
               {/* Navigation Tab Bar */}
-              <div className="flex items-center gap-1.5 border-b border-slate-100 pb-1 text-xs font-semibold overflow-x-auto">
+              <div className="flex shrink-0 items-center gap-1.5 border-b border-slate-100 pb-1 text-xs font-semibold overflow-x-auto">
                 <button
                   type="button"
                   onClick={() => setActiveModalTab("preview")}
-                  className={`px-3 py-1.5 rounded-xl transition flex items-center gap-1.5 ${
+                  className={`px-3 py-1.5 rounded-xl transition flex shrink-0 items-center gap-1.5 whitespace-nowrap ${
                     activeModalTab === "preview"
                       ? "bg-indigo-600 text-white shadow-2xs font-bold"
                       : "text-slate-600 hover:bg-slate-100"
                   }`}
                 >
                   <FileText className="w-3.5 h-3.5" />
-                  <span>Content & Image Preview</span>
+                  <span>Content</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => setActiveModalTab("provenance")}
-                  className={`px-3 py-1.5 rounded-xl transition flex items-center gap-1.5 ${
+                  className={`px-3 py-1.5 rounded-xl transition flex shrink-0 items-center gap-1.5 whitespace-nowrap ${
                     activeModalTab === "provenance"
                       ? "bg-indigo-600 text-white shadow-2xs font-bold"
                       : "text-slate-600 hover:bg-slate-100"
@@ -608,7 +636,7 @@ export const ExecutionsPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setActiveModalTab("timeline")}
-                  className={`px-3 py-1.5 rounded-xl transition flex items-center gap-1.5 ${
+                  className={`px-3 py-1.5 rounded-xl transition flex shrink-0 items-center gap-1.5 whitespace-nowrap ${
                     activeModalTab === "timeline"
                       ? "bg-indigo-600 text-white shadow-2xs font-bold"
                       : "text-slate-600 hover:bg-slate-100"
@@ -620,7 +648,7 @@ export const ExecutionsPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setActiveModalTab("raw")}
-                  className={`px-3 py-1.5 rounded-xl transition flex items-center gap-1.5 ${
+                  className={`px-3 py-1.5 rounded-xl transition flex shrink-0 items-center gap-1.5 whitespace-nowrap ${
                     activeModalTab === "raw"
                       ? "bg-indigo-600 text-white shadow-2xs font-bold"
                       : "text-slate-600 hover:bg-slate-100"
@@ -633,7 +661,7 @@ export const ExecutionsPage: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => setActiveModalTab("edit_record")}
-                    className={`px-3 py-1.5 rounded-xl transition flex items-center gap-1.5 ${
+                    className={`px-3 py-1.5 rounded-xl transition flex shrink-0 items-center gap-1.5 whitespace-nowrap ${
                       activeModalTab === "edit_record"
                         ? "bg-amber-600 text-white shadow-2xs font-bold"
                         : "text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200"
@@ -646,7 +674,7 @@ export const ExecutionsPage: React.FC = () => {
               </div>
 
               {/* Tab Content Panes */}
-              <div className="space-y-4 overflow-y-auto flex-1 text-xs pr-1">
+              <div className="space-y-4 overflow-y-auto flex-1 min-h-0 text-xs pr-1">
                 {selectedExecution.error_message && (
                   <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 space-y-2">
                     <strong className="flex items-center gap-1.5 text-rose-900">
@@ -748,127 +776,66 @@ export const ExecutionsPage: React.FC = () => {
                       ].includes(k)
                   );
 
-                  // TAB 1: Content & Image Preview
+                  // TAB 1: Rendered content, database write plan and provenance (shared preview)
                   if (activeModalTab === "preview") {
+                    const versions: any[] = [...(selectedExecution.versions ?? [])].sort((a: any, b: any) => b.version_number - a.version_number);
+                    const v = versions[versionIdx] ?? versions[0];
+                    const vPayload = v?.payload ?? payload;
+                    const tz = selectedExecution.automation?.timezone || "UTC";
                     return (
-                      <div className="space-y-4">
-                        {/* Visual Banner Preview Card */}
-                        {bannerImg && (
-                          <div className="space-y-1.5">
-                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
-                              Featured Banner Preview
-                            </span>
-                            <div className="relative rounded-2xl overflow-hidden border border-slate-200 bg-slate-900 shadow-sm max-h-72">
-                              <img
-                                src={bannerImg}
-                                alt="Visual Banner Preview"
-                                className="w-full h-56 sm:h-64 object-cover"
-                                onError={(e) => {
-                                  (e.target as any).src =
-                                    "https://images.unsplash.com/photo-1518770660439-4636190af475?w=1200&auto=format&fit=crop&q=80";
-                                }}
-                              />
-                              <div className="absolute top-3 left-3">
-                                <span className="px-2.5 py-1 rounded-lg text-[10px] font-bold bg-slate-950/80 text-white backdrop-blur-xs flex items-center gap-1.5 shadow-2xs">
-                                  <ImageIcon className="w-3.5 h-3.5 text-indigo-400" />
-                                  <span>Visual Asset Attached</span>
-                                </span>
-                              </div>
-                              <div className="absolute bottom-2 right-3">
-                                <span className="text-[10px] text-white/90 font-mono bg-black/60 px-2 py-0.5 rounded backdrop-blur-xs truncate max-w-sm block">
-                                  {String(bannerImg).startsWith("data:")
-                                    ? "Local Upload (Base64 Encoded Image)"
-                                    : bannerImg}
-                                </span>
-                              </div>
-                            </div>
+                      <div className="space-y-3">
+                        <div className="grid grid-cols-3 gap-1.5 sm:gap-2">
+                          <div className="min-w-0 rounded-xl border border-slate-200 bg-slate-50 p-2 sm:p-2.5">
+                            <span className="block text-[10px] font-bold uppercase text-slate-400">Generated</span>
+                            <span className="block text-[11px] sm:text-xs font-semibold leading-snug text-slate-800">{selectedExecution.generation_completed_at ? formatInstant(selectedExecution.generation_completed_at, tz) : "Not yet"}</span>
                           </div>
-                        )}
-
-                        {/* Title & Slug */}
-                        {(payload.title || payload.name) && (
-                          <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs space-y-1">
-                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
-                              Title / Main Headline
-                            </span>
-                            <h4 className="font-extrabold text-slate-900 text-sm sm:text-base leading-snug">
-                              {payload.title || payload.name}
-                            </h4>
-                            {payload.slug && (
-                              <span className="text-[11px] text-indigo-600 font-mono font-medium block">
-                                slug: /{payload.slug}
-                              </span>
-                            )}
+                          <div className="min-w-0 rounded-xl border border-slate-200 bg-slate-50 p-2 sm:p-2.5">
+                            <span className="block text-[10px] font-bold uppercase text-slate-400">{selectedExecution.published_at ? "Published" : "Publishes"}</span>
+                            <span className="block text-[11px] sm:text-xs font-semibold leading-snug text-slate-800">{selectedExecution.published_at ? formatInstant(selectedExecution.published_at, tz) : selectedExecution.publication_time ? formatInstant(selectedExecution.publication_time, tz) : "—"}</span>
                           </div>
-                        )}
-
-                        {/* Excerpt / Summary */}
-                        {(payload.excerpt || payload.short_description) && (
-                          <div className="bg-indigo-50/40 border border-indigo-100 p-3.5 rounded-xl space-y-1">
-                            <span className="text-[10px] font-bold text-indigo-900 uppercase tracking-wider block">
-                              Excerpt / Brief Summary
-                            </span>
-                            <p className="text-slate-700 text-xs leading-relaxed italic">
-                              {payload.excerpt || payload.short_description}
-                            </p>
-                          </div>
-                        )}
-
-                        {/* Body Content / Description */}
-                        {(payload.content || payload.body || payload.description) && (
-                          <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs space-y-2">
-                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
-                              Full Body Content & Copy
-                            </span>
-                            <div className="text-slate-800 text-xs leading-relaxed max-h-60 overflow-y-auto whitespace-pre-line bg-slate-50/60 p-3 rounded-lg border border-slate-100 font-sans">
-                              {payload.content || payload.body || payload.description}
-                            </div>
-                          </div>
-                        )}
-
-                        {/* Remaining Meta Fields Grid */}
-                        <div className="space-y-1.5 pt-1">
-                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
-                            Additional Column Attributes & Metadata ({payloadKeys.length})
-                          </span>
-                          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                            {payloadKeys
-                              .filter(
-                                (k) =>
-                                  ![
-                                    "title",
-                                    "name",
-                                    "slug",
-                                    "excerpt",
-                                    "short_description",
-                                    "content",
-                                    "body",
-                                    "description",
-                                    "banner",
-                                    "image",
-                                    "meta_img",
-                                    "thumbnail",
-                                    "cover",
-                                    "photo",
-                                  ].includes(k)
-                              )
-                              .map((key) => (
-                                <div
-                                  key={key}
-                                  className="bg-white p-2.5 rounded-xl border border-slate-200/90 shadow-2xs truncate"
-                                >
-                                  <span className="text-[10px] font-mono text-slate-400 block truncate">
-                                    {key}
-                                  </span>
-                                  <span className="font-semibold text-slate-800 text-xs truncate block mt-0.5">
-                                    {typeof payload[key] === "object"
-                                      ? JSON.stringify(payload[key])
-                                      : String(payload[key])}
-                                  </span>
-                                </div>
-                              ))}
+                          <div className="min-w-0 rounded-xl border border-slate-200 bg-slate-50 p-2 sm:p-2.5">
+                            <span className="block text-[10px] font-bold uppercase text-slate-400">Written as</span>
+                            <span className="block text-[11px] sm:text-xs font-semibold leading-snug text-slate-800 break-words">{selectedExecution.target_record_id ? `${selectedExecution.automation?.target_table ?? "row"} #${selectedExecution.target_record_id}` : "Not written yet"}</span>
                           </div>
                         </div>
+
+                        {versions.length > 1 && (
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="text-[11px] font-semibold text-slate-500">Version:</span>
+                            {versions.map((ver: any, i: number) => (
+                              <button
+                                key={ver.id}
+                                type="button"
+                                onClick={() => setVersionIdx(i)}
+                                className={`rounded-lg border px-2 py-0.5 text-[11px] font-semibold ${i === versionIdx ? "border-indigo-600 bg-indigo-600 text-white" : "border-slate-200 bg-white text-slate-600 hover:border-indigo-300"}`}
+                              >
+                                v{ver.version_number} · {String(ver.status).toLowerCase().replace(/_/g, " ")}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        {v?.rejection_feedback && (
+                          <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-900">
+                            Written after reviewer feedback: “{v.rejection_feedback}”
+                          </p>
+                        )}
+
+                        {v || Object.keys(vPayload || {}).length ? (
+                          <ContentPreview
+                            payload={vPayload || {}}
+                            meta={v?.meta}
+                            targetTable={selectedExecution.automation?.target_table}
+                            timezone={tz}
+                            publicationTime={selectedExecution.published_at ? null : selectedExecution.publication_time}
+                            showStatusBanner={!selectedExecution.published_at}
+                          />
+                        ) : (
+                          <div className="rounded-xl border border-dashed border-slate-200 p-6 text-center text-xs text-slate-500">
+                            {["QUEUED", "GENERATING", "PENDING_GENERATION", "REGENERATING"].includes(selectedExecution.status)
+                              ? "Content is being generated. This view updates when it is ready."
+                              : "No content was generated for this run."}
+                          </div>
+                        )}
                       </div>
                     );
                   }
@@ -1227,7 +1194,7 @@ export const ExecutionsPage: React.FC = () => {
               </div>
 
               {/* Modal Footer */}
-              <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
+              <div className="shrink-0 pt-3 border-t border-slate-100 flex items-center justify-between">
                 <span className="text-[11px] text-slate-400 font-mono">
                   Execution Run ID #{selectedExecution.id}
                 </span>

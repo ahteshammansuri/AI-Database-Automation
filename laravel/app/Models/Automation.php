@@ -23,12 +23,17 @@ class Automation extends Model
         'ai_provider',
         'ai_model',
         'prompt_context',
+        'generation_options',
         'knowledge_document_ids',
         'schedule_type',
         'generation_time',
         'publication_time',
         'timezone',
         'start_date',
+        'end_date',
+        'weekly_days',
+        'schedule_anchor_at',
+        'completed_at',
         'requires_approval',
         'reviewer_email',
         'timeout_policy',
@@ -74,9 +79,43 @@ class Automation extends Model
         return [
             'field_mappings' => 'array',
             'knowledge_document_ids' => 'array',
+            'generation_options' => 'array',
+            'weekly_days' => 'array',
+            'schedule_anchor_at' => 'datetime',
+            'completed_at' => 'datetime',
             'requires_approval' => 'boolean',
             'is_active' => 'boolean',
         ];
+    }
+
+    /** Fields that define when the automation runs; changing any of them re-anchors the schedule. */
+    public const SCHEDULE_FIELDS = [
+        'schedule_type', 'start_date', 'end_date', 'weekly_days',
+        'generation_time', 'publication_time', 'timezone',
+    ];
+
+    /**
+     * Schedule state, next run and upcoming runs, using persisted execution counts.
+     */
+    public function scheduleSummary(): array
+    {
+        $pending = $this->executions()
+            ->whereNotIn('status', AutomationExecution::TERMINAL_STATUSES)
+            ->where(fn($q) => $q->whereNull('trigger_type')->orWhere('trigger_type', 'SCHEDULE'))
+            ->count();
+        $finished = $this->executions()
+            ->whereIn('status', AutomationExecution::TERMINAL_STATUSES)
+            ->where(fn($q) => $q->whereNull('trigger_type')->orWhere('trigger_type', 'SCHEDULE'))
+            ->count();
+
+        return app(\App\Services\Automation\ScheduleCalculator::class)->summary($this, now(), $pending, $finished);
+    }
+
+    /** Generation option with a default (tone, content_format, length, image_provider, image_style). */
+    public function generationOption(string $key, mixed $default = null): mixed
+    {
+        $opts = is_array($this->generation_options) ? $this->generation_options : [];
+        return array_key_exists($key, $opts) && $opts[$key] !== null && $opts[$key] !== '' ? $opts[$key] : $default;
     }
 
     public function user(): BelongsTo

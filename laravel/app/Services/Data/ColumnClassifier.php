@@ -4,10 +4,13 @@ namespace App\Services\Data;
 
 class ColumnClassifier
 {
+    // Whole-token matches where a bare substring would misfire (e.g. "company" contains "pan",
+    // "passenger" contains "pass", "hashtag" contains "hash").
     private const SECRET_PATTERNS = [
-        '/pass(?:word)?/i',
+        '/password|passwd|passphrase|passcode/i',
+        '/(^|_)pass($|_)/i',
         '/pwd/i',
-        '/hash/i',
+        '/hash(?!tag)/i',
         '/token/i',
         '/secret/i',
         '/api[_-]?key/i',
@@ -15,9 +18,9 @@ class ColumnClassifier
         '/private[_-]?key/i',
         '/card[_-]?(?:number|no|num)/i',
         '/cvv/i',
-        '/ssn/i',
-        '/aadhaar/i',
-        '/pan[_-]?(?:number|no|num)?/i',
+        '/(^|_)ssn($|_)/i',
+        '/aadhaa?r/i',
+        '/(^|_)pan($|_|no|num)/i',
     ];
 
     private const PII_PATTERNS = [

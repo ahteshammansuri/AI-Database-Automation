@@ -18,6 +18,7 @@ class ContentVersion extends Model
         'execution_id',
         'version_number',
         'payload',
+        'meta',
         'rejection_feedback',
         'status',
     ];
@@ -27,6 +28,7 @@ class ContentVersion extends Model
         return [
             'version_number' => 'integer',
             'payload' => 'array',
+            'meta' => 'array',
         ];
     }
 

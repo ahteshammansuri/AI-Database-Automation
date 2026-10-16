@@ -158,42 +158,48 @@ class OllamaProvider(BaseAIProvider):
                 schema_hints.append(f'"{f}": "Full comprehensive rich markdown article drawing from the retrieved knowledge"')
             elif "keyword" in lf or "tags" in lf:
                 schema_hints.append(f'"{f}": "comma, separated, topic, keywords"')
-            elif "banner" in lf:
-                schema_hints.append(f'"{f}": "high-res Unsplash image URL related to the topic"')
-            elif "meta_img" in lf or "thumbnail" in lf:
-                schema_hints.append(f'"{f}": "Unsplash image URL related to the topic"')
+            elif any(k in lf for k in ("banner", "image", "img", "thumbnail", "cover", "photo")):
+                # Images are produced by the image pipeline; the text model must never invent URLs.
+                schema_hints.append(f'"{f}": ""')
             else:
                 schema_hints.append(f'"{f}": "relevant dynamic value"')
 
-        schema_json_format = "{\n  " + ",\n  ".join(schema_hints) + "\n}"
-
-        full_system = (
-            f"{system_prompt}\n"
-            f"You are generating dynamic content for target table '{target_table}'.\n"
-            f"You MUST generate a complete, valid JSON object matching EXACTLY these required fields:\n"
-            f"{schema_json_format}\n"
-            f"Ensure all content is dynamic, informative, and incorporates the topic and any retrieved knowledge context provided."
-        )
+        field_contract = kwargs.get("field_contract")
+        if field_contract:
+            full_system = f"{system_prompt}\nYou are writing one new record for the '{target_table}' table.\n{field_contract}"
+        else:
+            schema_json_format = "{\n  " + ",\n  ".join(schema_hints) + "\n}"
+            full_system = (
+                f"{system_prompt}\n"
+                f"You are generating dynamic content for target table '{target_table}'.\n"
+                f"You MUST generate a complete, valid JSON object matching EXACTLY these required fields:\n"
+                f"{schema_json_format}\n"
+                f"Ensure all content is dynamic, informative, and incorporates the topic and any retrieved knowledge context provided."
+            )
         if rejection_feedback:
             full_system += f"\nIMPORTANT - Previous version was rejected with feedback: '{rejection_feedback}'. Address this feedback completely in your new generation."
         if recent_titles:
             recent_str = ", ".join([f"'{t}'" for t in recent_titles[:10]])
             full_system += f"\nAVOID DUPLICATION - Do NOT repeat or closely imitate these recently published titles: [{recent_str}]."
 
+        budget = int(kwargs.get("max_output_tokens") or 450)
         payload = {
             "model": self.model,
             "prompt": prompt,
             "system": full_system,
             "format": "json",
             "stream": False,
+            "keep_alive": "30m",
             "options": {
                 "temperature": 0.7,
-                "num_predict": 450,
-                "keep_alive": "30m"
+                "num_predict": budget,
+                # Room for system contract + RAG context + the answer without silent truncation,
+                # but no larger than needed (a bigger window costs memory and prompt-eval time on CPU).
+                "num_ctx": 4096 if budget + (len(full_system) + len(prompt)) // 3 + 256 <= 4096 else 8192,
             }
         }
 
-        with httpx.Client(timeout=300.0) as client:
+        with httpx.Client(timeout=600.0) as client:
             res = client.post(f"{self.base_url}/api/generate", json=payload)
             if res.status_code != 200:
                 raise RuntimeError(f"Ollama generation failed with status {res.status_code}: {res.text}")
@@ -210,52 +216,7 @@ class OllamaProvider(BaseAIProvider):
             if not isinstance(parsed, dict):
                 raise ValueError("Model output did not parse into a JSON object dictionary.")
 
-            # Detect topic domain for intelligent defaults if any field is missing
-            prompt_lower = prompt.lower()
-            is_food = any(w in prompt_lower for w in ["food", "meat", "diet", "diate", "eat", "meal", "nutrition", "recipe", "health", "macro"])
-            is_tech = any(w in prompt_lower for w in ["database", "sql", "mysql", "api", "code", "devops", "cloud", "system", "architecture"])
-
-            default_banner = (
-                "https://images.unsplash.com/photo-1498837167922-ddd27525d352?w=1200&auto=format&fit=crop&q=80" if is_food
-                else "https://images.unsplash.com/photo-1518770660439-4636190af475?w=1200&auto=format&fit=crop&q=80" if is_tech
-                else "https://images.unsplash.com/photo-1486312338219-ce68d2c6f44d?w=1200&auto=format&fit=crop&q=80"
-            )
-            default_meta_img = (
-                "https://images.unsplash.com/photo-1540420773420-3366772f4999?w=800&auto=format&fit=crop&q=80" if is_food
-                else "https://images.unsplash.com/photo-1451187580459-43490279c0fa?w=800&auto=format&fit=crop&q=80" if is_tech
-                else "https://images.unsplash.com/photo-1499750310107-5fef28a66643?w=800&auto=format&fit=crop&q=80"
-            )
-
-            # Ensure all required fields exist and are populated
-            for field in required_fields:
-                lf = field.lower()
-                val = parsed.get(field)
-                if val is None or val == "":
-                    if lf == "title":
-                        parsed[field] = "Healthy Dietary Practices & Nutrition Insights" if is_food else f"Insights & Best Practices for {target_table.title()}"
-                    elif lf == "slug":
-                        title_src = parsed.get("title", "article")
-                        clean = re.sub(r"[^\w\s-]", "", str(title_src).lower()).strip()
-                        parsed[field] = re.sub(r"[-\s]+", "-", clean) + f"-{int(time.time()) % 1000}"
-                    elif lf in ["excerpt", "short_description", "summary"]:
-                        parsed[field] = f"An evidence-based overview of {parsed.get('title', 'this topic')}, highlighting actionable takeaways and core principles."
-                    elif lf in ["content", "description", "body"]:
-                        title_str = parsed.get('title', 'Article Overview')
-                        parsed[field] = f"# {title_str}\n\n{parsed.get('short_description', parsed.get('excerpt', ''))}\n\n## Core Principles\nEssential insights tailored to {target_table}."
-                    elif "banner" in lf:
-                        parsed[field] = default_banner
-                    elif "meta_img" in lf or "thumbnail" in lf:
-                        parsed[field] = default_meta_img
-                    elif lf in ["seo_title", "meta_title"]:
-                        parsed[field] = str(parsed.get("title", ""))[:60]
-                    elif lf in ["meta_description"]:
-                        parsed[field] = str(parsed.get("short_description", parsed.get("excerpt", "")))[:160]
-                    elif "keyword" in lf or "tags" in lf:
-                        parsed[field] = "healthy food, nutrition, meal planning, wellness, healthy diet" if is_food else "database, automation, devops, mysql, technology"
-                    elif lf == "status":
-                        parsed[field] = "1"
-                    elif lf.endswith("_id") or lf in ["category_id", "author_id", "user_id"]:
-                        parsed[field] = 1
+            # Missing fields are left missing: the caller reports them instead of publishing invented filler.
 
             # Schema constraint post-validation & coercion
             if schema_constraints:

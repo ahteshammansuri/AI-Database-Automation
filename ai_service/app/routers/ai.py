@@ -15,6 +15,7 @@ from ai_service.app.schemas.ai import (
 )
 from ai_service.app.providers.factory import AIProviderFactory
 from ai_service.app.rag.service import rag_service
+from ai_service.app.services import content_contract as contract
 
 router = APIRouter(prefix="/v1/ai", tags=["AI"])
 
@@ -46,25 +47,69 @@ def generate_content(req: GenerateRequest):
             )
             final_prompt = f"{context_block}\n\nTask:\n{req.prompt}"
 
+        specs = req.field_specs or []
+        if specs:
+            required_fields = contract.spec_names(specs)
+            field_contract = contract.build_field_contract(specs, req.length or "medium")
+            budget = req.max_output_tokens or contract.token_budget(specs, req.length or "medium")
+        else:
+            required_fields = req.required_fields
+            field_contract = None
+            budget = req.max_output_tokens
+
         generated_data = provider.generate_structured_data(
             prompt=final_prompt,
             system_prompt=req.system_prompt,
             target_table=req.target_table,
-            required_fields=req.required_fields,
+            required_fields=required_fields,
             rejection_feedback=req.rejection_feedback,
             schema_constraints=req.schema_constraints,
             relation_catalog=req.relation_catalog,
             recent_titles=req.recent_titles,
+            field_contract=field_contract,
+            field_specs=specs or None,
+            max_output_tokens=budget,
         )
+
+        missing: list = []
+        if specs:
+            generated_data = contract.normalize_values(generated_data, specs)
+            missing = contract.missing_fields(generated_data, specs)
+            if missing:
+                # One focused repair pass for the fields the model skipped; never filled with placeholders.
+                repair_specs = contract.subset(specs, missing)
+                written = {k: v for k, v in generated_data.items() if isinstance(v, str) and len(v) < 300}
+                repair_prompt = (
+                    f"{final_prompt}\n\nYou already wrote these fields: {written}.\n"
+                    f"Now return ONLY the missing fields: {', '.join(missing)}."
+                )
+                try:
+                    repaired = provider.generate_structured_data(
+                        prompt=repair_prompt,
+                        system_prompt=req.system_prompt,
+                        target_table=req.target_table,
+                        required_fields=missing,
+                        rejection_feedback=req.rejection_feedback,
+                        field_contract=contract.build_field_contract(repair_specs, req.length or "medium"),
+                        field_specs=repair_specs,
+                        max_output_tokens=contract.token_budget(repair_specs, req.length or "medium"),
+                    )
+                    for k, v in contract.normalize_values(repaired, repair_specs).items():
+                        if k in missing:
+                            generated_data[k] = v
+                except Exception:
+                    pass
+                missing = contract.missing_fields(generated_data, specs)
 
         latency = round(time.time() - start, 3)
 
         return GenerateResponse(
             success=True,
             provider_used=req.provider,
-            model_used=req.model or "default",
+            model_used=getattr(provider, "model", None) or getattr(provider, "model_name", None) or req.model or "default",
             latency_seconds=latency,
-            data=generated_data
+            data=generated_data,
+            missing_fields=missing,
         )
     except Exception as e:
         latency = round(time.time() - start, 3)

@@ -233,25 +233,24 @@ Follow this end-to-end walkthrough on a clean installation:
 2. Select **Local Ollama** (default, no paid API needed) or **Mock Provider** (instant deterministic generation for testing).
 3. *(Optional)* Navigate to **Knowledge Base** (`/knowledge`) and upload `.md`, `.txt`, or `.pdf` technical guidelines to index into the FAISS vector store.
 
-### Step 5: Create a Content Automation Pipeline
-1. Navigate to **Automations** (`/automations/new`).
-2. Select target table: `posts`.
-3. Map columns:
-   - Title: AI Generated (`Tech Title`)
-   - Slug: Auto-slug
-   - Content: AI Longform Body
-   - Excerpt: AI Summary
-   - Status: `draft` or `published`
-4. Set Reviewer Email: e.g., `editor@example.com`.
-5. Save the automation.
+### Step 5: Create an automation (any table: posts, articles, news, products, FAQs)
+1. Open **New Automation** (`/automations/new`), pick a template or describe it in words, then choose the connection and the table to write into.
+2. **Fields**: every column is read from your live database and gets a safe default with a plain-English explanation:
+   - text columns (title, summary, body, SEO fields) → *AI writes it*;
+   - foreign keys (e.g. `category_id → categories`) → *AI picks a category (creates it if new)*: the parent row is created first, with all of its required columns filled, then the new row stores its id, in one transaction. Protected parents such as `users` are only ever linked to an existing record you choose;
+   - image columns (banner, cover, thumbnail, og/meta image) → *Generate an image* from the generated title and summary;
+   - slug → built from the title and made unique; publish/created dates → the publication time; status → a fixed value.
+3. **AI & content**: topic, tone, length, Markdown or HTML, image source, model, optional knowledge documents.
+4. **Schedule**: one time, daily or weekly; timezone; start date and optional *run until* date; weekdays for weekly; generation time and publication time (at least 15 minutes later). The calendar shows this schedule's run days next to your other automations; the summary shows the next runs.
+5. **Preview & save**: *Generate sample preview* runs the real pipeline (text, parent decisions, images, exact database write plan) without writing anything. Then **Save and schedule**.
 
-### Step 6: Run Pipeline & Email Review
-1. Click **Run Now** on your automation.
-2. The background queue worker invokes the AI service, validates structured output against the target schema, and dispatches an approval email.
-3. Open **Mailpit** at [http://localhost:8025](http://localhost:8025).
-4. Open the email preview, inspect the rendered markdown and publication timestamp, and click **Approve Content**.
-5. The queue worker performs an atomic, parameterized `INSERT` into the target MySQL `posts` table.
-6. Verify the published article in **Executions** (`/executions`) and **Audit Logs** (`/audit-logs`).
+### Step 6: Review email, approval and publishing
+1. At generation time the background worker writes the content (your browser can be closed).
+2. If approval is on, the reviewer gets an HTML email with the rendered article and images, the exact database steps (e.g. *1. Create category "Cloud Databases" · 2. Insert into posts*), the publication time in the automation's timezone, and what happens without a decision.
+3. **Review and approve** / **Request changes** open a secure page where one click decides. Requesting changes regenerates a new version with your notes (up to 3 times).
+4. At publication time the approved version is written in one transaction. Check the run in **Execution history** (rendered content, write plan, timeline) and **Audit Logs**.
+
+Images: with an OpenAI or Gemini key saved on **AI Providers**, images are AI-generated with that key. Without a key, a designed cover (title + category, colours from the topic) is created locally for free. Set `MEDIA_PUBLIC_URL` so the stored image URLs are reachable by your website.
 
 ---
 
@@ -369,6 +368,8 @@ python scripts/verify_orbit_mascot.py
 | `MAIL_PORT` | `1025` | `1025` | Mailpit SMTP port |
 | `DEMO_MYSQL_PORT` | `3308` | `3309` | Exposed host port for the synthetic demo MySQL target |
 | `VITE_BACKEND_URL` | `http://localhost:8000` | `http://laravel:8000` | Target URL for Vite `/api` reverse proxy |
+| `MEDIA_PUBLIC_URL` | `http://127.0.0.1:8000` (set by `run_all.sh`) | your public API host | Base URL for generated/uploaded images stored in `storage/app/public` (`php artisan storage:link`) |
+| `FRONTEND_URL` | `http://localhost:5173` | your portal URL | Used for the review links in approval emails |
 
 ---
 

@@ -248,7 +248,7 @@
       "id": "builder.setup",
       "route": "/automations/new",
       "title": "Automation builder, step 1: connection and table",
-      "purpose": "Name the automation and choose the connection, target table, operation and mode. Then Next.",
+      "purpose": "Name the automation and choose the connection, target table and content mode (AI or fixed values). Automations insert new rows. Then Next.",
       "openable": false,
       "fields": [
         {
@@ -271,12 +271,11 @@
         },
         {
           "name": "operation",
-          "label": "Operation",
+          "label": "Operation (automations insert new rows)",
           "type": "select",
           "required": true,
           "enum": [
-            "INSERT",
-            "UPDATE"
+            "INSERT"
           ]
         },
         {
@@ -315,7 +314,7 @@
       "id": "builder.mappings",
       "route": "/automations/new",
       "title": "Automation builder, step 2: field mappings",
-      "purpose": "Review how each table column is filled. Then Next (or Back).",
+      "purpose": "Each column of the target table shows how it is filled (AI, fixed value, linked record, image, slug, publication time, empty or database default) with a plain-English explanation. Safe defaults are pre-selected from the live schema. Then Next.",
       "openable": false,
       "fields": [],
       "actions": [
@@ -337,7 +336,7 @@
       "id": "builder.content",
       "route": "/automations/new",
       "title": "Automation builder, step 3: AI and context",
-      "purpose": "Choose the AI provider/model, topic brief, tone and knowledge documents. Then Next.",
+      "purpose": "Topic and direction, tone, body length and format, image source, text model and optional knowledge documents. Then Next.",
       "openable": false,
       "fields": [
         {
@@ -384,7 +383,7 @@
       "id": "builder.schedule",
       "route": "/automations/new",
       "title": "Automation builder, step 4: schedule and approval",
-      "purpose": "Frequency, start date, generation and publication times, approval policy. Then Next.",
+      "purpose": "One-time, daily or weekly; timezone; start date and optional end date (run until); weekdays for weekly; generation time and publication time at least 15 minutes later; approval email and the no-response policy. Then Next.",
       "openable": false,
       "fields": [
         {
@@ -400,7 +399,7 @@
         },
         {
           "name": "start_date",
-          "label": "Starting date (YYYY-MM-DD)",
+          "label": "Start date, or the run date for one-time (YYYY-MM-DD)",
           "type": "text",
           "required": true
         },
@@ -412,7 +411,7 @@
         },
         {
           "name": "publication_time",
-          "label": "Publication time (HH:MM)",
+          "label": "Publication time (HH:MM, at least 15 minutes after generation)",
           "type": "text",
           "required": true
         },
@@ -431,6 +430,24 @@
           "label": "Reviewer email",
           "type": "text",
           "required": false
+        },
+        {
+          "name": "end_date",
+          "label": "Run until (YYYY-MM-DD, empty = no end date)",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "weekly_days",
+          "label": "Weekdays for weekly runs (ISO numbers, e.g. 1,4 = Monday, Thursday)",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "timezone",
+          "label": "Timezone (IANA, e.g. Asia/Kolkata)",
+          "type": "text",
+          "required": true
         }
       ],
       "actions": [

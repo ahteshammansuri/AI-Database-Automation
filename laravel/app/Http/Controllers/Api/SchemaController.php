@@ -70,6 +70,10 @@ class SchemaController extends Controller
             return response()->json(['error' => 'Invalid table name'], 422);
         }
 
+        if (app(\App\Services\Data\DataAccessPolicy::class)->getTableClass($connection, $table) === 'blocked') {
+            return response()->json(['error' => "Table '{$table}' is protected and cannot be listed."], 403);
+        }
+
         $search = $request->query('search') ?: $request->query('q');
         $limit = min((int) ($request->query('limit', 100)), 200);
 

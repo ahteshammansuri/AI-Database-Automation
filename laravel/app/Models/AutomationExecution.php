@@ -13,10 +13,16 @@ class AutomationExecution extends Model
 
     protected $table = 'automation_executions';
 
+    /** States after which an execution will never change again on its own. */
+    public const TERMINAL_STATUSES = ['PUBLISHED', 'FAILED', 'SKIPPED', 'CANCELLED', 'REJECTED', 'MISSED'];
+
     protected $fillable = [
         'user_id',
         'automation_id',
         'status',
+        'trigger_type',
+        'occurrence_date',
+        'scheduled_generation_at',
         'idempotency_key',
         'generation_started_at',
         'generation_completed_at',
@@ -56,6 +62,36 @@ class AutomationExecution extends Model
         return $this->timeline_events ?? [];
     }
 
+    /**
+     * Scheduling instants are always stored in UTC, whatever timezone the caller's Carbon carries,
+     * so comparisons against now() are correct for every automation timezone.
+     */
+    protected function publicationTime(): \Illuminate\Database\Eloquent\Casts\Attribute
+    {
+        return \Illuminate\Database\Eloquent\Casts\Attribute::make(
+            set: fn($value) => self::toUtcString($value),
+        );
+    }
+
+    protected function scheduledGenerationAt(): \Illuminate\Database\Eloquent\Casts\Attribute
+    {
+        return \Illuminate\Database\Eloquent\Casts\Attribute::make(
+            set: fn($value) => self::toUtcString($value),
+        );
+    }
+
+    private static function toUtcString(mixed $value): ?string
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+        $tz = config('app.timezone', 'UTC');
+        $c = $value instanceof \DateTimeInterface
+            ? \Carbon\Carbon::instance($value)
+            : \Carbon\Carbon::parse((string) $value, $tz);
+        return $c->setTimezone($tz)->format('Y-m-d H:i:s');
+    }
+
     protected static function booted(): void
     {
         static::creating(function (AutomationExecution $execution) {
@@ -72,6 +108,8 @@ class AutomationExecution extends Model
             'generation_completed_at' => 'datetime',
             'publication_time' => 'datetime',
             'published_at' => 'datetime',
+            'scheduled_generation_at' => 'datetime',
+            'occurrence_date' => 'date:Y-m-d',
             'lease_expires_at' => 'datetime',
             'queue_wait_ms' => 'integer',
             'execution_duration_ms' => 'integer',

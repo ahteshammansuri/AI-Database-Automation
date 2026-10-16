@@ -104,3 +104,16 @@ The backend enforces the access mode regardless of the database user's privilege
 - **Confirmation:** `always_confirm` tools (profile/automation/document removal, published-record edits) always wait for an explicit user confirmation. A spoken "yes" counts only for the exact pending call and only after Orbit asked.
 - **Retrieved content is untrusted:** RAG passages and database text are delimited as reference data in the model request and cannot change policy. Retrieval is limited to product docs plus the requesting user's own partition.
 - **Browser actions** are allowlisted (`UiActionCoordinator::ALLOWED_ACTIONS`, registered routes only). The model cannot send code or selectors. Visible "press" actions never call the API themselves.
+
+
+---
+
+## Automation writes: relations, images and review (2026-10-16)
+- **Parent creation** only under an explicit `CREATE_IF_MISSING` column policy, never in sensitive, blocked or read-only tables, never with secret columns, never by guessing another foreign key. The child row is written in the same transaction, after its parent.
+- **No silent fallbacks:** an unresolvable foreign key, a missing required column, an invalid enum value or a non-unique value is an error before any write. Over-long text is shortened (multibyte-safe) and reported.
+- **Secret columns** (`ColumnClassifier`) are never written by automations, previews or manual publishing. The classifier now matches whole tokens, so `company_name`, `panel` or `passenger_count` are no longer misclassified, while `pan`, `pan_number`, `password_hash` and `remember_token` still are.
+- **Lookup lists** of parent records never use e-mail columns as labels and refuse blocked tables.
+- **Images:** provider keys are the user's own (encrypted at rest, sent per request to the internal AI service, never stored there). Every image is decoded and re-encoded before storage, so the stored file is a valid image of a known type. Uploads are limited to JPEG/PNG/WebP/GIF ≤ 10 MB and checked again by magic bytes.
+- **Review links** are single-use, bound to one version, refused once the run has finished, and never written to logs or the audit trail. Approval tokens are no longer returned by the executions API. Email delivery failures are recorded as `APPROVAL_EMAIL_FAILED`, never reported as sent.
+- **Publishing** is idempotent per execution (`publish_exec_{id}`), never acts on a finished run, and can never publish a rejected or invalid version ("Publish now" refuses them).
+- **Rendered previews** never use `innerHTML`: Markdown is parsed into React elements, and HTML is rebuilt from an allowlist (links limited to http/https/mailto).

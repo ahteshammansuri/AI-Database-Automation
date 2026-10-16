@@ -6,7 +6,9 @@ use App\Http\Controllers\Controller;
 use App\Models\ApprovalToken;
 use App\Models\ContentVersion;
 use App\Models\AutomationExecution;
+use App\Models\AuditLog;
 use App\Services\EmailApprovalService;
+use App\Services\LiveEventService;
 use App\Jobs\PublishAutomationContentJob;
 use App\Jobs\GenerateAutomationContentJob;
 use Illuminate\Http\Request;
@@ -25,9 +27,11 @@ class ApprovalController extends Controller
     {
         $pendingVersions = ContentVersion::where('user_id', $request->user()->id)
             ->where('status', 'PENDING_APPROVAL')
-            ->with(['execution.automation:id,name,target_table', 'approvalTokens'])
+            ->with(['execution.automation:id,name,target_table,timezone,timeout_policy,connection_id', 'execution.automation.connection:id,name,database_name'])
             ->orderBy('created_at', 'desc')
             ->get();
+        // Signed tokens are never sent to the portal; the portal acts through authenticated endpoints.
+        $pendingVersions->each(fn($v) => $v->makeHidden('approvalTokens'));
 
         return response()->json($pendingVersions);
     }
@@ -52,16 +56,24 @@ class ApprovalController extends Controller
         $execution = $version->execution;
         $automation = $execution->automation;
 
+        $reviewable = $version->status === 'PENDING_APPROVAL'
+            && !in_array($execution->status, array_merge(AutomationExecution::TERMINAL_STATUSES, ['PUBLISHING', 'GENERATING', 'REGENERATING']), true);
+
         return response()->json([
-            'valid' => $token->isValid(),
+            'valid' => $token->isValid() && $reviewable,
             'is_used' => !is_null($token->used_at),
             'is_expired' => $token->expires_at->isPast(),
+            'reviewable' => $reviewable,
+            'execution_status' => $execution->status,
             'automation_name' => $automation->name,
             'target_table' => $automation->target_table,
+            'timezone' => $automation->timezone,
+            'timeout_policy' => $automation->timeout_policy,
             'version_number' => $version->version_number,
             'status' => $version->status,
             'publication_time' => $execution->publication_time,
             'content_payload' => $version->payload,
+            'meta' => $version->meta,
             'rejection_feedback' => $version->rejection_feedback,
             'expires_at' => $token->expires_at,
         ]);
@@ -128,7 +140,11 @@ class ApprovalController extends Controller
 
         $version = ContentVersion::where('user_id', $request->user()->id)
             ->where('id', $id)
+            ->with('execution')
             ->firstOrFail();
+        if ($blocked = $this->notReviewable($version)) {
+            return $blocked;
+        }
 
         $version->payload = $request->input('payload');
         $version->save();
@@ -161,6 +177,9 @@ class ApprovalController extends Controller
             ->firstOrFail();
 
         $execution = $version->execution;
+        if ($blocked = $this->notReviewable($version)) {
+            return $blocked;
+        }
 
         if ($request->has('payload') && is_array($request->input('payload'))) {
             $version->payload = $request->input('payload');
@@ -175,6 +194,7 @@ class ApprovalController extends Controller
         $publishNow = $request->boolean('publish_now') || ($execution->publication_time && $execution->publication_time->isPast());
 
         if ($publishNow) {
+            $execution->update(['status' => 'PUBLISHING', 'lease_expires_at' => now()->addMinutes(10)]);
             $execution->addTimelineEvent('PORTAL_APPROVAL_PUBLISH_NOW', 'Approved by live editor in portal; immediate publication dispatched to target database.');
             PublishAutomationContentJob::dispatch($execution->id);
         } else {
@@ -205,7 +225,10 @@ class ApprovalController extends Controller
             ->firstOrFail();
 
         $execution = $version->execution;
-        $feedback = $request->input('feedback', 'Requested revisions from editor in portal.');
+        if ($blocked = $this->notReviewable($version)) {
+            return $blocked;
+        }
+        $feedback = trim((string) $request->input('feedback', '')) ?: 'Requested revisions from editor in portal.';
 
         $version->update([
             'status' => 'REJECTED',
@@ -213,9 +236,6 @@ class ApprovalController extends Controller
         ]);
 
         $maxRetries = 3;
-        if ($execution->automation && !empty($execution->automation->approval_policy['max_regenerations'])) {
-            $maxRetries = (int) $execution->automation->approval_policy['max_regenerations'];
-        }
 
         $rejectedCount = ContentVersion::where('execution_id', $execution->id)
             ->where('status', 'REJECTED')
@@ -236,7 +256,8 @@ class ApprovalController extends Controller
             ]);
         }
 
-        // Trigger AI regeneration with feedback
+        // Trigger AI regeneration with feedback (the job only claims runs marked REGENERATING)
+        $execution->update(['status' => 'REGENERATING']);
         GenerateAutomationContentJob::dispatch($execution->id, $feedback);
         $execution->addTimelineEvent('PORTAL_REGENERATION_REQUESTED', "Editor rejected version #{$version->version_number} with feedback: '{$feedback}'. Triggered AI regeneration.");
 
@@ -245,5 +266,18 @@ class ApprovalController extends Controller
             'version' => $version,
             'execution' => $execution->fresh(),
         ]);
+    }
+
+    /** 409 response when a version can no longer be edited, approved or rejected. */
+    private function notReviewable(ContentVersion $version): ?\Illuminate\Http\JsonResponse
+    {
+        $execution = $version->execution;
+        if ($version->status !== 'PENDING_APPROVAL') {
+            return response()->json(['message' => "This draft is no longer awaiting review (it is {$version->status})."], 409);
+        }
+        if (!$execution || in_array($execution->status, array_merge(AutomationExecution::TERMINAL_STATUSES, ['PUBLISHING', 'GENERATING', 'REGENERATING']), true)) {
+            return response()->json(['message' => 'This run is ' . strtolower((string) $execution?->status) . ', so the draft can no longer be changed.'], 409);
+        }
+        return null;
     }
 }

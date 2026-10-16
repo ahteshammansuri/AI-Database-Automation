@@ -23,6 +23,8 @@ import {
   RefreshCw
 } from "lucide-react";
 import { api } from "../services/api";
+import { ContentPreview } from "../components/content/ContentPreview";
+import { formatInstant } from "../lib/schedule";
 import { StatusPill } from "../components/common/StatusPill";
 import { useToast } from "../context/ToastContext";
 import { useOrbitSurface } from "../hooks/useOrbitSurface";
@@ -171,7 +173,7 @@ export const ApprovalsPage: React.FC = () => {
   const openReviewModal = (item: PendingApprovalItem) => {
     setSelectedItem(item);
     setEditPayload({ ...(item.payload || {}) });
-    setActiveTab("edit");
+    setActiveTab("preview");
   };
 
   const handleFieldChange = (field: string, value: any) => {
@@ -436,13 +438,13 @@ export const ApprovalsPage: React.FC = () => {
       {/* Live Editorial Review & In-Place Editor Modal */}
       <AnimatePresence>
         {selectedItem && !showRejectModal && (
-          <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
             <motion.div
               initial={{ opacity: 0, scale: 0.95, y: 10 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 10 }}
               transition={{ duration: 0.2 }}
-              className="bg-white border border-slate-200 rounded-2xl max-w-3xl w-full p-6 shadow-2xl space-y-4 max-h-[90vh] flex flex-col"
+              className="bg-white border border-slate-200 rounded-t-2xl sm:rounded-2xl max-w-4xl w-full p-4 sm:p-6 shadow-2xl space-y-4 max-h-[94vh] sm:max-h-[90vh] flex flex-col"
             >
               {/* Modal Header */}
               <div className="flex items-center justify-between border-b border-slate-100 pb-3">
@@ -468,23 +470,23 @@ export const ApprovalsPage: React.FC = () => {
               </div>
 
               {/* Publication Schedule Notice */}
-              <div className="p-3 bg-indigo-50/70 border border-indigo-200/80 rounded-xl flex items-center justify-between text-xs text-indigo-900">
+              <div className="p-3 bg-indigo-50/70 border border-indigo-200/80 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-indigo-900">
                 <div className="flex items-center gap-2">
                   <Clock className="w-4 h-4 text-indigo-600 shrink-0" />
                   <span>
                     <strong>Scheduled Publication:</strong>{" "}
                     {selectedItem.execution?.publication_time
-                      ? new Date(selectedItem.execution.publication_time).toLocaleString()
-                      : "Immediate"}
+                      ? formatInstant(selectedItem.execution.publication_time, (selectedItem.execution?.automation as any)?.timezone || "UTC", { withZone: true })
+                      : "Immediately after approval"}
                   </span>
                 </div>
                 <span className="text-[11px] font-medium text-indigo-700 bg-white px-2 py-0.5 rounded border border-indigo-100">
-                  Any changes saved here will be committed to MySQL
+                  Edits change this draft only; nothing is written until it is published
                 </span>
               </div>
 
               {/* Tabs */}
-              <div className="flex items-center gap-1 border-b border-slate-200 pb-2">
+              <div className="flex items-center gap-1 border-b border-slate-200 pb-2 overflow-x-auto">
                 <button
                   type="button"
                   onClick={() => setActiveTab("edit")}
@@ -495,7 +497,7 @@ export const ApprovalsPage: React.FC = () => {
                   }`}
                 >
                   <Edit3 className="w-3.5 h-3.5 inline mr-1" />
-                  Live Field Editor
+                  Edit fields
                 </button>
                 <button
                   type="button"
@@ -507,7 +509,7 @@ export const ApprovalsPage: React.FC = () => {
                   }`}
                 >
                   <Eye className="w-3.5 h-3.5 inline mr-1" />
-                  Article Preview
+                  Preview
                 </button>
                 <button
                   type="button"
@@ -651,24 +653,13 @@ export const ApprovalsPage: React.FC = () => {
                 )}
 
                 {activeTab === "preview" && (
-                  <div className="space-y-4 p-4 bg-slate-50 rounded-xl border border-slate-200">
-                    <h2 className="text-lg font-bold text-slate-900">
-                      {editPayload.title || editPayload.name || "Untitled Article"}
-                    </h2>
-                    {editPayload.slug && (
-                      <p className="text-xs font-mono text-indigo-600">
-                        Target Route: /{editPayload.slug}
-                      </p>
-                    )}
-                    {(editPayload.excerpt || editPayload.description) && (
-                      <p className="text-xs italic text-slate-600 border-l-2 border-indigo-500 pl-3">
-                        {editPayload.excerpt || editPayload.description}
-                      </p>
-                    )}
-                    <div className="pt-3 border-t border-slate-200 text-xs text-slate-800 leading-relaxed whitespace-pre-line font-sans">
-                      {editPayload.content || editPayload.body || "No body content provided."}
-                    </div>
-                  </div>
+                  <ContentPreview
+                    payload={editPayload}
+                    meta={(selectedItem as any).meta}
+                    targetTable={selectedItem.execution?.automation?.target_table}
+                    timezone={(selectedItem.execution?.automation as any)?.timezone || "UTC"}
+                    publicationTime={selectedItem.execution?.publication_time}
+                  />
                 )}
 
                 {activeTab === "json" && (
@@ -690,7 +681,7 @@ export const ApprovalsPage: React.FC = () => {
                   <span>{isSaving ? "Saving..." : "Save Edits"}</span>
                 </button>
 
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center justify-center gap-2">
                   {/* Approve for Scheduled Publication */}
                   <button
                     type="button"
