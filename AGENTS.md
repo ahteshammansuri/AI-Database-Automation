@@ -9,8 +9,8 @@ The primary demonstration is blog-content generation/approval/scheduled publishi
 - **Laravel** is the main application backend/control plane: authentication, users, tenant/resource ownership, database connection profiles, automation definitions, scheduling and queues, email approval, platform persistence, audit logs, authorization, and REST API.
 - **React + TypeScript** is the public landing/service page and authenticated portal/dashboard.
 - **Python + FastAPI** is a dedicated AI service for Ollama/local LLM inference, optional provider adapters, prompt/context construction, embeddings, RAG retrieval, and structured AI output.
-- Use a private/internal service connection between Laravel and the Python service. Keep business authorization and target-database writes in Laravel's controlled execution layer; the AI service must not have direct unrestricted customer-database access.
-- MySQL is the first supported customer/target database. Design a connector interface for future adapters, but do not claim other database engines work until implemented and tested.
+- Use a private/internal service connection between Laravel and the Python service. Keep business authorization and all target-database access (reads and writes) in Laravel's controlled execution layer. The AI service must not have customer-database access; it may parse SQL text, but it never connects to a target.
+- MySQL is the first supported customer/target database; PostgreSQL goes through the same dialect adapter interface. Do not claim other database engines work until they are implemented and tested. Mark unsupported engines honestly.
 
 ## Configuration boundary
 Environment variables are for application/runtime configuration only (for example platform database, Laravel application key, queue/mail configuration, and internal AI-service URL). They must NOT contain per-user customer database credentials, per-user provider API keys, a fixed demo user, a preconfigured customer database, or an automation that users are expected to share.
@@ -18,10 +18,19 @@ Environment variables are for application/runtime configuration only (for exampl
 User-specific target database connections, AI provider selections, provider keys, local model endpoints, and automation configuration must be created through the authenticated portal, persisted with ownership boundaries, and protected at rest. A fresh installation must not depend on seeded customer connections or a default demo account.
 
 ## Non-negotiable security
-- No customer-target `DELETE`, `DROP`, `TRUNCATE`, `ALTER`, table-creation DDL, `RENAME`, `GRANT`, `REVOKE`, arbitrary SQL console, or AI-generated SQL execution.
-- Permit only read-only schema inspection and explicitly allowlisted, validated, parameterized `INSERT`/`UPDATE` operations. Never allow an unscoped update.
+- Customer-target data policy (owner-authorised change, 2026-10-15; see `docs/DECISIONS.md` ADR-010). It is enforced in Laravel and never decided by the model:
+  - **Reads** (SELECT, counts, aggregates, schema questions) are allowed: read-only, validated and limited.
+  - **INSERT** and **UPDATE** are allowed only after a preview and confirmation. UPDATEs are pinned to the exact previewed primary keys. Never allow an unscoped update.
+  - **DELETE** is allowed only when the connection owner set access mode `read_write_delete`, with impact analysis, typed confirmation, a transaction, a backup and an audit record.
+  - **Always prohibited:** `DROP`, `TRUNCATE`, `ALTER`, `CREATE`, `RENAME`, `GRANT`, `REVOKE`, any other DDL, a raw SQL console, and model-written SQL for writes.
+  - **Model-written SELECT** may run only through the validated read gate: AST parse, single statement, allowlisted tables and functions, forced LIMIT, timeout, read-only transaction.
+  - Per-connection access mode defaults to `read_only`.
 - Enforce tenant/resource ownership in backend authorization and background jobs, not just in frontend filtering.
-- Sensitive tables/fields (authentication, credentials, permissions, payments, orders, wallets, financial data, audit logs, etc.) are restricted by default.
+- Sensitive tables and fields are restricted by default:
+  - **Blocked:** credential, token and session tables.
+  - **Read-only:** financial, permission, order and audit tables, until the owner changes that per connection.
+  - **Never returned or written:** secret columns such as password hashes, tokens, card numbers and national IDs.
+  - **Masked:** PII such as emails and phones, revealed only through an audited action.
 - Encrypt stored database credentials and provider API keys at rest. Never log secrets or return them to the frontend after saving.
 - AI output is untrusted. Validate schema, data type, length, required fields, allowed enum values, business policy, references and uniqueness before writes.
 - Use transactions, rollback, idempotency, execution locks, bounded retries and an audit trail.

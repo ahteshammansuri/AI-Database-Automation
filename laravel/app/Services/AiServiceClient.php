@@ -117,8 +117,21 @@ class AiServiceClient
      */
     public function checkHealth(string $provider = 'ollama', ?string $model = null, ?string $apiKey = null): array
     {
+        if ($provider === 'mock') {
+            return [
+                'provider' => 'mock',
+                'available' => true,
+                'latency_ms' => 1.2,
+                'models' => ['mock-llama3-synthetic', 'mock-mistral-synthetic'],
+                'message' => 'Local mock generator ready (Offline testing & demo mode).',
+            ];
+        }
+
         try {
-            $res = $this->client()->post("{$this->baseUrl}/v1/ai/health", [
+            $res = Http::withHeaders([
+                'X-Service-Token' => $this->serviceToken,
+                'Accept' => 'application/json',
+            ])->timeout(5)->post("{$this->baseUrl}/v1/ai/health", [
                 'provider' => $provider,
                 'model' => $model,
                 'api_key' => $apiKey,
@@ -129,16 +142,6 @@ class AiServiceClient
             }
         } catch (\Throwable $e) {
             // Local fallback handling below
-        }
-
-        if ($provider === 'mock') {
-            return [
-                'provider' => 'mock',
-                'available' => true,
-                'latency_ms' => 1.2,
-                'models' => ['mock-llama3-synthetic', 'mock-mistral-synthetic'],
-                'message' => 'Local mock generator ready (Offline testing & demo mode).',
-            ];
         }
 
         return [
@@ -268,4 +271,81 @@ class AiServiceClient
 
         return [];
     }
+
+    /**
+     * Parse and validate SQL via python sqlglot AST analyzer gate.
+     */
+    public function analyzeSql(string $sql, string $dialect = 'mysql', int $maxLimit = 500): array
+    {
+        try {
+            $res = $this->client()->post("{$this->baseUrl}/v1/sql/analyze", [
+                'sql' => $sql,
+                'dialect' => $dialect,
+                'max_limit' => $maxLimit,
+            ]);
+
+            if ($res->successful() && is_array($res->json())) {
+                return $res->json();
+            }
+
+            return [
+                'valid' => false,
+                'dialect' => $dialect,
+                'statement_type' => 'UNKNOWN',
+                'tables' => [],
+                'columns' => [],
+                'functions' => [],
+                'has_limit' => false,
+                'errors' => ["HTTP {$res->status()}: " . $res->body()],
+            ];
+        } catch (\Throwable $e) {
+            return [
+                'valid' => false,
+                'dialect' => $dialect,
+                'statement_type' => 'UNKNOWN',
+                'tables' => [],
+                'columns' => [],
+                'functions' => [],
+                'has_limit' => false,
+                'errors' => ['SQL analyzer service unreachable: ' . $e->getMessage()],
+            ];
+        }
+    }
+
+    /**
+     * Generate structured QueryPlan via Python AI service DataPlanner.
+     */
+    public function generateDataPlan(array $params): array
+    {
+        if (app()->environment('testing') && empty($params['force_live_ai'])) {
+            return [];
+        }
+
+        try {
+            $timeout = (int) ($params['timeout'] ?? 15);
+            $res = $this->agentClient($timeout)->post("{$this->baseUrl}/v1/ai/data/plan", [
+                'utterance' => $params['utterance'],
+                'schema_slice' => $params['schema_slice'],
+                'context' => $params['context'] ?? null,
+                'timezone' => $params['timezone'] ?? 'Asia/Kolkata',
+                'backend_errors' => $params['backend_errors'] ?? null,
+                'provider' => $params['provider'] ?? null,
+                'model' => $params['model'] ?? null,
+            ]);
+
+            if ($res->successful() && is_array($res->json())) {
+                $data = $res->json();
+                if ($data['success'] ?? false) {
+                    return $data['plan'] ?? [];
+                }
+            }
+
+            \Illuminate\Support\Facades\Log::warning("generateDataPlan failed HTTP {$res->status()}: " . $res->body());
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning("generateDataPlan exception: " . $e->getMessage());
+        }
+
+        return [];
+    }
 }
+

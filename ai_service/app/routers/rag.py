@@ -96,3 +96,20 @@ def classify_fields(req: FieldClassifyRequest):
         return FieldClassifyResponse(success=True, classifications=results)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Field classification failed: {str(e)}")
+
+
+@router.post("/ingest-corpus")
+def ingest_platform_corpus():
+    """
+    Ingest markdown documentation and prompts into Qdrant vector store.
+    """
+    try:
+        from ai_service.app.services.ingest_docs import DocIngestionService
+        from ai_service.app.rag.qdrant_store import qdrant_store
+        service = DocIngestionService(store=qdrant_store)
+        results = service.ingest_default_corpus()
+        total_chunks = sum(r.get("chunks", 0) for r in results)
+        return {"success": True, "results": results, "total_chunks": total_chunks}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Corpus ingestion failed: {str(e)}")
+

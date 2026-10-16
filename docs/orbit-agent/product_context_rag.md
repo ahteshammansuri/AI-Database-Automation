@@ -16,8 +16,8 @@ Items marked **(planned)** do not exist yet. Orbit must say so instead of preten
 
 DataAuto is a multi-user web portal for website owners and developers. Each user signs in and works with their own resources:
 
-- connect their own MySQL database (other engines are planned);
-- inspect its tables, columns and relationships;
+- connect their own MySQL database (PostgreSQL support depends on the server having the PostgreSQL driver; see section 14);
+- inspect its tables, columns and relationships, and ask questions about the data in plain English;
 - choose an AI provider (local Ollama by default, optionally OpenAI, Gemini or Anthropic with their own key);
 - upload knowledge documents;
 - create automations that generate or schedule content into an eligible table, such as blog posts, product descriptions, FAQs or pages.
@@ -138,7 +138,41 @@ Tables are classified into tiers:
 
 Live schema results win over anything remembered. Any business meaning Orbit infers for a column is a suggestion and is labelled as one.
 
-## 7. Automations
+## 7. Data questions and data changes (policy)
+
+Orbit answers plain-English questions about the user's own connected databases. When the connection's owner allows it, Orbit can also change data. The backend enforces every rule below. The language model never decides permissions, and no setting overrides security policy.
+
+| Operation | Policy |
+|---|---|
+| SELECT / COUNT / aggregates / schema questions | Allowed. Read-only, validated, limited. |
+| INSERT | Allowed after a preview and confirmation. |
+| UPDATE | Allowed after a preview and confirmation, pinned to the exact primary keys that were previewed. |
+| DELETE | Allowed only if the connection owner enabled destructive operations (access mode `read_write_delete`) for that connection. Requires impact analysis, typed confirmation, a transaction, a backup and an audit record. |
+| DROP / TRUNCATE / ALTER / CREATE / GRANT / any DDL | **Always prohibited.** No setting enables them. |
+| Raw model-written SQL for writes | **Always prohibited.** Writes go through structured operation plans that backend code compiles into parameterized statements. |
+| Raw model-written SELECT | Allowed only through the validated read pipeline: a real SQL parser check, allowlisted tables and functions, a forced row limit, a statement timeout and a read-only transaction. |
+
+**Access mode per connection.** The owner sets it; the default is `read_only`.
+- `read_only`: reads only.
+- `read_write`: reads, plus insert and update after confirmation.
+- `read_write_delete`: adds delete, with the extra safeguards above.
+
+The portal recommends using a database user restricted to the same mode. The backend enforces the chosen mode either way and never assumes the database user is restricted.
+
+**Protected data.**
+- Password hashes, tokens, secrets, card numbers and national IDs are never shown, never sent to an AI model, and never written by Orbit.
+- Email addresses and phone numbers are masked unless the owner reveals them. Every reveal is audited.
+- Credential, token and session tables are blocked.
+- Financial, permission and audit tables are read-only unless the owner changes that for the connection.
+
+**Ambiguity and assumptions.**
+- If more than one connection could hold the data, Orbit asks which one, naming the real connections.
+- If a request about one row ("this user") matches several rows, Orbit asks which one.
+- Orbit states which timestamp column and which timezone it used for "today", "this week" and similar.
+
+**Every answer and change is grounded.** Answers come from real query results. Each one carries a "How I got this" panel with the exact query. Changes show the affected rows and a before→after preview first, and are verified by re-reading the rows afterwards.
+
+## 8. Automations
 
 An automation targets one connection and one eligible table. It maps fields, sets the content instructions (topic or prompt) and the AI provider, and chooses a schedule (one-time, daily or weekly, with generation and publication times and a timezone). It can require email approval.
 
@@ -150,40 +184,40 @@ An automation targets one connection and one eligible table. It maps fields, set
 
 Work runs on a persistent server queue, so it continues if the browser is closed.
 
-## 8. AI providers and models
+## 9. AI providers and models
 
 - **Local Ollama** is the default, needs no paid API, and is configured per user. The model that drives Orbit is the "Agent Planner" model role; `qwen2.5:3b` is recommended for local use.
 - **OpenAI, Gemini and Anthropic** are optional and use the user's own API key, which is stored encrypted.
 - Orbit never switches a user's local setup to a cloud provider on its own.
 - If the selected model is not installed or not reachable, Orbit reports that as a service problem. It does not fall back to canned replies.
 
-## 9. Knowledge base and RAG
+## 10. Knowledge base and RAG
 
 Users can upload Markdown, TXT or PDF documents. They are split into chunks, embedded locally (Ollama `nomic-embed-text` when installed; otherwise a lexical fallback, which is labelled as such), and stored in a per-user FAISS index.
 
 Orbit retrieves from this product guide and from the current user's own documents only. Retrieved text is reference material and never overrides security rules. Orbit only says it used retrieved knowledge when passages were actually given to the model.
 
-## 10. Voice
+## 11. Voice
 
 - Hold Orbit (or the mic button) to talk, or tap to start and stop. Orbit speaks its replies. Speaking again interrupts Orbit's speech.
 - Typing is available as a fallback.
 - Browser speech recognition in Chrome or Edge may send audio to the browser vendor's service. That is why passwords and API keys go only into the secure field.
 - If speech playback fails, the reply is still shown as text and marked "not spoken".
 
-## 11. Stop, pause, corrections and confirmation
+## 12. Stop, pause, corrections and confirmation
 
 - **Stop:** no new step starts. A step that is already running finishes or rolls back, and Orbit reports anything already completed.
 - **Pause and resume** are also available.
 - **Corrections:** saying something new while Orbit is working updates the plan at the next safe step. Results already committed stay committed, and Orbit says so.
 - **Confirmation:** consequential actions (removals, record edits, and others depending on the user's autonomy setting) need the user's confirmation, by the Confirm button or by saying yes after Orbit asks.
 
-## 12. Task states Orbit reports
+## 13. Task states Orbit reports
 
 Queued, running, waiting for your answer, waiting for confirmation, paused, stopping, cancelled, answered, succeeded (verified), partly succeeded, and failed.
 
 An animation, a toast, or a sentence from the model is not proof that something happened. Only a verified tool result is.
 
-## 13. Planned (not available yet)
+## 14. Planned (not available yet)
 
 - Database engines other than MySQL (PostgreSQL, SQL Server, MongoDB) **(planned)**
 - AI image generation for media fields **(planned; text-only models cannot create images)**

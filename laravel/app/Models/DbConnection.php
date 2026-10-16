@@ -32,6 +32,9 @@ class DbConnection extends Model
         'error_message',
         'schema_freshness_at',
         'is_active',
+        'access_mode',
+        'data_policy',
+        'data_timezone',
     ];
 
     protected $hidden = [
@@ -52,6 +55,7 @@ class DbConnection extends Model
             'latency_ms' => 'float',
             'connection_timeout' => 'integer',
             'is_active' => 'boolean',
+            'data_policy' => 'array',
         ];
     }
 
@@ -73,6 +77,31 @@ class DbConnection extends Model
     public function getIsConfiguredAttribute(): bool
     {
         return !empty($this->host) && !empty($this->database_name) && !empty($this->username);
+    }
+
+    public function getDriverAttribute(): string
+    {
+        return $this->db_type ?: 'mysql';
+    }
+
+    public function setDriverAttribute($val): void
+    {
+        $this->attributes['db_type'] = $val;
+    }
+
+    public function getDatabaseAttribute(): string
+    {
+        return $this->database_name ?: '';
+    }
+
+    public function setDatabaseAttribute($val): void
+    {
+        $this->attributes['database_name'] = $val;
+    }
+
+    public function setPasswordAttribute($val): void
+    {
+        $this->attributes['encrypted_password'] = $val;
     }
 
     /**

@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\DbConnection;
 use App\Models\SchemaSnapshot;
 use App\Models\SchemaTableAnnotation;
+use App\Jobs\IndexTableProfilesJob;
 use Illuminate\Support\Facades\Log;
 use PDO;
 use Exception;
@@ -193,7 +194,7 @@ class SchemaIntrospectionService
 
                     $currentSchema['snapshot_version'] = $newVersion;
 
-                    // 3. Index structured Table Profiles into Python RAG for user-scoped semantic retrieval
+                    // 3. Index structured Table Profiles into Python RAG asynchronously in background
                     if ($latestSnapshot && !empty($diff['has_changes'])) {
                         // Only re-index added or modified tables to avoid Ollama CPU saturation
                         $tablesToIndex = array_filter($tables, function ($t) use ($diff) {
@@ -202,10 +203,13 @@ class SchemaIntrospectionService
                             $isModified = in_array($name, array_column($diff['modified_tables'] ?? [], 'table'));
                             return $isAdded || $isModified;
                         });
-                        $this->indexTableProfilesIntoRag($connection, array_values($tablesToIndex));
+                        $tablesToQueue = array_values($tablesToIndex);
+                        if (!empty($tablesToQueue)) {
+                            IndexTableProfilesJob::dispatch($connection, $tablesToQueue);
+                        }
                     } else {
-                        // First snapshot for connection: index all tables once
-                        $this->indexTableProfilesIntoRag($connection, $tables);
+                        // First snapshot for connection: queue background RAG indexing
+                        IndexTableProfilesJob::dispatch($connection, $tables);
                     }
                 } else {
                     $currentSchema['snapshot_version'] = $latestSnapshot->version;

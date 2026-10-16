@@ -5,6 +5,8 @@ from ai_service.app.config import settings
 from ai_service.app.routers.ai import router as ai_router
 from ai_service.app.routers.rag import router as rag_router
 from ai_service.app.routers.agent import router as agent_router
+from ai_service.app.routers.sql import router as sql_router
+from ai_service.app.routers.data import router as data_router
 
 app = FastAPI(
     title="Dedicated AI & RAG Service",
@@ -55,6 +57,8 @@ def health_check():
 app.include_router(ai_router)
 app.include_router(rag_router)
 app.include_router(agent_router)
+app.include_router(sql_router)
+app.include_router(data_router)
 
 
 if __name__ == "__main__":

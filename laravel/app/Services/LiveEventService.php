@@ -21,7 +21,7 @@ class LiveEventService
         try {
             $sanitizedPayload = self::redactSensitiveData($payload);
 
-            DB::table('workspace_events')->insert([
+            $id = DB::table('workspace_events')->insertGetId([
                 'user_id' => $userId,
                 'event_type' => $eventType,
                 'resource_type' => $resourceType,
@@ -29,6 +29,20 @@ class LiveEventService
                 'payload' => json_encode($sanitizedPayload),
                 'created_at' => now(),
             ]);
+
+            $eventData = [
+                'id' => (int) $id,
+                'user_id' => (int) $userId,
+                'event_name' => $eventType,
+                'event_type' => $eventType,
+                'resource_type' => $resourceType,
+                'resource_id' => $resourceId,
+                'payload' => $sanitizedPayload,
+                'created_at' => now()->toIso8601String(),
+            ];
+
+            // Real-time push via Laravel Reverb WebSocket server
+            broadcast(new \App\Events\WorkspaceLiveEvent($userId, $eventData));
         } catch (\Throwable $e) {
             Log::warning("Failed to publish live workspace event for user #{$userId}: " . $e->getMessage());
         }

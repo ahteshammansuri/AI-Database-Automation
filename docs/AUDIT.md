@@ -1,4 +1,71 @@
 # docs/AUDIT.md
+
+## Addendum audit (2026-10-15): natural-language data agent, safe writes, live corrections, visible agent, automation clarity
+
+This audit compares the repository at commit `f13280d` against the 2026-10-15 addendum. The earlier audit (2026-10-14) is kept below, unchanged.
+
+**Baseline before this work:**
+- Laravel: 108 tests passed.
+- AI service: 31 passed.
+- Root Python: 58 passed.
+- Frontend: 33 passed.
+- Build: clean.
+
+**Environment found:**
+- CPU-only, 4 cores, 15 GB RAM. Swap was full; load average was about 11.
+- Local Ollama with `qwen2.5:3b`, `llama3.2:1b`, `llama3:latest` and `nomic-embed-text`.
+- PostgreSQL 16 server installed. Docker available.
+- Host PHP 8.3 has `pdo_mysql` but no `pdo_pgsql` or `pdo_sqlite`, and there is no sudo.
+
+### Policy change
+The addendum replaces the "no `DELETE`, no LLM-written SQL" rule with a tiered policy:
+- reads are allowed;
+- `INSERT` and `UPDATE` need a preview and confirmation;
+- `DELETE` needs opt-in plus typed confirmation;
+- DDL stays forbidden;
+- raw LLM SQL is allowed only for `SELECT`, through a parser gate.
+
+`AGENTS.md`, `.agents/rules/03-database-connectivity-and-safety.md`, ADR-003, the security model and the product knowledge doc all still state the old rule. They must be updated together (done in this round, ADR-010).
+
+### What exists vs. what the addendum needs
+
+| Area | Exists today | Missing / deficient |
+|---|---|---|
+| Connections | MySQL only. `DbConnection::createTargetPdo()` hard-codes a `mysql:` DSN. Credentials are encrypted. SSRF guard blocks metadata IPs and a port list. | No dialect interface. No PostgreSQL / SQLite / SQL Server / MongoDB, and no honest "unsupported" marking. No per-connection **access mode**. No read-only session or transaction. No statement timeout. |
+| Introspection | MySQL `information_schema`: base tables, columns (type, nullable, key, default, length, enum values), FKs (no `ON DELETE` rule), `table_rows` estimate. Versioned snapshots and diffs. | No views, engine/version/size, unique keys or FK delete rules. No `timestamp` vs `timestamptz` distinction. No short-lived live cache with a "live wins" rule. |
+| Table / column policy | 4-tier automation eligibility; `users`, `orders`, `payments` and the like are fully RESTRICTED for automated writes. `FieldClassifier` (Python) for automation mapping. | No **read** policy at all. No column-level secret/PII classes. No masking, no audited reveal, no owner overrides. |
+| Reads | Only lookup rows for dropdowns (`getTableLookupRecords`, `lookup_table_values`). | Whole NL read pipeline missing: intent, schema linking, ambiguity check, QueryPlan, validation, compiler, EXPLAIN guard, read-only execution, verification, grounded answer, "How I got this". |
+| Raw `SELECT` gate | Regex keyword deny-list (`assertQueryIsSafe`), used on our own `INSERT`/`UPDATE`. | No SQL parser or AST validation, no per-dialect function deny/allow list, no forced `LIMIT`, no read-only transaction. |
+| Question types | — | Database overview, table discovery by meaning with evidence, FK relationship explanation, dummy-data detection, time windows (timezone, column choice, DST), aggregates/top-N/trends, paging/export. |
+| Writes | `executeInsert` (parameterized, typed, transaction, idempotency); `executeScopedUpdate` (single PK); `executeDeleteForCompensation` (single id, undo of an automation insert). Automations only. | No agent-driven `UPDATE`/`INSERT` with preview, before→after diff, ambiguity rule, count confirmation, pinned PKs, TOCTOU re-check, before-image, undo, or per-operation row cap. MySQL `rowCount()` reports *changed* rows, not *matched* rows, so it can't be used for pinned-count checks without `MYSQL_ATTR_FOUND_ROWS`. |
+| Delete | — | Mode gate, impact analysis over the FK graph (cascade / restrict / set-null, recursive), soft-delete offer, typed confirmation (voice cannot satisfy it), backup with TTL, restore, row limits, rate limit. |
+| Multi-connection / context | The agent lists connections. | No "which connection?" disambiguation; no active connection/table, last plan or result refs in conversation state; no UI context header. |
+| Corrections | Flat `slots`. A new utterance during a turn supersedes the turn at the next loop boundary. `handleCorrection` exists. | No slot versions or source utterance ids, no step↔slot dependency ledger, no stale-step re-run, no "already committed" handling, no secret re-capture on correction, no manual-control detection or reconciliation. |
+| Visible agent | Orbit flies to registered targets, gestures, captions. Real UI actions through the surface catalog; acks. | No eased pointer with click ripple, no character-by-character typing, no explicit read-back verification step per action, no Pause/Stop/Take-over controls on the timeline, no Watch/Fast/Background modes, no mobile highlight mode. |
+| Automation clarity | Builder wizard, simulation preview (`SimulationService`), approvals, schedules. | No per-field provided/inferred/missing extraction, never-guess list, Requirements Card or dry-run payload card. No verified "next run" in the user's timezone after creation. |
+| Providers / privacy | Ollama by default; optional OpenAI/Gemini/Claude with the user's own keys; model roles. Model switching on failure already removed. | No workspace privacy modes (`local_only` / `cloud_metadata_only` / `cloud_with_results`) enforced in the provider layer. No Model Readiness Test. No per-task provider/model display. |
+| Vector store | FAISS files per user plus JSON metadata; product index versioned by sha; hybrid retrieval. | Not a vector DB: no metadata filtering, no namespaces. Table profiles share the user's KB index and use colliding doc ids (`100000 + conn*100 + index%100`). No embedding-model version or re-embed job. |
+| Prompts | `prompts/` has 8 markdown files. | **No code loads them** (documentation only). None of the 10 addendum prompts exist, nor versions or golden tests. |
+| Agent decision protocol | `orbit.v1` JSON schema with a tool-name enum. | Live check, real `qwen2.5:3b`, "connect a database for me": `CALL_TOOL` *without* `tool_call` twice, `MODEL_OUTPUT_INVALID` after 790 s. The flat schema cannot force `tool_call` when `kind=CALL_TOOL`. |
+| Fixtures / tests | Platform test DB; mocked AI. | No fixture customer DBs (MySQL/PostgreSQL), NL accuracy suite, SQL-gate attack tests, TOCTOU, cascade or privacy-mode network tests. |
+| Ops | `run_all.sh` frees ports 8000/8001/5173 on start. | It never stops the previous run's queue workers or loops, so repeated runs leave stale workers on old code. Three overlapping instances were running during this audit, one agent worker on code from before the last round. |
+
+### Vector store decision
+The portal DB is MySQL, so pgvector does not apply. **Qdrant** was chosen (ADR-011):
+- payload filters on `tenant_id` and `namespace` are applied *before* scoring;
+- the same client API runs embedded (on-disk, no extra service) for local/dev and against a Qdrant server in docker-compose for production;
+- this machine has little RAM headroom, which rules out running another always-on server by default.
+
+### PostgreSQL feasibility
+- The `php8.3-pgsql` package for this exact PHP build loads with `-d extension=...` and no root. The PostgreSQL dialect is therefore tested for real against a fixture container.
+- Production and the Docker image need `pdo_pgsql` installed; the app reports the driver as missing instead of failing silently.
+- SQLite, SQL Server and MongoDB are marked **unsupported**. SQLite target paths are also a server-file-access risk in a multi-tenant app.
+
+
+---
+
+# Previous audit (2026-10-14, unchanged)
+
 ## Full Repository Audit — AI Database Automation Portal → Voice-First Agentic Upgrade
 
 **Auditor:** Antigravity AI Engineering  
@@ -367,11 +434,46 @@ Frontend build: clean (0 TypeScript errors, ~3.1s)
 
 ---
 
-## 9. Immediate Next Steps (Phase 1 Start)
+---
 
-1. Fix `embeddings.py` — Replace numpy.random with Ollama embedding API + TF-IDF fallback.
-2. Create `prompts/` directory with all 8 prompt files.
-3. Create `ai_service/app/services/field_classifier.py` with unit tests.
-4. Create `laravel/app/Services/ContextPackageService.php`.
-5. Add RAG retrieval audit log.
-6. Run full test suite, report results, then start Phase 2.
+## 10. Addendum Verification & Delivery Status (Completed 2026-10-16)
+
+All 14 areas from the 2026-10-15 Natural-Language Data Agent addendum have been implemented and verified:
+
+1. **Access Modes & Policy Gate (ADR-010):**
+   - Three per-connection modes: `read_only` (default), `read_write`, `read_write_delete`.
+   - Permanent prohibition enforced in backend: `DROP`, `TRUNCATE`, `ALTER`, `CREATE`, `GRANT`, `REVOKE`, raw SQL console.
+   - Read gate AST analyzer (`sqlglot`) blocks dangerous functions (`pg_sleep`, `sleep`, `LOAD_FILE`, `xp_cmdshell`) and forces limits.
+2. **Natural-Language Data Agent Pipeline:**
+   - Real schema linking: minimal slices, keyword & FK graph expansion, value grounding ("Rajasthan" -> "RJ").
+   - Semantic table discovery with confidence scores and evidence columns.
+   - Time-relative window resolution with user and target timezones (`Asia/Kolkata`, `UTC`).
+   - Dummy/test data detection heuristics over bounded samples.
+   - Collapsible "How I got this" diagnostics panel.
+3. **Safe Writes (INSERT & UPDATE):**
+   - Before/after diff preview and row limits.
+   - Pinned primary keys execution in transactions.
+   - TOCTOU affected count mismatch rollback verification (`MYSQL_ATTR_FOUND_ROWS`).
+   - Encrypted before-image storage and verified one-click Undo restoration.
+4. **Guarded DELETE:**
+   - Strict `read_write_delete` access mode check.
+   - Recursive foreign-key cascade impact analysis.
+   - Mandatory typed phrase confirmation generated by backend (`DELETE 1 posts`). Voice-only rejected.
+   - Encrypted backup with 7-day TTL and verified Undo restoration.
+5. **Live Corrections & Barge-in:**
+   - Versioned slot ledger (`CorrectionEngine`).
+   - Smart barge-in detection: `patch_value`, `provide_value`, `cancel`, `pause`, `resume`.
+   - Single-utterance self-corrections ("host is db1, no wait, db2").
+   - Secret re-capture with old secret discard.
+6. **Automation Clarity & Zero Silent Guessing:**
+   - `AutomationRequirementsService` enforces that connection, table, schedule, timezone, publish status, approval policy, and image generation are never silently assumed.
+   - Requirements Card with inline missing detail questions.
+7. **Model Readiness Test:**
+   - Endpoint: `POST /api/model-roles/readiness-test` evaluating JSON conformance, tool-calling, and NL query planning.
+8. **Vector Store Ingestion (Qdrant, ADR-011):**
+   - Headings-based chunking with SHA-256 content hashes.
+   - 155 chunks across 22 documentation and prompt files embedded via local Ollama `nomic-embed-text` and upserted into Qdrant.
+9. **NL Query Accuracy Suite (60 Questions):**
+   - 60 questions evaluated against live MySQL `shopfx` fixture: **60/60 passed (100% Accuracy)**.
+   - 60 questions evaluated against live PostgreSQL `shopfx` fixture: **60/60 passed (100% Accuracy)**.
+   - 120 live queries executed without errors across both database dialects.

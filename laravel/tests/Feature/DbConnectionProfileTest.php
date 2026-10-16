@@ -104,4 +104,27 @@ class DbConnectionProfileTest extends TestCase
         $response->assertStatus(422)
             ->assertJsonValidationErrors(['ssl_mode']);
     }
+
+    public function test_user_can_create_connection_with_test_before_save(): void
+    {
+        $user = User::factory()->create();
+        $token = $user->createToken('test')->plainTextToken;
+
+        $response = $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson('/api/connections', [
+                'name' => 'Test DB With Verification ' . uniqid(),
+                'db_type' => 'mysql',
+                'host' => '127.0.0.1',
+                'port' => 3306,
+                'database_name' => 'platform_automation',
+                'username' => 'root',
+                'password' => 'agc123',
+                'ssl_mode' => 'preferred',
+                'test_before_save' => true,
+            ]);
+
+        $response->assertStatus(201);
+        $this->assertEquals('connected', $response->json('connection.status'));
+        $this->assertNull($response->json('connection.error_message'));
+    }
 }

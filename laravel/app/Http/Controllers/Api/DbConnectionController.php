@@ -8,6 +8,9 @@ use App\Models\AuditLog;
 use App\Services\DatabaseSafetyService;
 use App\Services\LiveEventService;
 use App\Services\SchemaIntrospectionService;
+use App\Services\Data\Dialects\DialectRegistry;
+use App\Services\Data\TargetConnector;
+use App\Services\Data\DataException;
 use Illuminate\Http\Request;
 use Exception;
 use PDO;
@@ -16,8 +19,14 @@ class DbConnectionController extends Controller
 {
     public function __construct(
         protected DatabaseSafetyService $safetyService,
-        protected SchemaIntrospectionService $introspectionService
+        protected SchemaIntrospectionService $introspectionService,
+        protected TargetConnector $targetConnector
     ) {}
+
+    public function engines()
+    {
+        return response()->json(DialectRegistry::catalog());
+    }
 
     public function index(Request $request)
     {
@@ -34,7 +43,10 @@ class DbConnectionController extends Controller
         // Support either Connection URI or Manual parameters
         $validated = $request->validate([
             'name' => 'required|string|max:255',
-            'db_type' => 'nullable|string|in:mysql',
+            'db_type' => 'nullable|string|in:mysql,mariadb,postgresql,postgres,pgsql,sqlite,sqlsrv,mongodb',
+            'access_mode' => 'nullable|string|in:read_only,read_write,read_write_delete',
+            'data_policy' => 'nullable|array',
+            'data_timezone' => 'nullable|string|max:64',
             'connection_mode' => 'nullable|string|in:manual,uri',
             'connection_uri' => 'nullable|string',
             'host' => 'nullable|string',
@@ -91,25 +103,37 @@ class DbConnectionController extends Controller
         $latencyMs = null;
         $lastTestedAt = null;
         $errorMessage = null;
+        $dbType = DialectRegistry::normalise($validated['db_type'] ?? 'mysql');
+
+        // Check dialect validity
+        try {
+            $dialect = DialectRegistry::for($dbType);
+        } catch (DataException $e) {
+            return response()->json(['message' => $e->getMessage()], 422);
+        }
 
         // Optionally test connection before saving
         if (!empty($validated['test_before_save'])) {
-            $testRes = $this->performPdoTest($host, $port, $dbName, $username, $password, $sslMode, $timeout);
+            $testRes = $this->performPdoTest($host, $port, $dbName, $username, $password, $sslMode, $timeout, $dbType);
             if ($testRes['success']) {
                 $status = 'connected';
                 $serverVersion = $testRes['server_version'];
                 $latencyMs = $testRes['latency_ms'];
                 $lastTestedAt = now();
+                $errorMessage = null;
             } else {
                 $status = 'connection_error';
-                $errorMessage = $testRes['message'];
+                $errorMessage = $testRes['message'] ?? null;
             }
         }
 
         $connection = DbConnection::create([
             'user_id' => $request->user()->id,
             'name' => $validated['name'],
-            'db_type' => 'mysql',
+            'db_type' => $dialect->key(),
+            'access_mode' => $validated['access_mode'] ?? 'read_only',
+            'data_policy' => $validated['data_policy'] ?? null,
+            'data_timezone' => $validated['data_timezone'] ?? null,
             'host' => $host,
             'port' => $port,
             'database_name' => $dbName,
@@ -162,6 +186,9 @@ class DbConnectionController extends Controller
 
         $validated = $request->validate([
             'name' => 'sometimes|string|max:255',
+            'access_mode' => 'nullable|string|in:read_only,read_write,read_write_delete',
+            'data_policy' => 'nullable|array',
+            'data_timezone' => 'nullable|string|max:64',
             'connection_mode' => 'nullable|string|in:manual,uri',
             'connection_uri' => 'nullable|string',
             'host' => 'sometimes|string',
@@ -200,6 +227,16 @@ class DbConnectionController extends Controller
             'ssl_mode' => isset($validated['ssl_mode']) ? $this->normalizeSslMode($validated['ssl_mode']) : $connection->ssl_mode,
             'connection_timeout' => $validated['connection_timeout'] ?? $connection->connection_timeout,
         ];
+
+        if (isset($validated['access_mode'])) {
+            $dataToUpdate['access_mode'] = $validated['access_mode'];
+        }
+        if (array_key_exists('data_policy', $validated)) {
+            $dataToUpdate['data_policy'] = $validated['data_policy'];
+        }
+        if (array_key_exists('data_timezone', $validated)) {
+            $dataToUpdate['data_timezone'] = $validated['data_timezone'];
+        }
 
         if (isset($validated['is_active'])) {
             $dataToUpdate['is_active'] = $validated['is_active'];
@@ -265,6 +302,7 @@ class DbConnectionController extends Controller
     {
         $validated = $request->validate([
             'id' => 'nullable|integer',
+            'db_type' => 'nullable|string',
             'connection_uri' => 'nullable|string',
             'host' => 'nullable|string',
             'port' => 'nullable|integer',
@@ -283,6 +321,7 @@ class DbConnectionController extends Controller
                 ->where('id', $validated['id'])
                 ->firstOrFail();
 
+            $dbType = $connection->db_type ?: 'mysql';
             $host = $connection->host;
             $port = $connection->port;
             $db = $connection->database_name;
@@ -292,6 +331,7 @@ class DbConnectionController extends Controller
             $timeout = $connection->connection_timeout ?: 5;
         } elseif (!empty($validated['connection_uri'])) {
             $parsed = $this->parseConnectionUri($validated['connection_uri']);
+            $dbType = DialectRegistry::normalise($validated['db_type'] ?? 'mysql');
             $host = $parsed['host'];
             $port = $parsed['port'];
             $db = $parsed['database_name'];
@@ -299,6 +339,7 @@ class DbConnectionController extends Controller
             $pass = $parsed['password'];
             $sslMode = $this->normalizeSslMode($parsed['ssl_mode'] ?? 'preferred');
         } else {
+            $dbType = DialectRegistry::normalise($validated['db_type'] ?? 'mysql');
             $host = $validated['host'] ?? '127.0.0.1';
             $port = (int) ($validated['port'] ?? 3306);
             $db = $validated['database_name'] ?? '';
@@ -307,7 +348,7 @@ class DbConnectionController extends Controller
             $sslMode = $this->normalizeSslMode($validated['ssl_mode'] ?? 'preferred');
         }
 
-        $res = $this->performPdoTest($host, $port, $db, $user, $pass, $sslMode, $timeout);
+        $res = $this->performPdoTest($host, $port, $db, $user, $pass, $sslMode, $timeout, $dbType);
 
         if ($connection) {
             $connection->update([
@@ -422,10 +463,10 @@ class DbConnectionController extends Controller
         string $user,
         string $pass,
         string $sslMode,
-        int $timeout = 5
+        int $timeout = 5,
+        string $dbType = 'mysql'
     ): array {
         $start = microtime(true);
-        $pdo = null;
         $stages = [];
 
         try {
@@ -437,53 +478,49 @@ class DbConnectionController extends Controller
                 'detail' => "Target host {$host}:{$port} validated against security guardrails",
             ];
 
+            // Resolve dialect
+            $dialect = DialectRegistry::for($dbType);
+
             // Stage 2: Opening secure connection
-            $dsn = "mysql:host={$host};port={$port};dbname={$db};charset=utf8mb4";
-            $options = [
-                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-                PDO::ATTR_TIMEOUT => $timeout,
-            ];
-            $pdo = new PDO($dsn, $user, $pass, $options);
+            $tempConn = new DbConnection([
+                'host' => $host,
+                'port' => $port,
+                'database_name' => $db,
+                'username' => $user,
+                'encrypted_password' => $pass,
+                'ssl_mode' => $sslMode,
+                'db_type' => $dialect->key(),
+            ]);
+
+            $pdo = $this->targetConnector->open($tempConn, true, $timeout * 1000);
             $stages[] = [
                 'stage' => 'Opening secure connection',
                 'status' => 'passed',
-                'detail' => "Handshake verified with SSL mode '{$sslMode}'",
+                'detail' => "Handshake verified with {$dialect->label()} (SSL mode '{$sslMode}')",
             ];
 
             // Stage 3: Checking access & privileges
-            $versionStmt = $pdo->query("SELECT VERSION() as ver, CURRENT_USER() as cur_user");
-            $versionRow = $versionStmt->fetch(PDO::FETCH_ASSOC);
-            $serverVersion = $versionRow['ver'] ?? 'Unknown';
-            $currentUser = $versionRow['cur_user'] ?? 'authenticated user';
+            $serverInfo = $dialect->serverInfo($pdo);
+            $serverVersion = $serverInfo['version'] ?? 'Unknown';
+            $engine = $serverInfo['engine'] ?? $dialect->label();
+            $currentUser = $serverInfo['current_user'] ?? 'authenticated user';
             $stages[] = [
                 'stage' => 'Checking access & privileges',
                 'status' => 'passed',
-                'detail' => "Authenticated as '{$currentUser}' (MySQL {$serverVersion})",
+                'detail' => "Authenticated as '{$currentUser}' ({$engine} {$serverVersion})",
             ];
 
             // Stage 4: Reading schema metadata
-            $tblCount = 0;
-            if (!empty($db)) {
-                $tblStmt = $pdo->prepare("SELECT COUNT(*) as cnt FROM information_schema.tables WHERE table_schema = :db");
-                $tblStmt->execute(['db' => $db]);
-                $tblCount = (int) ($tblStmt->fetch(PDO::FETCH_ASSOC)['cnt'] ?? 0);
-            }
+            $catalog = $dialect->readCatalog($pdo, $tempConn);
+            $tblCount = count($catalog['tables'] ?? []);
             $stages[] = [
                 'stage' => 'Reading schema metadata',
                 'status' => 'passed',
-                'detail' => "Discovered {$tblCount} tables in database '{$db}'",
+                'detail' => "Discovered {$tblCount} tables/views in database '{$db}'",
             ];
 
             // Stage 5: Mapping relationships
-            $fkCount = 0;
-            if (!empty($db)) {
-                $fkStmt = $pdo->prepare("
-                    SELECT COUNT(*) as cnt FROM information_schema.table_constraints 
-                    WHERE table_schema = :db AND constraint_type = 'FOREIGN KEY'
-                ");
-                $fkStmt->execute(['db' => $db]);
-                $fkCount = (int) ($fkStmt->fetch(PDO::FETCH_ASSOC)['cnt'] ?? 0);
-            }
+            $fkCount = count($catalog['foreign_keys'] ?? []);
             $stages[] = [
                 'stage' => 'Mapping relationships',
                 'status' => 'passed',
@@ -501,30 +538,29 @@ class DbConnectionController extends Controller
 
             return [
                 'success' => true,
-                'message' => "Connection established successfully (MySQL {$serverVersion})",
+                'message' => "Connection established successfully ({$engine} {$serverVersion})",
                 'latency_ms' => $latency,
                 'server_version' => $serverVersion,
+                'engine' => $engine,
                 'table_count' => $tblCount,
                 'fk_count' => $fkCount,
                 'stages' => $stages,
             ];
-        } catch (Exception $e) {
+        } catch (\Throwable $e) {
             $latency = round((microtime(true) - $start) * 1000, 2);
-            $lastStage = count($stages) > 0 ? $stages[count($stages) - 1]['stage'] : 'Validating settings';
+            $safeMsg = TargetConnector::safeMessage($e);
             $stages[] = [
                 'stage' => 'Connection diagnostic',
                 'status' => 'failed',
-                'detail' => $e->getMessage(),
+                'detail' => $safeMsg,
             ];
 
             return [
                 'success' => false,
-                'message' => "Connection failed: " . $e->getMessage(),
+                'message' => "Connection failed: " . $safeMsg,
                 'latency_ms' => $latency,
                 'stages' => $stages,
             ];
-        } finally {
-            $pdo = null;
         }
     }
 }

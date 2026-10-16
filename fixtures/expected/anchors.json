@@ -1,0 +1,40 @@
+{
+  "now_utc": "2026-10-15T06:30:00Z",
+  "timezone": "Asia/Kolkata",
+  "users_today_ist": [
+    "Bhavna Iyer",
+    "Chetan Nair",
+    "Divya Bose"
+  ],
+  "users_today_utc": [
+    "Chetan Nair",
+    "Divya Bose",
+    "Eshan Kapoor"
+  ],
+  "orders_today_ist": 7,
+  "rajasthan_users": 13,
+  "users_without_orders": [
+    41,
+    42,
+    43,
+    44,
+    45,
+    46,
+    48,
+    49,
+    50,
+    54,
+    55,
+    56,
+    57,
+    58,
+    59,
+    60,
+    61,
+    62,
+    63,
+    64,
+    65,
+    66
+  ]
+}

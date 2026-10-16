@@ -1048,6 +1048,156 @@ class AgentToolRegistry
                     ],
                 ],
             ],
+            // Natural-Language Data Agent tools (ADR-010)
+            [
+                'name' => 'ask_database',
+                'label' => 'Ask Database Question',
+                'description' => 'Query database schema, count records, find tables, or inspect data using natural language.',
+                'outcome' => 'Executes validated read-only queries with schema linking and returns masked results with diagnostics.',
+                'scope' => 'tenant_user',
+                'read_only' => true,
+                'side_effects' => 'None',
+                'risk_level' => 'LOW',
+                'requires_confirmation' => false,
+                'idempotent' => true,
+                'retryable' => true,
+                'audit_required' => true,
+                'parameters' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'question' => ['type' => 'string'],
+                        'connection_id' => ['type' => 'integer'],
+                        'reveal_pii' => ['type' => 'boolean'],
+                    ],
+                    'required' => ['question'],
+                ],
+                'output_schema' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'headline' => ['type' => 'string'],
+                        'row_count' => ['type' => 'integer'],
+                        'rows' => ['type' => 'array'],
+                        'columns' => ['type' => 'array'],
+                    ],
+                ],
+            ],
+            [
+                'name' => 'find_dummy_data',
+                'label' => 'Find Dummy / Test Data',
+                'description' => 'Analyze table sample for seeded dummy or placeholder accounts, test emails, filler text, or burst timestamps.',
+                'outcome' => 'Returns dummy data report with evidence, confidence, and sample masked records.',
+                'scope' => 'tenant_user',
+                'read_only' => true,
+                'side_effects' => 'None',
+                'risk_level' => 'LOW',
+                'requires_confirmation' => false,
+                'idempotent' => true,
+                'retryable' => true,
+                'audit_required' => false,
+                'parameters' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'table' => ['type' => 'string'],
+                        'connection_id' => ['type' => 'integer'],
+                    ],
+                    'required' => ['table'],
+                ],
+                'output_schema' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'report' => ['type' => 'object'],
+                    ],
+                ],
+            ],
+            [
+                'name' => 'preview_data_change',
+                'label' => 'Preview Database Change',
+                'description' => 'Prepare a before/after diff preview for an UPDATE or an impact analysis for a guarded DELETE before execution.',
+                'outcome' => 'Creates a pending DataChangeRequest with pinned primary keys and masked preview rows.',
+                'scope' => 'tenant_user',
+                'read_only' => false,
+                'side_effects' => 'Creates a pending change record.',
+                'risk_level' => 'MEDIUM',
+                'requires_confirmation' => true,
+                'idempotent' => false,
+                'retryable' => false,
+                'audit_required' => true,
+                'parameters' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'connection_id' => ['type' => 'integer'],
+                        'action' => ['type' => 'string', 'enum' => ['update', 'delete']],
+                        'table' => ['type' => 'string'],
+                        'filter' => ['type' => 'object'],
+                        'patch_values' => ['type' => 'object'],
+                    ],
+                    'required' => ['connection_id', 'action', 'table', 'filter'],
+                ],
+                'output_schema' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'change_request_id' => ['type' => 'integer'],
+                        'affected_count' => ['type' => 'integer'],
+                    ],
+                ],
+            ],
+            [
+                'name' => 'confirm_data_change',
+                'label' => 'Confirm and Execute Data Change',
+                'description' => 'Atomically execute a previewed UPDATE (pinned to previewed PKs) or guarded DELETE (requiring typed confirmation phrase).',
+                'outcome' => 'Executes the pinned change in a transaction with TOCTOU row count verification and encrypted before-image.',
+                'scope' => 'tenant_user',
+                'read_only' => false,
+                'side_effects' => 'Mutates target database rows.',
+                'risk_level' => 'HIGH',
+                'requires_confirmation' => true,
+                'idempotent' => false,
+                'retryable' => false,
+                'audit_required' => true,
+                'parameters' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'change_request_id' => ['type' => 'integer'],
+                        'typed_phrase' => ['type' => 'string'],
+                    ],
+                    'required' => ['change_request_id'],
+                ],
+                'output_schema' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'success' => ['type' => 'boolean'],
+                        'affected_count' => ['type' => 'integer'],
+                    ],
+                ],
+            ],
+            [
+                'name' => 'undo_data_change',
+                'label' => 'Undo Executed Data Change',
+                'description' => 'Revert an executed UPDATE or DELETE using the stored encrypted before-image.',
+                'outcome' => 'Restores the original row values in a transaction.',
+                'scope' => 'tenant_user',
+                'read_only' => false,
+                'side_effects' => 'Restores rows to target database.',
+                'risk_level' => 'HIGH',
+                'requires_confirmation' => true,
+                'idempotent' => false,
+                'retryable' => false,
+                'audit_required' => true,
+                'parameters' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'change_request_id' => ['type' => 'integer'],
+                    ],
+                    'required' => ['change_request_id'],
+                ],
+                'output_schema' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'success' => ['type' => 'boolean'],
+                        'restored_count' => ['type' => 'integer'],
+                    ],
+                ],
+            ],
         ];
     }
 
@@ -1093,6 +1243,11 @@ class AgentToolRegistry
         'test_ai_provider' => ['secret_params' => ['api_key' => 'api_key']],
         'save_ai_provider' => ['side_effect_class' => 'write', 'secret_params' => ['api_key' => 'api_key']],
         'remove_knowledge_document' => ['side_effect_class' => 'write', 'always_confirm' => true],
+        'ask_database' => ['side_effect_class' => 'read'],
+        'find_dummy_data' => ['side_effect_class' => 'read'],
+        'preview_data_change' => ['side_effect_class' => 'platform_metadata'],
+        'confirm_data_change' => ['side_effect_class' => 'external', 'always_confirm' => true],
+        'undo_data_change' => ['side_effect_class' => 'external', 'always_confirm' => true],
     ];
 
     /**
@@ -1259,14 +1414,14 @@ class AgentToolRegistry
      */
     public static function executeTool(User $user, string $toolName, array $args = []): array
     {
-        // Enforce hard security guardrail: strictly block destructive customer SQL
-        $prohibited = ['delete', 'drop', 'truncate', 'alter', 'create_table', 'raw_sql', 'sql_console', 'execute_sql'];
+        // Enforce hard security guardrail: strictly block destructive customer SQL and raw consoles
+        $prohibited = ['drop', 'truncate', 'alter', 'create_table', 'raw_sql', 'sql_console', 'execute_sql'];
         $lower = strtolower($toolName);
         foreach ($prohibited as $p) {
             if (str_contains($lower, $p)) {
                 return [
                     'success' => false,
-                    'error' => "Action '{$toolName}' violates database safety guardrails. Destructive SQL operations are strictly prohibited.",
+                    'error' => "Action '{$toolName}' violates database safety guardrails. DDL and raw SQL console are strictly prohibited.",
                 ];
             }
         }
@@ -1370,6 +1525,44 @@ class AgentToolRegistry
 
             case 'list_audit_logs':
                 return self::listAuditLogs($user, $args);
+
+            case 'ask_database':
+                return app(\App\Services\Data\DataAgentService::class)->ask(
+                    $user,
+                    $args['question'],
+                    $args['connection_id'] ?? null,
+                    ['reveal_pii' => $args['reveal_pii'] ?? false]
+                );
+
+            case 'find_dummy_data':
+                $connId = $args['connection_id'] ?? null;
+                $conn = $connId 
+                    ? DbConnection::where('id', $connId)->where('user_id', $user->id)->firstOrFail()
+                    : DbConnection::where('user_id', $user->id)->where('is_active', true)->firstOrFail();
+                $res = app(\App\Services\Data\DummyDataDetector::class)->detect($conn, $args['table']);
+                return ['success' => true, 'report' => $res];
+
+            case 'preview_data_change':
+                $conn = DbConnection::where('id', $args['connection_id'])->where('user_id', $user->id)->firstOrFail();
+                if ($args['action'] === 'update') {
+                    return app(\App\Services\Data\DataChangeService::class)->previewUpdate(
+                        $conn, $user, $args['table'], $args['filter'], $args['patch_values'] ?? []
+                    );
+                } else {
+                    return app(\App\Services\Data\DataChangeService::class)->previewDelete(
+                        $conn, $user, $args['table'], $args['filter']
+                    );
+                }
+
+            case 'confirm_data_change':
+                return app(\App\Services\Data\DataChangeService::class)->executeChange(
+                    $user, $args['change_request_id'], $args['typed_phrase'] ?? null
+                );
+
+            case 'undo_data_change':
+                return app(\App\Services\Data\DataChangeService::class)->undo(
+                    $user, $args['change_request_id']
+                );
 
             default:
                 return [

@@ -11,13 +11,18 @@ export interface ConnectionProfile {
   id: number;
   name: string;
   db_type: string;
+  access_mode?: "read_only" | "read_write" | "read_write_delete";
+  data_policy?: Record<string, any>;
+  data_timezone?: string;
   host: string;
   port: number;
   database: string;
+  database_name?: string;
   username: string;
   is_active: boolean;
   last_tested_at?: string;
   last_status: string;
+  status?: string;
   created_at: string;
   updated_at: string;
 }

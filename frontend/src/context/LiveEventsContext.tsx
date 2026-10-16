@@ -1,6 +1,8 @@
 import React, { createContext, useContext, useEffect, useState, useRef, useCallback } from "react";
 import { api, clearApiCache } from "../services/api";
 import { useToast } from "./ToastContext";
+import { useAuth } from "./AuthContext";
+import { getEcho, disconnectEcho } from "../services/echo";
 
 export interface WorkspaceLiveEvent {
   id: number;
@@ -21,8 +23,8 @@ interface LiveEventsContextType {
   setFastPolling: (enabled: boolean) => void;
 }
 
-const NORMAL_POLL_MS = 3500;
-const FAST_POLL_MS = 350;
+const NORMAL_POLL_MS = 15000;
+const FAST_POLL_MS = 4000;
 
 const LiveEventsContext = createContext<LiveEventsContextType>({
   status: "disconnected",
@@ -33,7 +35,9 @@ const LiveEventsContext = createContext<LiveEventsContextType>({
 });
 
 export const LiveEventsProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { user, isAuthenticated } = useAuth();
   const [status, setStatus] = useState<"connected" | "connecting" | "reconnecting" | "disconnected">("disconnected");
+  const [wsConnected, setWsConnected] = useState<boolean>(false);
   const [lastEvent, setLastEvent] = useState<WorkspaceLiveEvent | null>(null);
   const listenersRef = useRef<Set<(event: WorkspaceLiveEvent) => void>>(new Set());
   const lastEventIdRef = useRef<number>(0);
@@ -139,21 +143,96 @@ export const LiveEventsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     }
   }, [dispatchEvent]);
 
+  // 1. Establish real-time push connection via Laravel Reverb WebSockets
+  useEffect(() => {
+    if (!isAuthenticated || !user?.id) {
+      disconnectEcho();
+      setWsConnected(false);
+      return;
+    }
+
+    const echo = getEcho();
+    if (!echo) return;
+
+    const channelName = `workspace.${user.id}`;
+    const channel = echo.private(channelName);
+
+    channel.listen(".workspace.event", (event: any) => {
+      const mapped: WorkspaceLiveEvent = {
+        id: event.id || Date.now(),
+        user_id: user.id,
+        event_name: event.event_name || event.event_type || "workspace.event",
+        payload: event.payload || {},
+        resource_type: event.resource_type,
+        resource_id: event.resource_id,
+        created_at: event.created_at || new Date().toISOString(),
+      };
+      dispatchEvent(mapped);
+    });
+
+    const pusher = (echo.connector as any)?.pusher;
+    if (pusher?.connection) {
+      const onConnected = () => {
+        setStatus("connected");
+        setWsConnected(true);
+      };
+      const onDisconnected = () => {
+        setWsConnected(false);
+      };
+      const onError = () => {
+        setWsConnected(false);
+      };
+
+      pusher.connection.bind("connected", onConnected);
+      pusher.connection.bind("disconnected", onDisconnected);
+      pusher.connection.bind("error", onError);
+
+      if (pusher.connection.state === "connected") {
+        setStatus("connected");
+        setWsConnected(true);
+      }
+
+      return () => {
+        pusher.connection.unbind("connected", onConnected);
+        pusher.connection.unbind("disconnected", onDisconnected);
+        pusher.connection.unbind("error", onError);
+        channel.stopListening(".workspace.event");
+        echo.leave(channelName);
+      };
+    }
+
+    return () => {
+      channel.stopListening(".workspace.event");
+      echo.leave(channelName);
+    };
+  }, [user?.id, isAuthenticated, dispatchEvent]);
+
+  // 2. HTTP Polling Fallback (Only active if WebSockets are offline or before initial baseline)
   useEffect(() => {
     const token = localStorage.getItem("auth_token");
-    if (!token) {
+    if (!token || !isAuthenticated) {
       setStatus("disconnected");
       return;
     }
 
-    setStatus("connected");
-    // Initial fetch to establish baseline latest_id
-    pollEvents();
+    // Initial baseline fetch
+    if (!baselineReadyRef.current) {
+      pollEvents();
+    }
 
+    // If Reverb WebSocket is actively connected, completely disable HTTP polling (0 polling requests)
+    if (wsConnected) {
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+      return;
+    }
+
+    // Fallback: If WebSocket is disconnected, poll at relaxed intervals
     const intervalMs = fastPolling ? FAST_POLL_MS : NORMAL_POLL_MS;
     pollTimerRef.current = setInterval(() => {
-      // While Orbit is working, keep polling even in a background tab so acknowledgements are not lost.
-      if (fastPolling || document.visibilityState === "visible") {
+      if (document.visibilityState === "visible") {
         pollEvents();
       }
     }, intervalMs);
@@ -165,17 +244,11 @@ export const LiveEventsProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
-    const handleStorageChange = () => {
-      pollEvents();
-    };
-    window.addEventListener("storage", handleStorageChange);
-
     return () => {
       if (pollTimerRef.current) clearInterval(pollTimerRef.current);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
-      window.removeEventListener("storage", handleStorageChange);
     };
-  }, [pollEvents, fastPolling]);
+  }, [pollEvents, fastPolling, wsConnected, isAuthenticated]);
 
   return (
     <LiveEventsContext.Provider

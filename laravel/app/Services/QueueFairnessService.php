@@ -48,7 +48,15 @@ class QueueFairnessService
         // 3. Process interleaved jobs with per-tenant concurrency checks
         foreach ($interleaved as $index => $automation) {
             $userTz = $automation->timezone ?: 'UTC';
-            $nowInUserTz = Carbon::now($userTz);
+            if ($userTz === 'Asia/Calcutta') {
+                $userTz = 'Asia/Kolkata';
+            }
+            try {
+                $nowInUserTz = Carbon::now($userTz);
+            } catch (\Throwable) {
+                $userTz = 'UTC';
+                $nowInUserTz = Carbon::now('UTC');
+            }
             $todayDate = $nowInUserTz->toDateString();
 
             $idempotencyKey = "auto_{$automation->id}_{$todayDate}_gen";

@@ -4,13 +4,17 @@ This catalog documents the complete set of tools, security boundaries, and featu
 
 ---
 
-## 1. Safety & Execution Invariants
+## 1. Safety & Execution Invariants (ADR-010 Tiered Policy)
 
-1. **Zero Destructive SQL:** Target customer `DELETE` (except bounded compensation), `DROP`, `TRUNCATE`, `ALTER`, `CREATE TABLE`, `RENAME`, `GRANT`, `REVOKE`, and arbitrary raw SQL execution are strictly prohibited.
-2. **Strictly Parameterized Allowlisted Operations:** Only allowlisted `INSERT` and scoped `UPDATE` operations are permitted on non-sensitive tables.
-3. **Tenant Boundary Isolation:** Every resource (connection, automation, version, execution, audit entry, and RAG document) is derived from the authenticated user session.
-4. **Credential Isolation:** Passwords and API keys are encrypted at rest with AES-256-GCM, never logged, and masked in UI transcripts.
-5. **Circuit Breakers & Timeouts:** Hard bounded loop detection (max 12 iterations per turn) and instant barge-in (`Escape`, Stop button) prevent runaway operations.
+1. **SELECT / Aggregates / Schema Questions:** Allowed. Read-only, validated, and strictly limited.
+2. **INSERT:** Allowed after preview and confirmation.
+3. **UPDATE:** Allowed after preview and confirmation, pinned to exact previewed primary keys in transactions.
+4. **DELETE:** Allowed ONLY when the connection owner explicitly sets Access Mode to `read_write_delete`, with recursive foreign-key impact analysis, typed confirmation phrase (voice rejected), transaction rollback, encrypted before-image backup with TTL, and audit.
+5. **Permanently Prohibited:** `DROP`, `TRUNCATE`, `ALTER`, `CREATE`, `RENAME`, `GRANT`, `REVOKE`, any DDL, and raw LLM-written SQL for writes. No setting enables them.
+6. **Raw LLM-Written SELECT:** Allowed only through the validated AST read gate (`sqlglot`), single statement, allowlisted tables/columns, dangerous function denylist (`pg_sleep`, `sleep`), forced LIMIT, and read-only transactions.
+7. **Tenant Boundary Isolation:** Every resource (connection, automation, version, execution, change request, audit entry, and RAG document) is derived from the authenticated user session.
+8. **Credential Isolation:** Passwords and API keys are encrypted at rest with AES-256-GCM, never logged, never returned to browser, and masked in transcripts.
+9. **Circuit Breakers & Timeouts:** Hard bounded loop detection (max 12 iterations per turn) and instant barge-in (`Escape`, Stop button) prevent runaway operations.
 
 ---
 
@@ -61,6 +65,11 @@ Generated from the live registry. UI tools (side effect `ui`) operate the portal
 | `remove_knowledge_document` | write | always | — | — | Remove a knowledge document and purge its vector embeddings from the index. |
 | `get_dashboard_summary` | read | no | — | — | Get overview statistics of connections, automations, executions, and worker health. |
 | `list_audit_logs` | read | no | — | — | Retrieve system audit trail records for actions performed in this tenant workspace. |
+| `ask_database` | read | no | — | — | Query database schema, count records, find tables, or inspect data using natural language with grounded diagnostics. |
+| `find_dummy_data` | read | no | — | — | Analyze table sample for seeded dummy/placeholder accounts, test emails, or burst timestamps with honest confidence. |
+| `preview_data_change` | platform_metadata | yes | — | — | Prepare a before/after diff preview for an UPDATE or an impact analysis for a guarded DELETE before execution. |
+| `confirm_data_change` | external | always | — | — | Atomically execute a previewed UPDATE (pinned to previewed PKs) or guarded DELETE (requiring typed confirmation phrase). |
+| `undo_data_change` | external | always | — | — | Revert an executed UPDATE or DELETE using the stored encrypted before-image. |
 
 Tools not in this table do not exist; Orbit says so instead of improvising. See `docs/orbit-agent/ARCHITECTURE.md`.
 

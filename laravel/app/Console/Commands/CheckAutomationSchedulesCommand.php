@@ -33,7 +33,15 @@ class CheckAutomationSchedulesCommand extends Command
 
         foreach ($activeAutomations as $automation) {
             $userTz = $automation->timezone ?: 'UTC';
-            $nowInUserTz = Carbon::now($userTz);
+            if ($userTz === 'Asia/Calcutta') {
+                $userTz = 'Asia/Kolkata';
+            }
+            try {
+                $nowInUserTz = Carbon::now($userTz);
+            } catch (\Throwable) {
+                $userTz = 'UTC';
+                $nowInUserTz = Carbon::now('UTC');
+            }
             $todayDate = $nowInUserTz->toDateString();
 
             // Check if automation start_date has arrived
@@ -47,7 +55,11 @@ class CheckAutomationSchedulesCommand extends Command
             }
 
             // Check generation trigger with 12-hour safe catch-up tolerance window
-            $genTimeToday = Carbon::parse("{$todayDate} {$automation->generation_time}", $userTz);
+            try {
+                $genTimeToday = Carbon::parse("{$todayDate} {$automation->generation_time}", $userTz);
+            } catch (\Throwable) {
+                $genTimeToday = Carbon::parse("{$todayDate} {$automation->generation_time}", 'UTC');
+            }
 
             if ($nowInUserTz->greaterThanOrEqualTo($genTimeToday)) {
                 if ($nowInUserTz->diffInHours($genTimeToday) < 12) {

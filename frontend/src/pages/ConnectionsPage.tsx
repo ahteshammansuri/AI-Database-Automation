@@ -55,26 +55,26 @@ const SUPPORTED_ENGINES: SupportedEngine[] = [
   {
     id: "postgresql",
     name: "PostgreSQL",
-    status: "coming_soon",
+    status: "active",
     port: 5432,
-    badge: "Coming Soon",
-    description: "Advanced relational driver with MVCC safety guarantees.",
+    badge: "Production Ready",
+    description: "PostgreSQL 14+ with full schema discovery & MVCC safety.",
   },
   {
     id: "mssql",
     name: "SQL Server",
     status: "coming_soon",
     port: 1433,
-    badge: "Coming Soon",
-    description: "Enterprise MSSQL connector with TDS protocol security.",
+    badge: "Unsupported",
+    description: "SQL Server has no adapter yet.",
   },
   {
     id: "mongodb",
     name: "MongoDB",
     status: "coming_soon",
     port: 27017,
-    badge: "Coming Soon",
-    description: "Document collection introspection and BSON schema inference.",
+    badge: "Unsupported",
+    description: "MongoDB is not a relational SQL database and has no adapter yet.",
   },
 ];
 
@@ -105,6 +105,8 @@ export const ConnectionsPage: React.FC = () => {
     connection_uri: "",
     ssl_mode: "preferred",
     connection_timeout: 10,
+    access_mode: "read_only" as "read_only" | "read_write" | "read_write_delete",
+    data_timezone: "Asia/Kolkata",
   });
 
   const { addListener } = useLiveEvents();
@@ -151,17 +153,23 @@ export const ConnectionsPage: React.FC = () => {
 
   // Subscribe to live events for real-time updates without manual reload
   useEffect(() => {
+    let timer: any = null;
     const unsubscribe = addListener((event) => {
       if (
         event.event_name === "connection.tested" ||
         event.event_name === "connection.schema_refreshed" ||
         event.event_name === "connection.created"
       ) {
-        // Re-sync canonical connections list
-        loadConnections(true);
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => {
+          loadConnections(true);
+        }, 400);
       }
     });
-    return unsubscribe;
+    return () => {
+      if (timer) clearTimeout(timer);
+      unsubscribe();
+    };
   }, [addListener]);
 
   const handleTestExisting = async (id: number) => {
@@ -246,6 +254,8 @@ export const ConnectionsPage: React.FC = () => {
       const payload = {
         name: form.name,
         db_type: selectedEngine,
+        access_mode: form.access_mode,
+        data_timezone: form.data_timezone,
         connection_uri: connectionMode === "uri" ? form.connection_uri : undefined,
         host: form.host,
         port: form.port,
@@ -292,6 +302,7 @@ export const ConnectionsPage: React.FC = () => {
     db_type: selectedEngine, mode: "manual", name: form.name, host: form.host, port: form.port,
     database_name: form.database_name, username: form.username, password: form.password,
     ssl_mode: form.ssl_mode, connection_timeout: form.connection_timeout,
+    access_mode: form.access_mode, data_timezone: form.data_timezone,
   });
 
   useOrbitSurface("connections.form", () => ({
@@ -447,6 +458,8 @@ export const ConnectionsPage: React.FC = () => {
       connection_uri: "",
       ssl_mode: "preferred",
       connection_timeout: 10,
+      access_mode: "read_only",
+      data_timezone: "Asia/Kolkata",
     });
     setTestResult(null);
     setConnectionMode("manual");
@@ -469,13 +482,15 @@ export const ConnectionsPage: React.FC = () => {
     setForm({
       name: c.name || "",
       host: c.host || "127.0.0.1",
-      port: c.port || 3306,
+      port: c.port || (c.db_type === "postgresql" ? 5432 : 3306),
       database_name: c.database_name || c.database || "",
       username: c.username || "",
       password: "", // Never expose existing secret in plain text
       connection_uri: "",
       ssl_mode: c.ssl_mode === "prefer" ? "preferred" : (c.ssl_mode === "require" ? "required" : (c.ssl_mode === "disable" ? "disabled" : (c.ssl_mode || "preferred"))),
       connection_timeout: c.connection_timeout || 10,
+      access_mode: c.access_mode || "read_only",
+      data_timezone: c.data_timezone || "Asia/Kolkata",
     });
     setTestResult(null);
     setTouched({ name: true, host: true, port: true, database_name: true, username: true });
@@ -623,10 +638,28 @@ export const ConnectionsPage: React.FC = () => {
                         <h4 className="font-bold text-slate-900 text-sm group-hover:text-indigo-600 transition-colors">
                           {c.name}
                         </h4>
-                        <div className="flex items-center gap-2 mt-0.5">
+                        <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
                           <span className="text-[10px] text-slate-500 uppercase font-mono tracking-wider font-semibold">
                             {c.db_type || "mysql"}
                           </span>
+                          <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${
+                            c.access_mode === "read_write_delete"
+                              ? "bg-purple-100 text-purple-800 border border-purple-200"
+                              : c.access_mode === "read_write"
+                              ? "bg-amber-100 text-amber-800 border border-amber-200"
+                              : "bg-emerald-100 text-emerald-800 border border-emerald-200"
+                          }`}>
+                            {c.access_mode === "read_write_delete"
+                              ? "Read/Write/Delete"
+                              : c.access_mode === "read_write"
+                              ? "Read/Write"
+                              : "Read Only"}
+                          </span>
+                          {c.data_timezone && (
+                            <span className="text-[10px] text-slate-400 font-mono">
+                              {c.data_timezone}
+                            </span>
+                          )}
                           {latencyMs && (
                             <span className="text-[10px] text-emerald-600 font-mono font-medium flex items-center gap-1">
                               <Activity className="w-2.5 h-2.5" />
@@ -981,6 +1014,80 @@ export const ConnectionsPage: React.FC = () => {
                       </p>
                     </div>
                   )}
+                </div>
+
+                {/* Access Mode & Data Safety (Owner-Controlled Safety Tier) */}
+                <div className="border border-slate-200 rounded-xl p-3 bg-slate-50/50 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="block text-slate-800 font-bold text-xs flex items-center gap-1.5">
+                      <ShieldCheck className="w-4 h-4 text-indigo-600" />
+                      <span>Access Mode & Data Safety</span>
+                    </label>
+                    <span className="text-[10px] text-slate-500 font-mono">Owner Controlled</span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    {[
+                      {
+                        mode: "read_only",
+                        title: "Read Only",
+                        badge: "Safest",
+                        desc: "SELECT, COUNT, schema introspection & queries. All writes blocked.",
+                        border: "border-emerald-300 bg-emerald-50/60 text-emerald-900",
+                      },
+                      {
+                        mode: "read_write",
+                        title: "Read & Write",
+                        badge: "Preview & Confirm",
+                        desc: "Reads + INSERT & UPDATE with preview & user confirmation. DELETE blocked.",
+                        border: "border-amber-300 bg-amber-50/60 text-amber-900",
+                      },
+                      {
+                        mode: "read_write_delete",
+                        title: "Read, Write & Delete",
+                        badge: "Guarded Delete",
+                        desc: "Adds row DELETE with impact analysis, typed confirmation & backup.",
+                        border: "border-purple-300 bg-purple-50/60 text-purple-900",
+                      },
+                    ].map((m) => {
+                      const isSel = form.access_mode === m.mode;
+                      return (
+                        <div
+                          key={m.mode}
+                          onClick={() => updateField("access_mode", m.mode)}
+                          className={`p-2.5 rounded-lg border text-left cursor-pointer transition select-none ${
+                            isSel
+                              ? `ring-2 ring-indigo-500/30 ${m.border}`
+                              : "border-slate-200 bg-white hover:border-slate-300 text-slate-700"
+                          }`}
+                        >
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="font-bold text-[11px]">{m.title}</span>
+                            <span className="text-[9px] px-1 py-0.5 rounded font-semibold bg-white/80 border border-current">
+                              {m.badge}
+                            </span>
+                          </div>
+                          <p className="text-[10px] opacity-80 leading-snug">{m.desc}</p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="bg-amber-50 border border-amber-200/60 rounded-lg p-2 text-[10px] text-amber-900 flex items-start gap-1.5">
+                    <AlertCircle className="w-3.5 h-3.5 text-amber-600 shrink-0 mt-0.5" />
+                    <span>
+                      <strong>Recommendation:</strong> Use a database user restricted to your chosen mode (e.g. <code className="font-mono font-bold">fx_ro</code> for read-only, <code className="font-mono font-bold">fx_rw</code> for read-write). The platform strictly enforces its mode policy regardless and never assumes database user privileges are restricted.
+                    </span>
+                  </div>
+                  <div className="pt-1">
+                    <label className="block text-slate-700 font-semibold text-[11px] mb-1">Target Database Timezone</label>
+                    <input
+                      type="text"
+                      placeholder="Asia/Kolkata"
+                      value={form.data_timezone}
+                      onChange={(e) => updateField("data_timezone", e.target.value)}
+                      className="w-full bg-white border border-slate-300 rounded-lg px-2.5 py-1.5 text-slate-900 font-mono text-xs focus:ring-2 focus:ring-indigo-500/20"
+                    />
+                    <p className="text-[10px] text-slate-400 mt-0.5">Used for time-window queries ("today", "yesterday") and wall-clock timestamps.</p>
+                  </div>
                 </div>
 
                 {/* Staged Diagnostics Feedback */}

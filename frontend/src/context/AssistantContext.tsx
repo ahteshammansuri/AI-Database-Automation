@@ -316,9 +316,9 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     if (!localStorage.getItem("auth_token")) return;
     const beat = () => api.agentHeartbeat().catch(() => {});
     beat();
-    const t = setInterval(beat, 15000);
+    const t = setInterval(beat, 25000);
     return () => clearInterval(t);
-  }, [conversationId]);
+  }, []);
 
   // While a turn waits in the queue, refresh its real position and worker liveness.
   useEffect(() => {

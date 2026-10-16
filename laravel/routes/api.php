@@ -22,6 +22,7 @@ use App\Http\Controllers\QualityScoreController;
 use App\Http\Controllers\TemplateController;
 use App\Http\Controllers\DatabaseInsightsController;
 use App\Http\Controllers\CalendarController;
+use App\Http\Controllers\Api\DataAgentController;
 
 // Public Health Check
 Route::get('/health', fn () => response()->json(['status' => 'healthy', 'service' => 'laravel-control-plane']));
@@ -53,6 +54,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Database Connections
     Route::get('/connections', [DbConnectionController::class, 'index']);
+    Route::get('/connections/engines', [DbConnectionController::class, 'engines']);
     Route::post('/connections', [DbConnectionController::class, 'store']);
     Route::post('/connections/test', [DbConnectionController::class, 'test']);
     Route::get('/connections/{id}', [DbConnectionController::class, 'show']);
@@ -74,6 +76,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/model-roles', [ModelRoleController::class, 'index']);
     Route::put('/model-roles', [ModelRoleController::class, 'update']);
     Route::post('/model-roles/probe', [ModelRoleController::class, 'probe']);
+    Route::post('/model-roles/readiness-test', [ModelRoleController::class, 'readinessTest']);
 
     // Knowledge Base & RAG
     Route::get('/knowledge', [KnowledgeController::class, 'index']);
@@ -132,6 +135,15 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/agent/heartbeat', [AgentController::class, 'heartbeat']);
     Route::get('/agent/surfaces', [AgentController::class, 'surfaces']);
     Route::post('/agent/tasks/{id}/continue', [AgentController::class, 'continueAfterSecret']);
+
+    // Natural-Language Data Agent (ADR-010, Section 3-5)
+    Route::post('/data-agent/ask', [DataAgentController::class, 'ask']);
+    Route::get('/data-agent/context', [DataAgentController::class, 'context']);
+    Route::post('/data-agent/set-connection', [DataAgentController::class, 'setConnection']);
+    Route::post('/data-agent/preview-change', [DataAgentController::class, 'previewChange']);
+    Route::post('/data-agent/confirm-change', [DataAgentController::class, 'confirmChange']);
+    Route::post('/data-agent/undo-change', [DataAgentController::class, 'undoChange']);
+    Route::get('/data-agent/results/{id}', [DataAgentController::class, 'showResult']);
 
     // Phase 6: Feature Flags & Advanced Platform Capabilities
     Route::get('/features', [FeatureFlagController::class, 'index']);

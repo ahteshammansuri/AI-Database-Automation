@@ -1,0 +1,16 @@
+CREATE USER IF NOT EXISTS 'fx_ro'@'%' IDENTIFIED BY 'fx_ro_pw';
+CREATE USER IF NOT EXISTS 'fx_rw'@'%' IDENTIFIED BY 'fx_rw_pw';
+CREATE USER IF NOT EXISTS 'fx_rwd'@'%' IDENTIFIED BY 'fx_rwd_pw';
+GRANT SELECT ON shopfx.* TO 'fx_ro'@'%';
+GRANT SELECT, INSERT, UPDATE ON shopfx.* TO 'fx_rw'@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE ON shopfx.* TO 'fx_rwd'@'%';
+GRANT SELECT ON shopfx_w.* TO 'fx_ro'@'%';
+GRANT SELECT, INSERT, UPDATE ON shopfx_w.* TO 'fx_rw'@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE ON shopfx_w.* TO 'fx_rwd'@'%';
+GRANT SELECT ON legacyfx.* TO 'fx_ro'@'%';
+GRANT SELECT, INSERT, UPDATE ON legacyfx.* TO 'fx_rw'@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE ON legacyfx.* TO 'fx_rwd'@'%';
+GRANT SELECT ON crmfx.* TO 'fx_ro'@'%';
+GRANT SELECT, INSERT, UPDATE ON crmfx.* TO 'fx_rw'@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE ON crmfx.* TO 'fx_rwd'@'%';
+FLUSH PRIVILEGES;

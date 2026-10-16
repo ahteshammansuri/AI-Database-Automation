@@ -8,15 +8,22 @@ interface CacheEntry {
 }
 
 const memoryCache = new Map<string, CacheEntry>();
+const inFlightRequests = new Map<string, Promise<any>>();
 const CACHE_TTL_MS = 25000; // 25 seconds fast cache for instant tab switching
 
 export function clearApiCache(prefix?: string) {
   if (!prefix) {
     memoryCache.clear();
+    inFlightRequests.clear();
   } else {
     for (const key of memoryCache.keys()) {
       if (key.includes(prefix)) {
         memoryCache.delete(key);
+      }
+    }
+    for (const key of inFlightRequests.keys()) {
+      if (key.includes(prefix)) {
+        inFlightRequests.delete(key);
       }
     }
   }
@@ -42,6 +49,11 @@ async function request<T>(endpoint: string, options?: RequestOptions): Promise<T
     }
   }
 
+  // Deduplicate identical in-flight read requests (prevents duplicate calls from React StrictMode & multi-hook mounts)
+  if (isRead && inFlightRequests.has(cacheKey)) {
+    return inFlightRequests.get(cacheKey) as Promise<T>;
+  }
+
   const url = `${BASE_URL}${endpoint}`;
   const token = localStorage.getItem("auth_token");
 
@@ -58,45 +70,66 @@ async function request<T>(endpoint: string, options?: RequestOptions): Promise<T
     headers["Authorization"] = `Bearer ${token}`;
   }
 
-  const response = await fetch(url, {
-    ...options,
-    headers,
-  });
-
-  if (!response.ok) {
-    let errMsg = `Request failed with status ${response.status}`;
+  const fetchPromise = (async (): Promise<T> => {
     try {
-      const errData = await response.json();
-      if (errData?.message) {
-        errMsg = errData.message;
-      } else if (errData?.error) {
-        errMsg = typeof errData.error === "string" ? errData.error : JSON.stringify(errData.error);
-      } else if (errData?.errors) {
-        const firstKey = Object.keys(errData.errors)[0];
-        errMsg = errData.errors[firstKey][0] || errMsg;
+      const response = await fetch(url, {
+        ...options,
+        headers,
+      });
+
+      if (!response.ok) {
+        let errMsg = `Request failed with status ${response.status}`;
+        try {
+          const errData = await response.json();
+          if (errData?.message) {
+            errMsg = errData.message;
+          } else if (errData?.error) {
+            errMsg = typeof errData.error === "string" ? errData.error : JSON.stringify(errData.error);
+          } else if (errData?.errors) {
+            const firstKey = Object.keys(errData.errors)[0];
+            errMsg = errData.errors[firstKey][0] || errMsg;
+          }
+        } catch {
+          // Ignore non-json body error
+        }
+        throw new Error(errMsg);
       }
-    } catch {
-      // Ignore non-json body error
+
+      if (response.status === 204) {
+        return {} as T;
+      }
+
+      const data = await response.json();
+
+      // Store in memory cache if eligible GET request
+      if (isGet) {
+        memoryCache.set(cacheKey, { data, timestamp: Date.now() });
+      }
+
+      return data as T;
+    } finally {
+      if (isRead) {
+        inFlightRequests.delete(cacheKey);
+      }
     }
-    throw new Error(errMsg);
+  })();
+
+  if (isRead) {
+    inFlightRequests.set(cacheKey, fetchPromise);
   }
 
-  if (response.status === 204) {
-    return {} as T;
-  }
+  const data = await fetchPromise;
 
-  const data = await response.json();
-
-  // Store in cache if GET request
-  if (isGet) {
-    memoryCache.set(cacheKey, { data, timestamp: Date.now() });
-  } else if (!isRead && !endpoint.startsWith("/agent/heartbeat") && !endpoint.startsWith("/agent/ui-actions/")) {
+  if (!isRead && !endpoint.startsWith("/agent/heartbeat") && !endpoint.startsWith("/agent/ui-actions/")) {
     // Invalidate cache on mutations (Orbit heartbeats/acks change no portal data)
     clearApiCache();
   }
 
   return data;
 }
+
+let lastHeartbeatTime = 0;
+let lastHeartbeatPromise: Promise<any> | null = null;
 
 export const api = {
   // Auth
@@ -111,6 +144,7 @@ export const api = {
 
   // Database Connections
   listConnections: () => request<any[]>("/connections"),
+  getEngines: () => request<any[]>("/connections/engines"),
   getConnection: (id: number) => request<any>(`/connections/${id}`),
   createConnection: (data: any) => request<any>("/connections", {
     method: "POST",
@@ -118,6 +152,9 @@ export const api = {
       ...data,
       database_name: data.database_name || data.database,
       db_type: data.db_type || "mysql",
+      access_mode: data.access_mode || "read_only",
+      data_timezone: data.data_timezone,
+      data_policy: data.data_policy,
     }),
   }),
   updateConnection: (id: number, data: any) => request<any>(`/connections/${id}`, {
@@ -125,6 +162,9 @@ export const api = {
     body: JSON.stringify({
       ...data,
       database_name: data.database_name || data.database,
+      access_mode: data.access_mode,
+      data_timezone: data.data_timezone,
+      data_policy: data.data_policy,
     }),
   }),
   deleteConnection: (id: number) => request<any>(`/connections/${id}`, { method: "DELETE" }),
@@ -134,6 +174,7 @@ export const api = {
     body: JSON.stringify({
       ...data,
       database_name: data.database_name || data.database,
+      db_type: data.db_type || "mysql",
     }),
   }),
 
@@ -340,7 +381,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ status, result }),
     }),
-  agentHeartbeat: () => request<any>("/agent/heartbeat", { method: "POST", body: "{}" }),
+  agentHeartbeat: () => {
+    const now = Date.now();
+    if (lastHeartbeatPromise && now - lastHeartbeatTime < 10000) {
+      return lastHeartbeatPromise;
+    }
+    lastHeartbeatTime = now;
+    lastHeartbeatPromise = request<any>("/agent/heartbeat", { method: "POST", body: "{}" });
+    return lastHeartbeatPromise;
+  },
   getAgentSurfaces: () => request<any>("/agent/surfaces"),
   continueAgentTask: (taskId: number, body: { surface: string; field: string; page_context?: any }) =>
     request<any>(`/agent/tasks/${taskId}/continue`, { method: "POST", body: JSON.stringify(body) }),

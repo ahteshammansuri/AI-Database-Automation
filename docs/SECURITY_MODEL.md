@@ -53,33 +53,32 @@ flowchart TD
 
 ---
 
-## 3. Absolute Target Database Execution Guardrails
+## 3. Target Database Execution Policy (Tiered Policy, ADR-010)
 
-### 3.1 Hard Forbidden Operations
-The platform will NEVER execute the following on customer target databases:
-- `DELETE`
-- `DROP`
-- `TRUNCATE`
-- `ALTER`
-- `CREATE TABLE` / `CREATE DATABASE` / `CREATE VIEW`
-- `RENAME`
-- `GRANT` / `REVOKE`
-- Arbitrary SQL console / Raw SQL execution
+Per owner-authorised policy change (2026-10-15):
 
-### 3.2 Allowed Operations
-1. **Read-only Schema Introspection:**
-   - Queries `information_schema.tables`, `information_schema.columns`, `information_schema.key_column_usage`, and `information_schema.table_constraints`.
-2. **Parameterized `INSERT`:**
-   - Into explicitly allowlisted, non-sensitive tables.
-3. **Scoped `UPDATE`:**
-   - Restricted to allowlisted fields on an explicitly verified primary key (`WHERE id = ?`). Mass updates (`UPDATE ...` without precise primary key condition) are rejected.
+| Operation | Policy |
+|---|---|
+| SELECT / COUNT / aggregates / schema questions | Allowed. Read-only, validated, limited. |
+| INSERT | Allowed after preview and confirmation. |
+| UPDATE | Allowed after preview and confirmation, pinned to the exact previewed primary keys. |
+| DELETE | Allowed ONLY if the connection owner enabled access mode `read_write_delete`, with impact analysis, typed confirmation, transaction, backup and audit. |
+| DROP / TRUNCATE / ALTER / CREATE / GRANT / any DDL | **Always prohibited.** No setting enables them. |
+| Raw LLM-written SQL for writes | **Always prohibited.** Writes go through structured operation plans compiled by backend code. |
+| Raw LLM-written SELECT | Only through the validated read gate: AST parse, allowlists, forced LIMIT, timeout, read-only transaction. |
 
-### 3.3 Default-Deny Sensitive Tables
-Tables matching any of the following patterns are classified as **Restricted** and blocked from selection in the automation builder:
-- Authentication & users: `users`, `user`, `accounts`, `auth`, `passwords`, `sessions`, `tokens`, `oauth`
-- Permissions & roles: `roles`, `permissions`, `user_roles`
-- Financial: `payments`, `transactions`, `billing`, `credit_cards`, `invoices`, `wallets`
-- System & auditing: `audit_logs`, `logs`, `migrations`
+### 3.1 Per-Connection Access Modes
+- `read_only` (default): reads only.
+- `read_write`: reads + insert/update after confirmation.
+- `read_write_delete`: adds delete with impact analysis and typed confirmation.
+The backend enforces the access mode regardless of the database user's privileges.
+
+### 3.2 Data Classes & Protection
+- **Blocked tables:** credentials, tokens, sessions.
+- **Read-only tables:** financial, permission, order and audit tables (unless explicitly overridden by the owner).
+- **Secret columns:** password hashes, tokens, card numbers, national IDs are never returned, never sent to models, and never written.
+- **PII columns:** email and phone are masked by default; reveals are permission-checked and audited.
+- **Automation eligibility:** the automation engine continues to restrict sensitive tables from automated background writing.
 
 ---
 

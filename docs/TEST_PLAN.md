@@ -30,13 +30,44 @@ Testing spans three layers:
 
 ## 2. Test Execution Commands
 
+### 2.1 Natural Language Data Agent & Safety Test Suites (Pillar B)
 ```bash
-# 1. Laravel Tests
+# Run all new Data Agent, Safe Writes, Guarded Delete, and Live Correction suites:
+./scripts/php-pgsql.sh laravel/vendor/bin/phpunit \
+  laravel/tests/Feature/NaturalLanguageDataAgentTest.php \
+  laravel/tests/Feature/SafeDataWritesAndGuardedDeleteTest.php \
+  laravel/tests/Feature/LiveCorrectionAndRequirementsTest.php
+
+# Run 60-Question NL Accuracy Evaluation Suite (MySQL & PostgreSQL live fixtures):
+./scripts/php-pgsql.sh laravel/vendor/bin/phpunit \
+  laravel/tests/Feature/NaturalLanguageQueryAccuracyTest.php
+
+# Run Orbit Autonomous Agent Decision & Action Test Suite:
+./scripts/php-pgsql.sh laravel/vendor/bin/phpunit \
+  laravel/tests/Feature/AgentAutonomousActionTest.php
+```
+
+### 2.2 Model Readiness & Vector Ingestion Tests
+```bash
+# Trigger Qdrant Vector Corpus Ingestion:
+curl -s -X POST -H "X-Service-Token: platform_secret_internal_key_2026" \
+  http://127.0.0.1:8001/v1/rag/ingest-corpus
+
+# Test Model Readiness endpoint:
+curl -s -X POST -H "Authorization: Bearer <TOKEN>" -H "Content-Type: application/json" \
+  -d '{"provider": "mock", "model_name": "llama3.2"}' \
+  http://127.0.0.1:8000/api/model-roles/readiness-test
+```
+
+### 2.3 Core Platform Tests & Frontend Verification
+```bash
+# Core Laravel tests
 cd laravel && php artisan test
 
-# 2. Python AI Service Tests
-cd ai_service && pytest tests/ -v
+# Python AI Service tests
+cd ai_service && ../.venv/bin/pytest tests/ -v
 
-# 3. Frontend Typecheck and Build
+# Frontend Typecheck and Build
 cd frontend && npm run build
 ```
+

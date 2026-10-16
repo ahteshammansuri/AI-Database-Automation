@@ -71,10 +71,20 @@ export const DashboardPage: React.FC = () => {
   }, [selectedRange]);
 
   useEffect(() => {
-    const unsubscribe = addListener(() => {
-      loadData(true, selectedRange);
+    let timer: any = null;
+    const unsubscribe = addListener((event) => {
+      const name = event.event_name || "";
+      if (name.startsWith("execution.") || name.startsWith("automation.") || name.startsWith("connection.")) {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => {
+          loadData(true, selectedRange);
+        }, 400);
+      }
     });
-    return unsubscribe;
+    return () => {
+      if (timer) clearTimeout(timer);
+      unsubscribe();
+    };
   }, [addListener, selectedRange]);
 
   const handleTriggerRun = async (autoId: number) => {

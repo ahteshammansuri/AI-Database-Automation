@@ -20,7 +20,7 @@
 ---
 
 ## ADR-003: Dynamic Customer Target Database Connector & Execution Safety
-- **Status:** Accepted
+- **Status:** Superseded in part by ADR-010 (data operations policy, 2026-10-15). The connection, encryption and parameterization rules still apply.
 - **Context:** Users connect their own MySQL databases to automate content generation. Absolute non-negotiable rule: no customer-target `DELETE`, `DROP`, `TRUNCATE`, `ALTER`, `CREATE TABLE`, `RENAME`, `GRANT`, `REVOKE`, arbitrary SQL, or LLM-generated SQL.
 - **Decision:**
   1. Store connection credentials encrypted at rest using Laravel's managed encryption (`Crypt::encryptString`).
@@ -96,4 +96,69 @@
   6. **Dynamic Parameter Revision & Compensating Updates:** Mid-task corrections evaluate semantic parameter changes (e.g., category revisions), re-planning uncommitted steps or applying atomic compensating updates to already-committed automations.
 - **Consequence:** Fully open-ended, robust natural-language interaction with zero phrase brittleness, zero destructive SQL, and verifiable execution fidelity.
 
+
+
+---
+
+## ADR-010: Tiered data operations policy for the natural-language data agent (2026-10-15)
+- **Status:** Accepted. The product owner authorised the change in the 2026-10-15 addendum. It supersedes the "no DELETE / no model-written SQL" rule in ADR-003.
+- **Context:** Users want to ask about, and change, data in their own connected databases in plain English. The earlier rule allowed only automation inserts and single-row updates.
+- **Decision:**
+
+  | Operation | Policy |
+  |---|---|
+  | SELECT / COUNT / aggregates / schema questions | Allowed. Read-only, validated, limited. |
+  | INSERT | Allowed after a preview and confirmation. |
+  | UPDATE | Allowed after a preview and confirmation, pinned to the exact previewed primary keys. |
+  | DELETE | Only in access mode `read_write_delete`, with impact analysis, typed confirmation, a transaction, a backup and an audit record. |
+  | DROP / TRUNCATE / ALTER / CREATE / GRANT / any DDL | Always prohibited. No setting enables them. |
+  | Raw model-written SQL for writes | Always prohibited. Writes are structured plans compiled by backend code. |
+  | Raw model-written SELECT | Only through the validated read gate: AST parse, allowlists, forced LIMIT, timeout, read-only transaction. |
+
+  - **Access mode:** per connection, `read_only` (default), `read_write` or `read_write_delete`. Enforced in Laravel regardless of the database user's privileges.
+  - **Data classes:**
+    - **Blocked tables:** credentials, tokens, sessions.
+    - **Read-only tables:** financial, permission, order and audit tables, unless the owner overrides.
+    - **Secret columns** are never returned, sent to a model, or written.
+    - **PII columns** are masked unless revealed, and every reveal is audited.
+  - **No model permissions:** the model never decides permissions. Every plan is validated against the live schema and this policy before compilation.
+- **Consequence:**
+  - `AGENTS.md`, `.agents/rules/03`, the product knowledge doc and the security docs were updated together.
+  - The automation engine's eligibility tiers still apply to automations. Agent data changes use this policy instead.
+
+---
+
+## ADR-011: Qdrant Vector Store for Hybrid Metadata-Filtered Retrieval
+- **Status:** Accepted (2026-10-15)
+- **Context:** The previous RAG implementation relied on per-user FAISS index files with custom JSON metadata files. Storing table profiles, schema summaries, few-shot examples, product docs, and user uploads required structured metadata filtering (by `tenant_id`, `namespace`, `version`, `hash`) *before* vector scoring. The platform database is MySQL, ruling out pgvector.
+- **Decision:**
+  1. Adopt Qdrant as the unified vector store abstraction.
+  2. For local developer environments and small-footprint deployments, run Qdrant in embedded/local mode (on-disk persistence) without requiring an extra daemon.
+  3. Pre-filter by `tenant_id` and `namespace` on every query to guarantee zero cross-tenant leakage.
+  4. Use an incremental, content-hash-based ingestion pipeline for Markdown documentation and table profiles.
+- **Consequence:** Fast, deterministic, tenant-isolated vector retrieval with payload filtering, eliminating index file collision risks.
+
+---
+
+## ADR-012: Multi-Dialect Target Database Abstraction & Honest Engine Feasibility
+- **Status:** Accepted (2026-10-15)
+- **Context:** The prompt requires supporting MySQL and PostgreSQL for user-connected databases, while handling other engines (SQLite, SQL Server, MongoDB) honestly rather than pretending they work.
+- **Decision:**
+  1. Define a strict `Dialect` interface (`App\Services\Data\Dialects\Dialect`) that encapsulates identifier quoting, DSN construction, session safety initialization (UTC, statement timeout, lock timeout, read-only session), catalog introspection, and `EXPLAIN` plan parsing.
+  2. Implement concrete `MySqlDialect` and `PostgresDialect` adapters.
+  3. Formally register engines in `DialectRegistry`. Engines without an adapter (SQL Server, MongoDB) or engines that present multi-tenant host security risks (SQLite file paths on the server) are explicitly rejected with clear, honest error explanations.
+  4. Ensure `TargetConnector` wraps read execution in isolated, read-only transactions on dedicated short-lived PDO instances that are cleaned up in `finally` blocks.
+- **Consequence:** Extensible, safe database connectivity across supported dialects, preventing unverified claims.
+
+---
+
+## ADR-013: Natural-Language Planning Stage Merging for Low-Latency Execution on Constrained CPUs
+- **Status:** Accepted (2026-10-15)
+- **Context:** On constrained developer environments (CPU-only, local Ollama with models like `qwen2.5:3b`), chaining multiple sequential LLM calls (intent classification -> schema linking -> query plan generation -> answer composer) introduces 30–90 seconds of latency per query.
+- **Decision:**
+  1. Allow consolidation of Intent Classification and QueryPlan Generation into a single structured schema-constrained JSON invocation (`/v1/ai/data/plan`) while keeping the logical stages decoupled in code.
+  2. Use schema linking to retrieve a minimal relevant slice of tables and columns via keyword matching and FK graph expansion before prompting the model.
+  3. Retain a backend validation and repair loop (feeding exact validation error strings back to the model with a hard limit of 3 attempts).
+  4. Fall back to deterministic algorithmic answer phrasing when `llm_answer_phrasing` is disabled, ensuring sub-second response times after query execution.
+- **Consequence:** Maintains rigorous structured validation while delivering responsive user experiences on CPU-only local setups.
 

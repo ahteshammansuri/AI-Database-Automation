@@ -97,6 +97,7 @@ export interface OrbitMascotCharacterProps {
   emotion?: string | null;
   playSoundOnChange?: boolean;
   onClick?: () => void;
+  renderer?: "svg" | "3d";
 }
 
 const SIZE_MAP = { xs: 48, sm: 64, md: 100, lg: 140, xl: 190 };
@@ -115,11 +116,12 @@ export const OrbitMascotCharacter: React.FC<OrbitMascotCharacterProps> = ({
   emotion = null,
   playSoundOnChange = false,
   onClick,
+  renderer = "svg",
 }) => {
   const reduced = Boolean(useReducedMotion());
-  // Real-time 3D for the main character; small avatars (panel header, banner) stay SVG so the
-  // page never holds more than a couple of WebGL contexts.
-  const Renderer = chooseRenderer(size, HAS_WEBGL) === "3d" ? Orbit3D : OrbitRig;
+  // Canonical articulated SVG Orbit rig (OrbitRig) is used everywhere for crisp, glossy,
+  // consistent mascot design matching the header/banner. 3D is only used if explicitly requested.
+  const Renderer = renderer === "3d" && HAS_WEBGL ? Orbit3D : OrbitRig;
   const normalized = String(state).toLowerCase();
   const prev = useRef(normalized);
 

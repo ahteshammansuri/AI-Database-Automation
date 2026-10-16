@@ -14,15 +14,19 @@ echo "=========================================================="
 cleanup() {
     echo ""
     echo "[*] Shutting down all services..."
+    trap - SIGINT SIGTERM EXIT
     kill $(jobs -p) 2>/dev/null || true
+    # Kill process group if running in a separate group
+    kill -- -$$ 2>/dev/null || true
     exit 0
 }
 
 trap cleanup SIGINT SIGTERM EXIT
 
-# Pre-flight: cleanly free ports 8000, 8001, 5173 if prior instances exist
-echo "[*] Ensuring ports 8000, 8001, and 5173 are available..."
-fuser -k 8000/tcp 8001/tcp 5173/tcp 2>/dev/null || true
+# Pre-flight: cleanly free ports 8000, 8001, 5173, 8080 and kill stale workers
+echo "[*] Ensuring ports 8000, 8001, 5173, 8080 and stale background workers are stopped..."
+fuser -k 8000/tcp 8001/tcp 5173/tcp 8080/tcp 2>/dev/null || true
+pkill -f "artisan (queue:work|schedule:work|reverb:start)" 2>/dev/null || true
 sleep 0.5
 
 # 1. Start Python AI Microservice
@@ -35,6 +39,10 @@ sleep 1.5
 # 2. Start Laravel API Server
 echo "[+] Starting Laravel 11 Backend on http://127.0.0.1:8000 with 8 workers..."
 (cd "$DIR/laravel" && PHP_CLI_SERVER_WORKERS=8 php artisan serve --host=127.0.0.1 --port=8000) &
+
+# 2b. Start Laravel Reverb WebSocket Server
+echo "[+] Starting Laravel Reverb WebSocket Server on ws://127.0.0.1:8080..."
+(cd "$DIR/laravel" && php artisan reverb:start --host=0.0.0.0 --port=8080) &
 
 # 3. Start Laravel Queue Worker (Supervised auto-restart loop)
 echo "[+] Starting Laravel Queue Worker (Supervised)..."
@@ -71,9 +79,10 @@ echo "[+] Starting React Frontend on http://localhost:5173..."
 echo ""
 echo "=========================================================="
 echo " All services running!"
-echo " - Public Landing & Portal: http://localhost:5173"
-echo " - Laravel API Backend:     http://localhost:8000"
-echo " - Python AI Service:       http://localhost:8001"
+echo " - Public Landing & Portal:     http://localhost:5173"
+echo " - Laravel API Backend:         http://localhost:8000"
+echo " - Laravel Reverb WebSockets:   ws://localhost:8080"
+echo " - Python AI Service:           http://localhost:8001"
 echo " Press Ctrl+C to stop all services."
 echo "=========================================================="
 
