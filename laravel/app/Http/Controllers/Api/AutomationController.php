@@ -125,41 +125,14 @@ class AutomationController extends Controller
         return [$errors, $validated];
     }
 
-    /**
-     * Validate mappings against the live schema (columns exist, no secrets, parents usable).
-     */
     private function validateAgainstSchema(Automation $draft): array
     {
-        $connection = $draft->connection;
-        try {
-            $pdo = $connection->createTargetPdo();
-        } catch (\Throwable $e) {
-            return ['field_mappings' => ["Could not reach '{$connection->name}' to check the table: " . Str::limit($e->getMessage(), 160)]];
-        }
-        try {
-            $plan = app(FieldPlanBuilder::class)->build($draft, $connection, $pdo);
-        } catch (\Throwable $e) {
-            return ['target_table' => [$e->getMessage()]];
-        } finally {
-            $pdo = null;
-        }
-        $errors = array_values(array_filter($plan['issues'], fn($i) => $i['level'] === 'error'));
-        return empty($errors) ? [] : ['field_mappings' => array_map(fn($i) => $i['message'], $errors)];
+        return app(\App\Services\Automation\AutomationConfigService::class)->schemaErrors($draft);
     }
 
     private function assertTableAutomatable(DbConnection $connection, string $table): ?string
     {
-        if (!in_array(strtolower((string) ($connection->db_type ?: 'mysql')), ['mysql', 'mariadb'], true)) {
-            return "Automations can write to MySQL connections only; '{$connection->name}' is {$connection->db_type}.";
-        }
-        if ($this->safetyService->isTableSensitive($table)) {
-            return "Table '{$table}' is restricted (accounts, credentials, payments and similar) and cannot be automated.";
-        }
-        $class = app(DataAccessPolicy::class)->getTableClass($connection, $table);
-        if ($class !== 'writable') {
-            return "Table '{$table}' is {$class} for this connection and cannot be automated.";
-        }
-        return null;
+        return app(\App\Services\Automation\AutomationConfigService::class)->tableProblem($connection, $table);
     }
 
     public function store(Request $request)

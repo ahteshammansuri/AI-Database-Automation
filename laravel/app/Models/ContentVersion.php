@@ -46,4 +46,16 @@ class ContentVersion extends Model
     {
         return $this->hasMany(ApprovalToken::class, 'version_id');
     }
+
+    /**
+     * Drafts a person can still approve or reject: pending, and their run has not ended
+     * (published, skipped at the deadline, cancelled...) or moved on to publishing/regenerating.
+     */
+    public function scopeAwaitingDecision($query)
+    {
+        return $query->where('status', 'PENDING_APPROVAL')
+            ->whereHas('execution', fn ($e) => $e->whereNotIn('status', array_merge(
+                AutomationExecution::TERMINAL_STATUSES, ['PUBLISHING', 'GENERATING', 'REGENERATING'],
+            )));
+    }
 }

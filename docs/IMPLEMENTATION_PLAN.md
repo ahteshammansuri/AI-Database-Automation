@@ -155,3 +155,20 @@ Replaced the keyword-routed Orbit planner with a real observe-act agent. Evidenc
 - On a CPU-only machine a full article from a 3B local model can take several minutes; generation runs in the background, and the preview shows a live timer.
 - Many-to-many links (e.g. tags) are still only handled for the `posts`/`tags`/`post_tags` naming convention.
 - Existing tests that target a MySQL on port 3308 (`demo_blog_cms`) still fail when that database is not running; the new suites use the fixture container on 3317 and skip cleanly without it.
+
+## Orbit agent upgrade: visible operation, confirmations, knowledge, character (2026-10-16)
+
+Plan and resumable status: `docs/tasks/2026-10-16_orbit-agent-upgrade/PLAN.md` and `PROGRESS.md`. Decision: ADR-016.
+
+| # | Item | Status |
+|---|---|---|
+| O1 | Broken automation/approval tools fixed (real jobs, real status rules, shared validation) | DONE (tested) |
+| O2 | Long multi-step turns (24 iterations, 25 min, dedicated `agent` queue connection), context sizing | DONE |
+| O3 | Surfaces: builder per-column mapping and content options, schedule timeout policy, approvals (scheduled vs now), refresh actions, audit inspect, Security page; accuracy fixes found on the way | DONE (tested) |
+| O4 | Visible typing; removals/cancellations through the page popup, which Orbit clicks only after the panel's Confirm button | DONE (tested) |
+| O5 | Speech bubble next to Orbit while the panel is closed | DONE (tested) |
+| O6 | Retrieval over all guides in `docs/orbit-agent/` (overview, automations, security, tour) | DONE (tested, real embedder probe) |
+| O7 | Audit search/inspect tools with real totals | DONE (tested) |
+| O8 | Decider policy: long requests, validation feedback, confirmations, tours, accuracy | DONE |
+| O9 | Character: smooth blink, idle personality, petting, smoother lip-sync, limb motion, landing squash | DONE (tested, rendered) |
+| O10 | Tests, docs, real-browser run | see PROGRESS.md |

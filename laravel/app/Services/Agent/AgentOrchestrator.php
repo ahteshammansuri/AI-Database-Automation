@@ -50,8 +50,148 @@ class AgentOrchestrator
     ) {
     }
 
+    /**
+     * Focused path for questions about the user's own data. Only when the message names tables or stored
+     * values of their schema (data_hint): a small model call decides whether the WHOLE message is one
+     * read-only data question and restates it in English; ask_database then runs through the normal gate
+     * and timeline; a second small call writes the reply from the verified result in the user's language.
+     * Returns false (full agent loop runs instead) for anything else or when the routing call fails.
+     */
+    protected function answerDataQuestion(AgentTask $task, User $user, string $turnId, AgentMessage $userMsg, array $model): bool
+    {
+        $hint = $this->context->dataHint($user, $userMsg->content);
+        $pageHint = $this->context->pageHint($userMsg->content);
+        if (!$hint && !$pageHint) {
+            return false;
+        }
+        $this->stage($task, 'THINKING', 0);
+        $history = collect($this->context->conversationSummary($task, $userMsg->id, 4))
+            ->map(fn ($m) => ['role' => (string) ($m['role'] ?? ''), 'content' => (string) ($m['content'] ?? '')])->all();
+        $timeout = max(60, (int) config('orbit.decide_timeout_seconds', 300));
+        $route = $this->ai->routeUtterance(array_filter([
+            'utterance' => $userMsg->content, 'hint' => $hint ?: (object) [], 'history' => $history,
+            'pages' => $pageHint ? SurfaceCatalog::data()['pages'] ?? [] : null,
+            'provider' => $model['provider'], 'model' => $model['model'], 'api_key' => $model['api_key'],
+        ], fn ($v) => $v !== null), $timeout);
+        if (empty($route['success'])) {
+            return false;
+        }
+
+        if (($route['kind'] ?? '') === 'open_page' && in_array($route['page'] ?? '', SurfaceCatalog::routes(), true)) {
+            $observation = $this->executeTool($task, $user, $turnId, 0, 'go_to_page', ['page' => $route['page']], false);
+            $result = $observation['result'] ?? [];
+            $this->finish($task, [
+                'kind' => 'ANSWER', 'speech_text' => (string) ($result['safe_message'] ?? 'Done.'),
+                'emotion_hint' => !empty($result['success']) ? 'happy' : 'concerned', 'response_style' => 'result',
+            ], [$observation], null);
+
+            return true;
+        }
+        if (!$hint || ($route['kind'] ?? '') !== 'data_question' || trim((string) ($route['question'] ?? '')) === '') {
+            return false;
+        }
+
+        $this->timeline($task, 'UNDERSTOOD', 'succeeded', 'Understood as a question about your data: ' . mb_substr($route['question'], 0, 200));
+        $observation = $this->executeTool($task, $user, $turnId, 0, 'ask_database',
+            ['question' => mb_substr($route['question'], 0, 1000), 'connection_id' => $hint['connection_id']], false);
+        $result = $observation['result'] ?? [];
+        $tool = AgentToolCall::where('task_id', $task->id)->where('tool', 'ask_database')->latest('id')->first();
+        $full = $tool?->result_sanitized ?? [];
+
+        $this->stage($task, 'THINKING', 1);
+        $facts = array_values(array_filter((array) ($full['data']['facts'] ?? []), fn ($f) => (string) $f !== ''));
+        $payload = [
+            'utterance' => $userMsg->content,
+            'result' => [
+                'success' => !empty($result['success']),
+                'message' => $result['safe_message'] ?? null,
+                'error' => empty($result['success']) ? ($result['safe_message'] ?? null) : null,
+                'facts' => $facts,
+                'row_count' => $full['data']['row_count'] ?? null,
+                'columns' => $full['data']['columns'] ?? null,
+                'rows' => $full['data']['rows'] ?? [],
+                'assumptions' => $full['data']['assumptions'] ?? [],
+            ],
+            'provider' => $model['provider'], 'model' => $model['model'], 'api_key' => $model['api_key'],
+        ];
+        // The reply must contain every verified fact; one retry naming what was left out, then the
+        // plain factual sentence from the result itself.
+        $speech = null;
+        for ($attempt = 0; $attempt < 2 && $speech === null; $attempt++) {
+            $reply = $this->ai->composeDataAnswer($payload, $timeout);
+            if (empty($reply['success'])) {
+                break;
+            }
+            $reply['speech_text'] = self::stripEcho((string) $reply['speech_text'], $userMsg->content);
+            $missing = self::missingFacts((string) $reply['speech_text'], $facts);
+            if (!$missing && $facts && !self::isSentence((string) $reply['speech_text'], $facts)) {
+                $missing = ['a complete sentence in the user\'s language (not just a list)'];
+            }
+            if (!$missing) {
+                $speech = (string) $reply['speech_text'];
+            }
+            $payload['missing'] = $missing;
+        }
+        $speech ??= (string) ($result['safe_message'] ?? 'I could not answer that.');
+
+        $this->finish($task, [
+            'kind' => 'ANSWER', 'speech_text' => mb_substr($speech, 0, 1200),
+            'emotion_hint' => !empty($result['success']) ? 'happy' : 'concerned', 'response_style' => 'result',
+        ], [$observation], null);
+
+        return true;
+    }
+
+    /** Remove a verbatim repeat of the user's own message from a reply (small models sometimes echo it). */
+    public static function stripEcho(string $speech, string $utterance): string
+    {
+        $u = trim($utterance, " \t\n\r?.!");
+        if (mb_strlen($u) < 12) {
+            return $speech;
+        }
+        $clean = trim(preg_replace('/\s*' . preg_quote($u, '/') . '\s*[?.!]*/iu', ' ', $speech) ?? $speech);
+        $clean = trim(preg_replace('/\s{2,}/', ' ', $clean), " ,;:-");
+
+        return $clean !== '' ? $clean : $speech;
+    }
+
+    /** A reply that is more than the bare list of facts: at least three words of its own. */
+    public static function isSentence(string $speech, array $facts): bool
+    {
+        $rest = mb_strtolower($speech);
+        foreach ($facts as $f) {
+            $rest = str_replace(mb_strtolower((string) $f), ' ', $rest);
+        }
+        $words = array_filter(preg_split('/[^\p{L}]+/u', $rest) ?: [], fn ($w) => mb_strlen($w) >= 2);
+
+        return count($words) >= 3;
+    }
+
+    /** Facts (names, numbers) that a reply does not contain; numbers match with or without separators. */
+    public static function missingFacts(string $speech, array $facts): array
+    {
+        $plain = mb_strtolower($speech);
+        $digits = preg_replace('/(?<=\d)[,\s](?=\d)/u', '', $plain);
+
+        return array_values(array_filter($facts, function ($f) use ($plain, $digits) {
+            $f = mb_strtolower(trim((string) $f));
+            if ($f === '') {
+                return false;
+            }
+            if (is_numeric($f)) { // a whole number: "8" is not satisfied by "2018"
+                return !preg_match('/(?<![\d.])' . preg_quote($f, '/') . '(?![\d])/u', $digits);
+            }
+
+            return !str_contains($plain, $f);
+        }));
+    }
+
+    /** True when this turn started by running a step the user confirmed, and that step succeeded. */
+    protected bool $confirmedStepDone = false;
+
     public function runTurn(int $taskId, string $turnId): void
     {
+        $this->confirmedStepDone = false;
         $task = AgentTask::find($taskId);
         if (!$task || $task->current_turn_id !== $turnId) {
             return; // superseded by a newer turn
@@ -128,7 +268,20 @@ class AgentOrchestrator
         if (!empty($pending['confirmed'])) {
             $task->update(['pending_tool_call' => null]);
             $this->timeline($task, 'USER_CONFIRMED', 'succeeded', "You confirmed: {$pending['name']}.");
-            $observations[] = $this->executeTool($task, $user, $turnId, 0, $pending['name'], $pending['args'] ?? [], true);
+            $confirmedObs = $this->executeTool($task, $user, $turnId, 0, $pending['name'], $pending['args'] ?? [], true);
+            if (!empty($confirmedObs['result']['success'])) {
+                $this->confirmedStepDone = true;
+                // Never run the confirmed step twice, and say plainly that it is done.
+                $succeededCalls[$pending['hash'] ?? self::argsHash($pending['name'], $pending['args'] ?? [])] = ['repeats' => 0];
+                $confirmedObs['result']['next_step'] = 'The user confirmed this step and it succeeded. Do not repeat it. '
+                    . 'Reply with COMPLETE describing the result, unless the request had other parts still to do.';
+            }
+            $observations[] = $confirmedObs;
+        }
+
+        // A question about the user's own data takes the focused path (small model calls, same gate).
+        if ($observations === [] && $this->answerDataQuestion($task, $user, $turnId, $userMsg, $model)) {
+            return;
         }
 
         for ($i = 0; $i < $maxIterations; $i++) {
@@ -165,7 +318,7 @@ class AgentOrchestrator
             $response = $this->ai->decide([
                 'user_id' => $user->id,
                 'utterance' => $userMsg->content,
-                'runtime_context' => $this->context->build($user, $task, ['provider' => $model['provider'], 'model' => $model['model']]),
+                'runtime_context' => $this->context->build($user, $task, ['provider' => $model['provider'], 'model' => $model['model']], $userMsg->content),
                 'tool_schemas' => AgentToolRegistry::modelVisibleSchemas($user, $task->autonomy_level ?: 'CONFIRM_CONSEQUENTIAL_CHANGES'),
                 'portal_map' => SurfaceCatalog::modelSummary(),
                 'observations' => $observations,
@@ -247,7 +400,8 @@ class AgentOrchestrator
                         continue 2;
                     }
 
-                    $confirmed = $this->confirmedByLaterUtterance($task, $hash, $userMsg->id);
+                    $confirmed = !ToolPolicyGate::needsPanelButton($name, $args)
+                        && $this->confirmedByLaterUtterance($task, $hash, $userMsg->id);
                     $observation = $this->executeTool($task, $user, $turnId, $i, $name, $args, $confirmed);
                     if (($observation['result']['error_category'] ?? null) === 'CONFIRMATION_REQUIRED') {
                         $task->update(['pending_tool_call' => [
@@ -313,7 +467,13 @@ class AgentOrchestrator
         if (!$gate['ok']) {
             $result = $this->runner->result(false, $gate['error_category'], $gate['safe_message']);
             $this->persistCall($task, $turnId, $iteration, $name, $gate['def']['version'] ?? 1, $safeArgs, 'rejected', $result, $traceId, now());
-            $this->timeline($task, $label, $gate['error_category'] === 'CONFIRMATION_REQUIRED' ? 'waiting' : 'failed', $gate['safe_message']);
+            $held = $gate['error_category'] === 'CONFIRMATION_REQUIRED';
+            // The gate's text is written for the model; the person sees plain wording.
+            $this->timeline($task, $label, $held ? 'waiting' : 'failed', $held
+                ? (ToolPolicyGate::needsPanelButton($name, $safeArgs)
+                    ? 'Held until you press Confirm in this panel (a typed "yes" does not count for removals).'
+                    : 'Held until you confirm.')
+                : $gate['safe_message']);
             return ['iteration' => $iteration, 'tool' => $name, 'args' => $safeArgs, 'result' => $this->runner->modelView($result)];
         }
 
@@ -415,6 +575,16 @@ class AgentOrchestrator
     protected function finish(AgentTask $task, array $decision, array $observations, ?array $rag, ?string $forcedStatus = null): void
     {
         $kind = $decision['kind'];
+
+        // The user pressed Confirm, the confirmed step succeeded, and the model only asks again with no
+        // further progress and nothing new held: report the verified result instead of a misleading re-ask.
+        $successes = count(array_filter($observations, fn ($o) => !empty($o['result']['success']) && ($o['result']['status'] ?? '') !== 'already_done'));
+        if ($this->confirmedStepDone && $forcedStatus === null && $successes === 1 && empty($task->pending_tool_call)
+            && in_array($kind, ['ASK_CLARIFICATION', 'REQUEST_CONFIRMATION', 'WAIT_FOR_USER'], true)
+            && empty($decision['secure_input_type']) && count($task->active_plan ?? []) <= 1) {
+            $this->finishFromObservations($task, $observations);
+            return;
+        }
         $status = $forcedStatus ?? (self::TERMINAL_STATUS[$kind] ?? 'ANSWERED');
         $verified = $this->verifiedCalls($observations);
         $emotion = $decision['emotion_hint'] ?? 'neutral';
@@ -431,14 +601,35 @@ class AgentOrchestrator
             $emotion = 'happy';
         }
 
+        // A confirmation request with nothing held by the gate has nothing to confirm: it is a question.
+        if ($status === 'WAITING_FOR_APPROVAL' && empty($task->pending_tool_call)) {
+            $status = 'WAITING_FOR_INPUT';
+        }
+        // The gate held a step for confirmation and the model ended the turn without REQUEST_CONFIRMATION
+        // (e.g. it asked in plain words): keep the step pending so the panel shows the Confirm button.
+        $last = end($observations);
+        if ($status !== 'WAITING_FOR_APPROVAL' && !empty($task->pending_tool_call) && empty($task->pending_tool_call['confirmed'])
+            && $last && ($last['result']['error_category'] ?? null) === 'CONFIRMATION_REQUIRED') {
+            $status = 'WAITING_FOR_APPROVAL';
+        }
+
         $secureType = $kind === 'WAIT_FOR_USER' ? ($decision['secure_input_type'] ?? null) : null;
+        if ($secureType !== null && !$this->secretIsRelevant($task, $secureType, $observations)) {
+            $secureType = null; // never show a password/key box for a question that does not need one
+        }
         $last = end($observations);
         if ($last && $last['tool'] === 'ask_secret_in_form' && !empty($last['result']['success'])) {
             $secureType = null; // the user types it into the real form; no second input card
         }
+        $speech = (string) $decision['speech_text'];
+        $held = $task->pending_tool_call;
+        if ($status === 'WAITING_FOR_APPROVAL' && $held && ToolPolicyGate::needsPanelButton($held['name'] ?? '', $held['args'] ?? [])) {
+            // Removals are confirmed only by the panel button, whatever the model said ("say yes" does not work).
+            $speech = rtrim($speech) . ' To go ahead, press Confirm in my panel.';
+        }
         $lastDecision = [
             'kind' => $kind,
-            'speech_text' => $decision['speech_text'],
+            'speech_text' => $speech,
             'emotion_hint' => $emotion,
             'response_style' => $decision['response_style'] ?? 'conversational',
             'secure_input_type' => $secureType,
@@ -457,7 +648,7 @@ class AgentOrchestrator
             'error_message' => null,
         ]);
 
-        $this->speak($task, $decision['speech_text'], $lastDecision, $observations, $rag, 'model');
+        $this->speak($task, $speech, $lastDecision, $observations, $rag, 'model');
     }
 
     /** Ask for a secret through the secure channel when the model did not. */
@@ -600,26 +791,28 @@ class AgentOrchestrator
      */
     public function modelSelection(User $user): array
     {
-        $provider = config('orbit.default_provider', 'ollama');
-        $model = config('orbit.default_model', 'qwen2.5:3b');
+        return ModelSelector::for($user);
+    }
 
-        $role = ModelRole::where('user_id', $user->id)->where('role', ModelRole::ROLE_PLANNER)->where('is_active', true)->first();
-        $active = AiProvider::where('user_id', $user->id)->where('is_active', true)->first();
-        if ($role) {
-            $provider = $role->provider;
-            $model = $role->model_name;
-        } elseif ($active) {
-            $provider = $active->provider_type;
-            $model = $active->model_name ?: $model;
+    /**
+     * A model-requested secure input box is shown only when a secret of that kind is really involved:
+     * a tool this turn takes that secret (or asked for it), or the user is giving connection/provider details.
+     */
+    protected function secretIsRelevant(AgentTask $task, string $kind, array $observations): bool
+    {
+        foreach ($observations as $o) {
+            $result = $o['result'] ?? [];
+            if (($result['error_category'] ?? null) === 'SECRET_REQUIRED' || ($result['secure_input_type'] ?? null) === $kind) {
+                return true;
+            }
+            if (in_array($kind, AgentToolRegistry::TOOL_META[$o['tool'] ?? '']['secret_params'] ?? [], true)) {
+                return true;
+            }
         }
+        $slots = $task->slots ?? [];
+        $needs = $kind === 'api_key' ? ['provider', 'provider_type'] : ['host', 'database', 'database_name', 'username'];
 
-        $apiKey = null;
-        if (in_array(strtolower($provider), self::CLOUD_PROVIDERS, true)) {
-            $types = in_array(strtolower($provider), ['anthropic', 'claude'], true) ? ['anthropic', 'claude'] : [strtolower($provider)];
-            $apiKey = AiProvider::where('user_id', $user->id)->whereIn('provider_type', $types)->first()?->encrypted_api_key;
-        }
-
-        return ['provider' => $provider, 'model' => $model, 'api_key' => $apiKey];
+        return (bool) array_intersect($needs, array_keys($slots));
     }
 
     /** A spoken "yes" counts only if the user spoke after Orbit asked, for the same call. */

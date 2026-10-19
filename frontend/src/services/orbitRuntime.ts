@@ -45,6 +45,45 @@ async function ensureRoute(route: string): Promise<boolean> {
   return window.location.pathname === route;
 }
 
+/**
+ * Type a value into a text field the way a person would: the page's own setter receives each
+ * growing prefix, so validation, previews and derived fields (like a slug) react as for real typing.
+ * Intermediate validation messages are ignored; only the final value's result counts.
+ */
+async function typeInto(set: (v: any) => any, value: any, kind: string | undefined): Promise<string | null> {
+  const text = typeof value === "string" ? value : null;
+  const typeable = text !== null && (kind === "text" || kind === "textarea" || kind === undefined);
+  if (!typeable || prefersReducedMotion() || text!.length < 2) {
+    const err = await set(value);
+    return err ? String(err) : null;
+  }
+  const total = text!.length;
+  const steps = Math.min(total, kind === "textarea" ? 28 : 18);
+  const budgetMs = Math.min(kind === "textarea" ? 2200 : 1400, 220 + total * 32);
+  let err: any = null;
+  for (let i = 1; i <= steps; i++) {
+    err = await set(text!.slice(0, Math.round((total * i) / steps)));
+    await sleep(budgetMs / steps);
+  }
+  return err ? String(err) : null;
+}
+
+/**
+ * After the user confirmed a consequential action in Orbit's panel, the page shows its own
+ * confirmation popup; Orbit flies to its confirm button and presses it in front of the user.
+ * Only runs when the server marked the press as user-confirmed.
+ */
+async function pressConfirmPopupWhenShown(actionDone: Promise<void>, maxWaitMs = 5000): Promise<boolean> {
+  // Actions without a popup finish first; stop waiting as soon as they do.
+  const el = await Promise.race([orbitTargets.waitFor("dialog.confirm", maxWaitMs), actionDone.then(() => null)]);
+  if (!el) return false;
+  await sleep(prefersReducedMotion() ? 0 : 350);
+  await visit("dialog.confirm", "tap", 800);
+  await sleep(prefersReducedMotion() ? 0 : 450);
+  if (orbitTargets.get("dialog.confirm") === el) el.click();
+  return true;
+}
+
 const ok = (result: Record<string, any>): Outcome => ({ status: "ok", result });
 const fail = (status: ActionExecutionStatus, message: string, extra: Record<string, any> = {}): Outcome => ({
   status,
@@ -64,9 +103,10 @@ async function perform(evt: UiActionEvent): Promise<Outcome> {
 
   switch (evt.action) {
     case "surface.go_to_page": {
-      if (!(await ensureRoute(p.page))) return fail("error", `Could not open ${p.page}.`);
+      const title = orbitSurfaces.getCatalog()?.pages.find((pg) => pg.route === p.page)?.title ?? p.page;
+      if (!(await ensureRoute(p.page))) return fail("error", `Could not open ${title} (${p.page}).`);
       await sleep(400);
-      return ok({ success: true, page: p.page, surfaces_on_screen: orbitSurfaces.mounted() });
+      return ok({ success: true, message: `Opened ${title}.`, page: p.page, surfaces_on_screen: orbitSurfaces.mounted() });
     }
 
     case "surface.open_form": {
@@ -104,7 +144,7 @@ async function perform(evt: UiActionEvent): Promise<Outcome> {
         }
         const rowOrName = meta.dynamic ? name : row;
         await visit(f.target?.(rowOrName) ?? fieldTarget(p.surface, name, row), "type", 800);
-        const err = await f.set(value, rowOrName);
+        const err = await typeInto((v) => f.set(v, rowOrName), value, meta.type);
         if (err) {
           results[name] = { error: String(err) };
           errors++;
@@ -150,8 +190,20 @@ async function perform(evt: UiActionEvent): Promise<Outcome> {
       if (!cat || !h || !a) return fail("not_mounted", "That button is not on screen. Use go_to_page or open_form first.");
       if (a.enabled && !a.enabled(row)) return fail("error", "That button is disabled right now (check required fields).", describeSurface(p.surface));
       await visit(a.target?.(row) ?? actionTarget(p.surface, p.action, row), "tap");
-      const outcome = await a.run(row);
-      return { status: outcome.success ? "ok" : "error", result: { ...outcome } };
+      let actionFinished!: () => void;
+      const actionDone = new Promise<void>((r) => (actionFinished = r));
+      const confirmClick = p.user_confirmed === true ? pressConfirmPopupWhenShown(actionDone) : null;
+      let outcome: Awaited<ReturnType<typeof a.run>>;
+      try {
+        outcome = await a.run(row);
+      } finally {
+        actionFinished();
+      }
+      const popupConfirmed = confirmClick ? await confirmClick : false;
+      return {
+        status: outcome.success ? "ok" : "error",
+        result: { ...outcome, ...(popupConfirmed ? { confirmed_in_popup: true } : {}) },
+      };
     }
 
     case "surface.ask_secret_in_form": {
@@ -174,8 +226,9 @@ async function perform(evt: UiActionEvent): Promise<Outcome> {
         ? (h.fields?.[p.element] ? (h.fields[p.element].target?.() ?? fieldTarget(p.surface, p.element)) : (h.actions?.[p.element]?.target?.() ?? actionTarget(p.surface, p.element)))
         : (h.target ?? h.openTarget);
       await visit(el, "point");
-      orbitStage.emit({ type: "caption", text: String(p.caption || "").slice(0, 160) });
-      return ok({ success: true, message: "Shown to the user." });
+      const caption = String(p.caption || "").slice(0, 160);
+      orbitStage.emit({ type: "caption", text: caption });
+      return ok({ success: true, message: caption ? `Showed ${cat.title}: ${caption.slice(0, 90)}` : `Pointed at ${cat.title}.` });
     }
   }
   return fail("error", `Unsupported UI action ${evt.action}.`);

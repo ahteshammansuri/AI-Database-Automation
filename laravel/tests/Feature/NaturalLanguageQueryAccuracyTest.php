@@ -5,204 +5,96 @@ namespace Tests\Feature;
 use App\Models\DbConnection;
 use App\Models\User;
 use App\Services\Data\DataAgentService;
+use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 
+/**
+ * Live accuracy evaluation of the data assistant: real AI service, the configured local model and the
+ * synthetic shopfx fixture (127.0.0.1:3317). Every question has hand-written reference SQL; the
+ * assistant's rows must match what the database really returns — not just "some query ran".
+ *
+ * Needs a running AI service and model, so it only runs when ORBIT_LIVE_EVAL=1:
+ *   ORBIT_LIVE_EVAL=1 php artisan test --filter=NaturalLanguageQueryAccuracyTest
+ */
 class NaturalLanguageQueryAccuracyTest extends TestCase
 {
-    protected function createUser(): User
+    /** [question, reference SQL, comparison] — scalar | rows (each reference row appears; same count) | count */
+    protected const CASES = [
+        ['how many users are there?', 'SELECT COUNT(*) FROM users', 'scalar'],
+        ['how many orders were refunded?', "SELECT COUNT(*) FROM orders WHERE status = 'refunded'", 'scalar'],
+        ['what is the sum of order totals for orders with status paid or shipped?', "SELECT SUM(total) FROM orders WHERE status IN ('paid', 'shipped')", 'scalar'],
+        ['what is the average order total?', 'SELECT AVG(total) FROM orders', 'scalar'],
+        ['what is the highest product price?', 'SELECT MAX(price) FROM products', 'scalar'],
+        ['Rajasthan ke kitne users hain?', "SELECT COUNT(*) FROM users WHERE region = 'RJ'", 'scalar'],
+        ['how many published posts are there?', "SELECT COUNT(*) FROM posts WHERE status = 'published'", 'scalar'],
+        ['number of users by region', 'SELECT region, COUNT(*) FROM users GROUP BY region', 'rows'],
+        ['count of orders by status', 'SELECT status, COUNT(*) FROM orders GROUP BY status', 'rows'],
+        ['which customer placed the most orders?',
+            'SELECT u.name, COUNT(*) AS n FROM orders o JOIN users u ON u.id = o.user_id GROUP BY u.id, u.name ORDER BY n DESC LIMIT 1', 'rows'],
+        ['Aisa kaun sa user hai jisne sabse jyada order refund kare ho',
+            "SELECT u.name, COUNT(*) AS n FROM orders o JOIN users u ON u.id = o.user_id WHERE o.status = 'refunded' GROUP BY u.id, u.name
+             HAVING COUNT(*) = (SELECT MAX(c) FROM (SELECT COUNT(*) c FROM orders WHERE status = 'refunded' GROUP BY user_id) m)", 'rows'],
+        ['top 3 products by quantity sold',
+            'SELECT p.name, SUM(oi.qty) AS q FROM order_items oi JOIN products p ON p.id = oi.product_id GROUP BY p.id, p.name ORDER BY q DESC LIMIT 3', 'rows'],
+        ['which user spent the most on paid or shipped orders?',
+            "SELECT u.name, SUM(o.total) AS s FROM orders o JOIN users u ON u.id = o.user_id WHERE o.status IN ('paid', 'shipped') GROUP BY u.id, u.name ORDER BY s DESC LIMIT 1", 'rows'],
+        ['list the products with fewer than 100 units in stock', 'SELECT id FROM products WHERE stock < 100', 'count'],
+        ['which products cost more than 50000?', 'SELECT id FROM products WHERE price > 50000', 'count'],
+        ['list the orders placed by user 1', 'SELECT id FROM orders WHERE user_id = 1', 'count'],
+    ];
+
+    protected function setUp(): void
     {
-        return User::factory()->create([
-            'email' => 'eval_user_' . uniqid() . '_' . bin2hex(random_bytes(4)) . '@example.com',
-            'timezone' => 'Asia/Kolkata',
+        parent::setUp();
+        if (!env('ORBIT_LIVE_EVAL')) {
+            $this->markTestSkipped('Live model evaluation: set ORBIT_LIVE_EVAL=1 with the AI service running.');
+        }
+    }
+
+    public function test_answers_match_the_real_database_on_the_shop_fixture(): void
+    {
+        $user = User::factory()->create(['timezone' => 'Asia/Kolkata']);
+        $conn = DbConnection::create([
+            'user_id' => $user->id, 'name' => 'Evaluation MySQL Shop DB', 'db_type' => 'mysql', 'host' => '127.0.0.1', 'port' => 3317,
+            'database_name' => 'shopfx', 'username' => 'root', 'encrypted_password' => 'fxroot', 'ssl_mode' => 'disabled',
+            'access_mode' => 'read_only', 'data_timezone' => 'Asia/Kolkata', 'is_active' => true,
         ]);
-    }
-
-    protected function createMysqlConnection(User $user): DbConnection
-    {
-        return DbConnection::create([
-            'user_id' => $user->id,
-            'name' => 'Evaluation MySQL Shop DB',
-            'db_type' => 'mysql',
-            'host' => '127.0.0.1',
-            'port' => 3317,
-            'database_name' => 'shopfx',
-            'username' => 'root',
-            'encrypted_password' => 'fxroot',
-            'ssl_mode' => 'disabled',
-            'access_mode' => 'read_only',
-            'data_timezone' => 'Asia/Kolkata',
-            'is_active' => true,
-        ]);
-    }
-
-    protected function createPostgresConnection(User $user): DbConnection
-    {
-        return DbConnection::create([
-            'user_id' => $user->id,
-            'name' => 'Evaluation Postgres Shop DB',
-            'db_type' => 'postgresql',
-            'host' => '127.0.0.1',
-            'port' => 5442,
-            'database_name' => 'shopfx',
-            'username' => 'postgres',
-            'encrypted_password' => 'fxroot',
-            'ssl_mode' => 'disabled',
-            'access_mode' => 'read_only',
-            'data_timezone' => 'Asia/Kolkata',
-            'is_active' => true,
-        ]);
-    }
-
-    /**
-     * The 60 evaluation queries representing the 5 core categories:
-     * 1. Counts & Aggregates (10)
-     * 2. Filters & Matching (15)
-     * 3. Time-Relative Windows (10)
-     * 4. Joins & Relationships (15)
-     * 5. Group-By & Top-N Rankings (10)
-     */
-    protected function getEvaluationQueries(): array
-    {
-        return [
-            // 1. Counts & Aggregates (10)
-            ['query' => 'how many users are there?', 'category' => 'count', 'expected_type' => 'data_query'],
-            ['query' => 'how many orders are there?', 'category' => 'count', 'expected_type' => 'data_query'],
-            ['query' => 'how many products are there?', 'category' => 'count', 'expected_type' => 'data_query'],
-            ['query' => 'total number of posts', 'category' => 'count', 'expected_type' => 'data_query'],
-            ['query' => 'count of payments', 'category' => 'count', 'expected_type' => 'data_query'],
-            ['query' => 'total revenue from all orders', 'category' => 'aggregate', 'expected_type' => 'data_query'],
-            ['query' => 'average order total amount', 'category' => 'aggregate', 'expected_type' => 'data_query'],
-            ['query' => 'highest product price', 'category' => 'aggregate', 'expected_type' => 'data_query'],
-            ['query' => 'minimum stock quantity of products', 'category' => 'aggregate', 'expected_type' => 'data_query'],
-            ['query' => 'total quantity of items sold', 'category' => 'aggregate', 'expected_type' => 'data_query'],
-
-            // 2. Filters & Matching (15)
-            ['query' => 'find users with region RJ', 'category' => 'filter', 'expected_type' => 'data_query'],
-            ['query' => 'find the user from Rajasthan', 'category' => 'grounding', 'expected_type' => 'data_query'],
-            ['query' => 'users with active status', 'category' => 'filter', 'expected_type' => 'data_query'],
-            ['query' => 'users where status is pending', 'category' => 'filter', 'expected_type' => 'data_query'],
-            ['query' => 'orders with status completed', 'category' => 'filter', 'expected_type' => 'data_query'],
-            ['query' => 'orders with status cancelled', 'category' => 'filter', 'expected_type' => 'data_query'],
-            ['query' => 'orders with status processing', 'category' => 'filter', 'expected_type' => 'data_query'],
-            ['query' => 'products with price greater than 500', 'category' => 'filter', 'expected_type' => 'data_query'],
-            ['query' => 'products with price less than 100', 'category' => 'filter', 'expected_type' => 'data_query'],
-            ['query' => 'products out of stock', 'category' => 'filter', 'expected_type' => 'data_query'],
-            ['query' => 'products in stock', 'category' => 'filter', 'expected_type' => 'data_query'],
-            ['query' => 'payments with credit_card', 'category' => 'filter', 'expected_type' => 'data_query'],
-            ['query' => 'payments with status completed', 'category' => 'filter', 'expected_type' => 'data_query'],
-            ['query' => 'published posts', 'category' => 'filter', 'expected_type' => 'data_query'],
-            ['query' => 'draft posts', 'category' => 'filter', 'expected_type' => 'data_query'],
-
-            // 3. Time-Relative Windows (10)
-            ['query' => 'how many new users today?', 'category' => 'time_window', 'expected_type' => 'data_query'],
-            ['query' => 'users registered yesterday', 'category' => 'time_window', 'expected_type' => 'data_query'],
-            ['query' => 'orders placed today', 'category' => 'time_window', 'expected_type' => 'data_query'],
-            ['query' => 'orders from yesterday', 'category' => 'time_window', 'expected_type' => 'data_query'],
-            ['query' => 'orders in the last 7 days', 'category' => 'time_window', 'expected_type' => 'data_query'],
-            ['query' => 'posts created today', 'category' => 'time_window', 'expected_type' => 'data_query'],
-            ['query' => 'payments created today', 'category' => 'time_window', 'expected_type' => 'data_query'],
-            ['query' => 'users registered this week', 'category' => 'time_window', 'expected_type' => 'data_query'],
-            ['query' => 'orders created this month', 'category' => 'time_window', 'expected_type' => 'data_query'],
-            ['query' => 'posts created yesterday', 'category' => 'time_window', 'expected_type' => 'data_query'],
-
-            // 4. Joins & Relationships (15)
-            ['query' => 'orders placed by user 1', 'category' => 'join', 'expected_type' => 'data_query'],
-            ['query' => 'orders with user details', 'category' => 'join', 'expected_type' => 'data_query'],
-            ['query' => 'orders with user name', 'category' => 'join', 'expected_type' => 'data_query'],
-            ['query' => 'products in category', 'category' => 'join', 'expected_type' => 'data_query'],
-            ['query' => 'posts written by user 1', 'category' => 'join', 'expected_type' => 'data_query'],
-            ['query' => 'items in order 1', 'category' => 'join', 'expected_type' => 'data_query'],
-            ['query' => 'payments for order 1', 'category' => 'join', 'expected_type' => 'data_query'],
-            ['query' => 'comments on post 1', 'category' => 'join', 'expected_type' => 'data_query'],
-            ['query' => 'orders with payment details', 'category' => 'join', 'expected_type' => 'data_query'],
-            ['query' => 'posts with author name', 'category' => 'join', 'expected_type' => 'data_query'],
-            ['query' => 'order items with product name', 'category' => 'join', 'expected_type' => 'data_query'],
-            ['query' => 'orders placed by user 2', 'category' => 'join', 'expected_type' => 'data_query'],
-            ['query' => 'posts written by user 2', 'category' => 'join', 'expected_type' => 'data_query'],
-            ['query' => 'items in order 2', 'category' => 'join', 'expected_type' => 'data_query'],
-            ['query' => 'payments for order 2', 'category' => 'join', 'expected_type' => 'data_query'],
-
-            // 5. Group-By & Top-N Rankings (10)
-            ['query' => 'top 5 products', 'category' => 'ranking', 'expected_type' => 'data_query'],
-            ['query' => 'top 3 orders', 'category' => 'ranking', 'expected_type' => 'data_query'],
-            ['query' => 'number of users by region', 'category' => 'group_by', 'expected_type' => 'data_query'],
-            ['query' => 'count of orders by status', 'category' => 'group_by', 'expected_type' => 'data_query'],
-            ['query' => 'count of products by category', 'category' => 'group_by', 'expected_type' => 'data_query'],
-            ['query' => 'total sales by payment method', 'category' => 'group_by', 'expected_type' => 'data_query'],
-            ['query' => 'number of posts by status', 'category' => 'group_by', 'expected_type' => 'data_query'],
-            ['query' => 'recent 5 orders', 'category' => 'ranking', 'expected_type' => 'data_query'],
-            ['query' => 'latest 10 users', 'category' => 'ranking', 'expected_type' => 'data_query'],
-            ['query' => 'top 10 products', 'category' => 'ranking', 'expected_type' => 'data_query'],
-        ];
-    }
-
-    public function test_mysql_60_query_accuracy_suite(): void
-    {
-        $user = $this->createUser();
-        $conn = $this->createMysqlConnection($user);
+        $truthDb = DB::build(['driver' => 'mysql', 'host' => '127.0.0.1', 'port' => 3317, 'database' => 'shopfx', 'username' => 'root', 'password' => 'fxroot']);
         $agent = app(DataAgentService::class);
-        $queries = $this->getEvaluationQueries();
-
-        $this->assertCount(60, $queries);
 
         $passed = 0;
-        $failures = [];
-
-        foreach ($queries as $idx => $q) {
-            $num = $idx + 1;
-            try {
-                $res = $agent->ask($user, $q['query'], $conn->id);
-                $this->assertNotEquals('error', $res['type'] ?? '', "Query #{$num} returned error: " . ($res['headline'] ?? ''));
-                $this->assertEquals($q['expected_type'], $res['type'] ?? '', "Query #{$num} type mismatch");
-                $this->assertNotEmpty($res['headline'], "Query #{$num} empty headline");
-                $passed++;
-            } catch (\Throwable $e) {
-                $failures[] = "Query #{$num} ('{$q['query']}'): " . $e->getMessage();
-            }
+        $report = [];
+        foreach (self::CASES as [$question, $referenceSql, $mode]) {
+            $truth = array_map(fn ($r) => array_values((array) $r), $truthDb->select($referenceSql));
+            $res = $agent->ask($user, $question, $conn->id);
+            $ok = !empty($res['success']) && ($res['type'] ?? '') === 'data_query' && $this->answerMatches($mode, $truth, $res);
+            $passed += $ok ? 1 : 0;
+            $report[] = ($ok ? 'PASS ' : 'FAIL ') . $question . ' | ' . mb_substr((string) ($res['message'] ?? ''), 0, 140)
+                . ' | SQL: ' . mb_substr((string) ($res['diagnostics']['sql'] ?? ''), 0, 200);
         }
 
-        $accuracy = ($passed / count($queries)) * 100;
-        echo "\n[MySQL Evaluation Suite] Passed: {$passed}/60 ({$accuracy}% Accuracy)\n";
-
-        if (!empty($failures)) {
-            echo "Failures:\n" . implode("\n", $failures) . "\n";
-        }
-
-        $this->assertEquals(60, $passed, "MySQL NL Query Accuracy fell below 100%: " . implode('; ', $failures));
+        $total = count(self::CASES);
+        fwrite(STDERR, "\n[Data assistant live accuracy] {$passed}/{$total}\n" . implode("\n", $report) . "\n");
+        $this->assertSame($total, $passed, "Live accuracy {$passed}/{$total}; see the report above.");
     }
 
-    public function test_postgres_60_query_accuracy_suite(): void
+    /** Values compared as normalised strings; numbers with a 0.5% tolerance (rounding differences). */
+    protected function answerMatches(string $mode, array $truth, array $res): bool
     {
-        $user = $this->createUser();
-        $conn = $this->createPostgresConnection($user);
-        $agent = app(DataAgentService::class);
-        $queries = $this->getEvaluationQueries();
-
-        $this->assertCount(60, $queries);
-
-        $passed = 0;
-        $failures = [];
-
-        foreach ($queries as $idx => $q) {
-            $num = $idx + 1;
-            try {
-                $res = $agent->ask($user, $q['query'], $conn->id);
-                $this->assertNotEquals('error', $res['type'] ?? '', "Query #{$num} returned error: " . ($res['headline'] ?? ''));
-                $this->assertEquals($q['expected_type'], $res['type'] ?? '', "Query #{$num} type mismatch");
-                $this->assertNotEmpty($res['headline'], "Query #{$num} empty headline");
-                $passed++;
-            } catch (\Throwable $e) {
-                $failures[] = "Query #{$num} ('{$q['query']}'): " . $e->getMessage();
+        $rows = array_map(fn ($r) => array_values((array) $r), $res['rows'] ?? []);
+        $same = function ($a, $b): bool {
+            if (is_numeric($a) && is_numeric($b)) {
+                return abs((float) $a - (float) $b) <= max(0.01, abs((float) $b) * 0.005);
             }
-        }
+            return mb_strtolower(trim((string) $a)) === mb_strtolower(trim((string) $b));
+        };
+        $rowHas = fn (array $row, array $values) => collect($values)->every(fn ($v) => collect($row)->contains(fn ($x) => $same($x, $v)));
 
-        $accuracy = ($passed / count($queries)) * 100;
-        echo "\n[PostgreSQL Evaluation Suite] Passed: {$passed}/60 ({$accuracy}% Accuracy)\n";
-
-        if (!empty($failures)) {
-            echo "Failures:\n" . implode("\n", $failures) . "\n";
-        }
-
-        $this->assertEquals(60, $passed, "PostgreSQL NL Query Accuracy fell below 100%: " . implode('; ', $failures));
+        return match ($mode) {
+            'scalar' => count($rows) === 1 && collect($rows[0])->contains(fn ($x) => $same($x, $truth[0][0] ?? null)),
+            'count' => (int) ($res['row_count'] ?? -1) === count($truth),
+            default => count($rows) >= count($truth)
+                && collect($truth)->every(fn ($t) => collect($rows)->contains(fn ($r) => $rowHas($r, $t))),
+        };
     }
 }

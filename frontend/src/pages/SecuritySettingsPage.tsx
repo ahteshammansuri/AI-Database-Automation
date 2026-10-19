@@ -1,29 +1,59 @@
 import React from "react";
 import { motion } from "framer-motion";
-import {
-  ShieldAlert,
-  Lock,
-  CheckCircle2,
-  Key,
-  ShieldCheck,
-  Ban,
-  FileCheck2,
-  Fingerprint,
-  Cpu
-} from "lucide-react";
+import { Ban, Bot, CheckCircle2, Key, Lock, Network, ShieldAlert, ShieldCheck } from "lucide-react";
+import { useOrbitSurface } from "../hooks/useOrbitSurface";
+
+/**
+ * What the backend actually enforces. Each statement matches code in the Laravel control plane
+ * (DataAccessPolicy, SafeDatabaseExecutor, DatabaseSafetyService, DataChangeService, ApprovalToken,
+ * ToolPolicyGate). Orbit reads this same data from the screen, so keep it exact when the code changes.
+ */
+const NEVER_ALLOWED = ["DROP", "TRUNCATE", "ALTER", "CREATE", "RENAME", "GRANT", "REVOKE", "Raw SQL console", "AI-written SQL for writes"];
+
+const OPERATIONS = [
+  {
+    name: "Reads",
+    rule: "Read-only questions about your data run as a single validated SELECT on allowed tables, with a forced LIMIT, a statement timeout and a read-only transaction.",
+  },
+  {
+    name: "New rows (INSERT)",
+    rule: "Automations and Manual Publishing only add new rows to tables you chose, with parameterized statements in one transaction. A linked parent record (for example a category) is created first in the same transaction only when you allowed it. Sensitive tables never receive automated writes.",
+  },
+  {
+    name: "Editing rows (UPDATE)",
+    rule: "Needs a connection set to read & write, a before → after preview of the exact rows, and your confirmation. Updates are pinned to the previewed primary keys, so an unscoped update is impossible. An executed change can be undone from its saved, encrypted before-image.",
+  },
+  {
+    name: "Row DELETE",
+    rule: "Off by default. Only when the connection owner sets access mode to read, write & delete: impact analysis first, then you type an exact phrase (voice alone is not accepted). It runs in a transaction, the deleted rows are saved first (encrypted) so it can be undone, and it is audited.",
+  },
+];
+
+const TABLE_RULES = [
+  { label: "Always blocked", detail: "Credential, token and session tables (tokens, sessions, password_resets, personal_access_tokens, oauth_*, credentials). No setting can open them." },
+  { label: "Read-only by default", detail: "Payments, invoices, transactions, financial, roles, permissions and audit tables. The connection owner can change this per table." },
+  { label: "Never written by automations", detail: "Tables named like users, accounts, auth, passwords, sessions, tokens, roles, permissions, payments, transactions, billing, invoices, wallets, audit or logs." },
+  { label: "Secret columns", detail: "Password hashes, tokens, card numbers and national IDs are never returned or written." },
+  { label: "Personal data", detail: "Emails and phone numbers are masked in results unless revealed through an audited action." },
+];
+
+const PROTECTIONS = [
+  { icon: Key, title: "Secrets encrypted at rest", text: "Database passwords and AI provider keys are stored encrypted and never sent back to the browser after saving." },
+  { icon: Network, title: "Connection test guard", text: "Tests refuse the cloud metadata address and well-known non-database ports such as SSH, SMTP, Redis, Docker and Kubernetes." },
+  { icon: Lock, title: "Email approval links", text: "Each link carries a random single-use token for one draft version and expires after 24 hours. Opening it only shows the preview; approving or rejecting needs a button press." },
+  { icon: Bot, title: "Orbit (AI assistant)", text: "The backend decides permissions, never the model. Changes need your confirmation; removals and cancellations need the Confirm button in Orbit's panel. Orbit never types or reads passwords or keys." },
+  { icon: ShieldCheck, title: "Ownership and audit", text: "Every connection, automation, run and document belongs to one user and is checked on the server and in background jobs. Security-relevant actions are written to the audit log." },
+];
 
 export const SecuritySettingsPage: React.FC = () => {
-  const forbiddenVerbs = [
-    "DELETE",
-    "DROP",
-    "TRUNCATE",
-    "ALTER",
-    "CREATE",
-    "RENAME",
-    "GRANT",
-    "REVOKE",
-    "RAW_SQL_STRINGS"
-  ];
+  useOrbitSurface("security.page", () => ({
+    describe: () => ({
+      never_allowed: NEVER_ALLOWED,
+      operations: OPERATIONS,
+      table_rules: TABLE_RULES,
+      protections: PROTECTIONS.map(({ title, text }) => ({ title, text })),
+    }),
+  }));
 
   return (
     <motion.div
@@ -32,212 +62,92 @@ export const SecuritySettingsPage: React.FC = () => {
       transition={{ duration: 0.3 }}
       className="max-w-5xl mx-auto space-y-6"
     >
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-slate-200">
-        <div>
-          <div className="flex items-center gap-2 mb-1">
-            <span className="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-              Active Backend Enforcer
-            </span>
-            <span className="text-xs text-slate-400">• Zero Destructive Operations</span>
-          </div>
-          <h2 className="text-2xl font-extrabold text-slate-900 tracking-tight">Security Model & Guardrails</h2>
-          <p className="text-xs text-slate-500 mt-0.5">
-            Deterministic backend policies protecting customer databases from unauthorized, malicious, or destructive mutations
-          </p>
-        </div>
-
-        <div className="px-3.5 py-1.5 bg-white border border-slate-200 rounded-xl text-xs text-slate-600 flex items-center gap-2 shadow-2xs">
-          <ShieldCheck className="w-4 h-4 text-emerald-600" />
-          <span className="font-semibold text-slate-900">SOC-2 & Zero-Trust Ready</span>
-        </div>
-      </div>
-
-      {/* Forbidden Commands Banner with micro-animations */}
-      <motion.div
-        whileHover={{ y: -2 }}
-        transition={{ duration: 0.2 }}
-        className="bg-rose-50/70 border border-rose-200 rounded-2xl p-6 space-y-4 shadow-xs"
-      >
-        <div className="flex items-center justify-between">
-          <h3 className="text-sm font-bold text-rose-950 flex items-center gap-2">
-            <div className="w-8 h-8 rounded-xl bg-rose-100 text-rose-600 flex items-center justify-center shrink-0">
-              <ShieldAlert className="w-4 h-4" />
-            </div>
-            Absolute Non-Negotiable Database Guardrails
-          </h3>
-          <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-rose-200/60 text-rose-800">
-            Enforced at Executor Boundary
+      <div className="pb-2 border-b border-slate-200">
+        <div className="flex items-center gap-2 mb-1">
+          <span className="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+            Enforced by the backend
           </span>
         </div>
-
-        <p className="text-xs text-rose-900 leading-relaxed">
-          The customer database execution service strictly prohibits destructive SQL verbs. No model prompt, user configuration, or injection attack can execute:
+        <h2 className="text-2xl font-extrabold text-slate-900 tracking-tight">Security Model & Guardrails</h2>
+        <p className="text-xs text-slate-500 mt-0.5">
+          What can and cannot happen to your databases. These rules run on the server; the AI never decides them.
         </p>
-
-        <div className="flex flex-wrap gap-2 pt-1 font-mono text-xs">
-          {forbiddenVerbs.map((kw) => (
-            <motion.span
-              key={kw}
-              whileHover={{ scale: 1.05, y: -2 }}
-              whileTap={{ scale: 0.95 }}
-              className="px-3 py-1 bg-white text-rose-700 border border-rose-200 rounded-lg font-bold shadow-2xs cursor-default flex items-center gap-1.5"
-            >
-              <Ban className="w-3 h-3 text-rose-500" />
-              <span>{kw}</span>
-            </motion.span>
-          ))}
-        </div>
-      </motion.div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-        {/* Permitted Operations */}
-        <motion.div
-          whileHover={{ y: -3, borderColor: "#cbd5e1" }}
-          transition={{ duration: 0.2 }}
-          className="bg-white border border-slate-200 rounded-2xl p-6 space-y-4 shadow-xs"
-        >
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-600 border border-emerald-100 flex items-center justify-center shrink-0 shadow-2xs">
-              <CheckCircle2 className="w-5 h-5" />
-            </div>
-            <div>
-              <h4 className="text-sm font-bold text-slate-900">Permitted Operations</h4>
-              <p className="text-[11px] text-slate-500">Explicit allowlist only</p>
-            </div>
-          </div>
-
-          <ul className="text-xs space-y-3 text-slate-600">
-            <li className="flex items-start gap-2.5 p-2.5 bg-slate-50/70 rounded-xl border border-slate-100">
-              <span className="text-emerald-600 font-bold mt-0.5">•</span>
-              <div>
-                <strong className="text-slate-900">Read-Only Introspection:</strong>
-                <p className="text-[11px] text-slate-500 mt-0.5">Queries `information_schema` to parse tables, columns, constraints, and enums safely without touching table row contents.</p>
-              </div>
-            </li>
-            <li className="flex items-start gap-2.5 p-2.5 bg-slate-50/70 rounded-xl border border-slate-100">
-              <span className="text-emerald-600 font-bold mt-0.5">•</span>
-              <div>
-                <strong className="text-slate-900">Parameterized INSERT:</strong>
-                <p className="text-[11px] text-slate-500 mt-0.5">Writes only to user-allowlisted tables and allowlisted column definitions using prepared statements.</p>
-              </div>
-            </li>
-            <li className="flex items-start gap-2.5 p-2.5 bg-slate-50/70 rounded-xl border border-slate-100">
-              <span className="text-emerald-600 font-bold mt-0.5">•</span>
-              <div>
-                <strong className="text-slate-900">Scoped Parameterized UPDATE:</strong>
-                <p className="text-[11px] text-slate-500 mt-0.5">Restricted to allowlisted fields on identified records by specific primary key. Accidental mass updates are structurally impossible.</p>
-              </div>
-            </li>
-          </ul>
-        </motion.div>
-
-        {/* Default-Deny Classifications */}
-        <motion.div
-          whileHover={{ y: -3, borderColor: "#cbd5e1" }}
-          transition={{ duration: 0.2 }}
-          className="bg-white border border-slate-200 rounded-2xl p-6 space-y-4 shadow-xs"
-        >
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-indigo-50 text-indigo-600 border border-indigo-100 flex items-center justify-center shrink-0 shadow-2xs">
-              <Lock className="w-5 h-5" />
-            </div>
-            <div>
-              <h4 className="text-sm font-bold text-slate-900">Default-Deny Classifications</h4>
-              <p className="text-[11px] text-slate-500">Automatic schema sensitivity filters</p>
-            </div>
-          </div>
-
-          <p className="text-xs text-slate-500 leading-relaxed">
-            Tables matching sensitive patterns are flagged <strong className="text-rose-600 font-semibold">RESTRICTED</strong> automatically and blocked from all automated target writes:
-          </p>
-
-          <div className="space-y-2 text-xs font-mono">
-            <div className="p-3 bg-slate-50/80 border border-slate-200 rounded-xl">
-              <div className="font-bold text-slate-800 font-sans mb-1 flex items-center gap-1.5">
-                <Fingerprint className="w-3.5 h-3.5 text-indigo-600" />
-                <span>Credentials & Authentication</span>
-              </div>
-              <code className="text-[11px] text-slate-600">users, passwords, credentials, tokens, api_keys</code>
-            </div>
-
-            <div className="p-3 bg-slate-50/80 border border-slate-200 rounded-xl">
-              <div className="font-bold text-slate-800 font-sans mb-1 flex items-center gap-1.5">
-                <FileCheck2 className="w-3.5 h-3.5 text-emerald-600" />
-                <span>Financial & Commerce</span>
-              </div>
-              <code className="text-[11px] text-slate-600">payments, billing, orders, transactions, cards, wallets</code>
-            </div>
-
-            <div className="p-3 bg-slate-50/80 border border-slate-200 rounded-xl">
-              <div className="font-bold text-slate-800 font-sans mb-1 flex items-center gap-1.5">
-                <ShieldCheck className="w-3.5 h-3.5 text-amber-600" />
-                <span>Security & Audits</span>
-              </div>
-              <code className="text-[11px] text-slate-600">audit_logs, permissions, roles, access_logs</code>
-            </div>
-          </div>
-        </motion.div>
       </div>
 
-      {/* Approval Token Security */}
-      <motion.div
-        whileHover={{ y: -2 }}
-        transition={{ duration: 0.2 }}
-        className="bg-white border border-slate-200 rounded-2xl p-6 space-y-4 shadow-xs"
-      >
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-amber-50 text-amber-600 border border-amber-100 flex items-center justify-center shrink-0 shadow-2xs">
-            <Key className="w-5 h-5" />
-          </div>
-          <div>
-            <h4 className="text-sm font-bold text-slate-900">Email Approval & Token Security</h4>
-            <p className="text-[11px] text-slate-500">Cryptographically verifiable human-in-the-loop decisions</p>
-          </div>
+      <section className="bg-rose-50/70 border border-rose-200 rounded-2xl p-5 sm:p-6 space-y-3 shadow-xs">
+        <h3 className="text-sm font-bold text-rose-950 flex items-center gap-2">
+          <span className="w-8 h-8 rounded-xl bg-rose-100 text-rose-600 flex items-center justify-center shrink-0">
+            <ShieldAlert className="w-4 h-4" />
+          </span>
+          Never possible
+        </h3>
+        <p className="text-xs text-rose-900 leading-relaxed">
+          No prompt, setting or request can run these against a connected database:
+        </p>
+        <div className="flex flex-wrap gap-2 font-mono text-xs">
+          {NEVER_ALLOWED.map((kw) => (
+            <span key={kw} className="px-3 py-1 bg-white text-rose-700 border border-rose-200 rounded-lg font-bold shadow-2xs flex items-center gap-1.5">
+              <Ban className="w-3 h-3 text-rose-500" />
+              {kw}
+            </span>
+          ))}
         </div>
+      </section>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs text-slate-600 pt-1">
-          <motion.div
-            whileHover={{ y: -2, borderColor: "#cbd5e1" }}
-            className="p-4 bg-slate-50/70 border border-slate-200 rounded-xl space-y-1.5 transition"
-          >
-            <h5 className="font-bold text-slate-900 flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-indigo-600" />
-              HMAC-SHA256 Signed
-            </h5>
-            <p className="text-[11px] text-slate-500 leading-relaxed">
-              Tokens are cryptographically bound to specific automation IDs, run IDs, and version numbers.
-            </p>
-          </motion.div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+        <section className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 space-y-4 shadow-xs">
+          <div className="flex items-center gap-3">
+            <span className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-600 border border-emerald-100 flex items-center justify-center shrink-0">
+              <CheckCircle2 className="w-5 h-5" />
+            </span>
+            <div>
+              <h4 className="text-sm font-bold text-slate-900">What is allowed, and how</h4>
+              <p className="text-[11px] text-slate-500">Each connection starts read-only</p>
+            </div>
+          </div>
+          <ul className="text-xs space-y-3 text-slate-600">
+            {OPERATIONS.map((op) => (
+              <li key={op.name} className="p-2.5 bg-slate-50/70 rounded-xl border border-slate-100">
+                <strong className="text-slate-900">{op.name}</strong>
+                <p className="text-[11px] text-slate-500 mt-0.5 leading-relaxed">{op.rule}</p>
+              </li>
+            ))}
+          </ul>
+        </section>
 
-          <motion.div
-            whileHover={{ y: -2, borderColor: "#cbd5e1" }}
-            className="p-4 bg-slate-50/70 border border-slate-200 rounded-xl space-y-1.5 transition"
-          >
-            <h5 className="font-bold text-slate-900 flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-emerald-600" />
-              Single-Use Invalidation
-            </h5>
-            <p className="text-[11px] text-slate-500 leading-relaxed">
-              Once consumed, tokens are invalidated immediately in the platform database to prevent replay attacks.
-            </p>
-          </motion.div>
+        <section className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 space-y-4 shadow-xs">
+          <div className="flex items-center gap-3">
+            <span className="w-10 h-10 rounded-xl bg-amber-50 text-amber-600 border border-amber-100 flex items-center justify-center shrink-0">
+              <Lock className="w-5 h-5" />
+            </span>
+            <div>
+              <h4 className="text-sm font-bold text-slate-900">Sensitive tables and columns</h4>
+              <p className="text-[11px] text-slate-500">Restricted by default</p>
+            </div>
+          </div>
+          <ul className="text-xs space-y-3 text-slate-600">
+            {TABLE_RULES.map((r) => (
+              <li key={r.label} className="p-2.5 bg-slate-50/70 rounded-xl border border-slate-100">
+                <strong className="text-slate-900">{r.label}</strong>
+                <p className="text-[11px] text-slate-500 mt-0.5 leading-relaxed">{r.detail}</p>
+              </li>
+            ))}
+          </ul>
+        </section>
+      </div>
 
-          <motion.div
-            whileHover={{ y: -2, borderColor: "#cbd5e1" }}
-            className="p-4 bg-slate-50/70 border border-slate-200 rounded-xl space-y-1.5 transition"
-          >
-            <h5 className="font-bold text-slate-900 flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-amber-600" />
-              Anti-Crawler Guard
+      <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        {PROTECTIONS.map(({ icon: Icon, title, text }) => (
+          <div key={title} className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs">
+            <h5 className="text-xs font-bold text-slate-900 flex items-center gap-2">
+              <Icon className="w-4 h-4 text-indigo-600 shrink-0" />
+              {title}
             </h5>
-            <p className="text-[11px] text-slate-500 leading-relaxed">
-              GET requests render a preview page only. State mutations require an explicit authenticated POST user action.
-            </p>
-          </motion.div>
-        </div>
-      </motion.div>
+            <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">{text}</p>
+          </div>
+        ))}
+      </section>
     </motion.div>
   );
 };

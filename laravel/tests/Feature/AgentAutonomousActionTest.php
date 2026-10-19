@@ -327,7 +327,7 @@ class AgentAutonomousActionTest extends TestCase
         $this->assertSame('USER_CONFIRMED', $task->timelineEvents()->where('step_name', 'USER_CONFIRMED')->value('step_name'));
     }
 
-    public function test_spoken_yes_confirms_only_after_orbit_asked()
+    public function test_spoken_yes_never_confirms_a_removal_only_the_panel_button_does()
     {
         $conn = $this->savedDemoConnection($this->user1);
         $auto = Automation::create([
@@ -336,7 +336,6 @@ class AgentAutonomousActionTest extends TestCase
             'generation_time' => '08:30', 'publication_time' => '09:00', 'timezone' => 'UTC',
         ]);
         $c = $this->conversation();
-        // The model tries twice in the same turn: the second attempt is still unconfirmed.
         $this->fakeModel(
             $this->toolCall('remove_automation', ['automation_id' => $auto->id]),
             $this->decision(['kind' => 'REQUEST_CONFIRMATION', 'speech_text' => 'Remove Voice Auto?']),
@@ -344,12 +343,203 @@ class AgentAutonomousActionTest extends TestCase
         $this->say($c, 'delete voice auto');
         $this->assertNotNull(Automation::find($auto->id));
 
+        // A typed "yes" is read by the model, so it does not count for a removal.
         $this->fakeModel(
             $this->toolCall('remove_automation', ['automation_id' => $auto->id]),
-            $this->decision(['kind' => 'COMPLETE', 'speech_text' => 'Done, removed.']),
+            $this->decision(['kind' => 'ASK_CLARIFICATION', 'speech_text' => 'Please press Confirm in my panel.']),
         );
         $this->say($c, 'yes go ahead');
+        $this->assertNotNull(Automation::find($auto->id));
+        $obs = $this->decideRequests()[3]['observations'][0]['result'];
+        $this->assertSame('CONFIRMATION_REQUIRED', $obs['error_category']);
+        $this->assertStringContainsString('Confirm button', $obs['safe_message']);
+        $task = AgentTask::where('conversation_id', $c->id)->latest('id')->first();
+        $this->assertSame('WAITING_FOR_APPROVAL', $task->status, 'the Confirm button stays available');
+
+        $this->fakeModel($this->decision(['kind' => 'COMPLETE', 'speech_text' => 'Removed it.']));
+        $this->actingAs($this->user1)->postJson("/api/agent/tasks/{$task->id}/confirm")->assertStatus(202);
         $this->assertNull(Automation::find($auto->id));
+    }
+
+    public function test_spoken_yes_confirms_a_non_destructive_step_only_after_orbit_asked()
+    {
+        $browser = $this->fakeBrowser([['ok', ['success' => true, 'message' => 'Blog is now paused.']]]);
+        $conn = $this->savedDemoConnection($this->user1);
+        $auto = Automation::create([
+            'user_id' => $this->user1->id, 'connection_id' => $conn->id, 'name' => 'Blog', 'target_table' => 'posts',
+            'operation_mode' => 'AI_CREATE', 'field_mappings' => [], 'schedule_type' => 'DAILY',
+            'generation_time' => '08:30', 'publication_time' => '09:00', 'timezone' => 'UTC',
+        ]);
+        $press = ['surface' => 'automations.list', 'action' => 'toggle', 'row' => (string) $auto->id];
+        $c = $this->conversation();
+        $this->fakeModel(
+            $this->toolCall('press', $press),
+            $this->decision(['kind' => 'REQUEST_CONFIRMATION', 'speech_text' => 'Pause Blog?']),
+        );
+        $this->say($c, 'pause the blog automation');
+        $this->assertSame([], $browser->requests);
+
+        $this->fakeModel(
+            $this->toolCall('press', $press),
+            $this->decision(['kind' => 'COMPLETE', 'speech_text' => 'Paused.']),
+        );
+        $this->say($c, 'yes');
+        $this->assertSame('surface.press', $browser->requests[0][0]);
+        $this->assertTrue($browser->requests[0][1]['user_confirmed'], 'the page may click its own confirm popup');
+    }
+
+    public function test_destructive_press_runs_only_after_the_panel_button_and_carries_the_confirmation()
+    {
+        $browser = $this->fakeBrowser([['ok', ['success' => true, 'message' => 'Connection profile removed.', 'confirmed_in_popup' => true]]]);
+        $conn = $this->savedDemoConnection($this->user1);
+        $press = ['surface' => 'connections.list', 'action' => 'remove', 'row' => (string) $conn->id];
+        $c = $this->conversation();
+        // The model asks in plain words instead of REQUEST_CONFIRMATION: the step stays pending anyway.
+        $this->fakeModel(
+            $this->toolCall('press', $press),
+            $this->decision(['kind' => 'ANSWER', 'speech_text' => 'Do you want me to remove Blog DB?']),
+        );
+        $this->say($c, 'remove blog db');
+        $task = AgentTask::where('conversation_id', $c->id)->first();
+        $this->assertSame('WAITING_FOR_APPROVAL', $task->status);
+        $this->assertSame('press', $task->pending_tool_call['name']);
+        $this->assertSame([], $browser->requests);
+
+        $this->fakeModel($this->decision(['kind' => 'COMPLETE', 'speech_text' => 'Removed.']));
+        $this->actingAs($this->user1)->postJson("/api/agent/tasks/{$task->id}/confirm")->assertStatus(202);
+        $this->assertCount(1, $browser->requests);
+        $this->assertTrue($browser->requests[0][1]['user_confirmed']);
+    }
+
+    public function test_guessed_id_is_refused_with_the_users_real_items_and_no_password_box_appears()
+    {
+        // Replays a real qwen2.5:3b run: it guessed document id 123, then asked for the id with a password box.
+        $doc = \App\Models\KnowledgeDocument::create(['user_id' => $this->user1->id, 'title' => 'Old pricing notes', 'file_path' => 'k/x.md', 'file_type' => 'md', 'status' => 'indexed']);
+        \App\Models\KnowledgeDocument::create(['user_id' => $this->user2->id, 'title' => 'Other tenant doc', 'file_path' => 'k/y.md', 'file_type' => 'md', 'status' => 'indexed']);
+        $this->fakeModel(
+            $this->toolCall('remove_knowledge_document', ['document_id' => 123]),
+            $this->decision(['kind' => 'WAIT_FOR_USER', 'secure_input_type' => 'database_password', 'speech_text' => 'Please enter the ID of the document.']),
+        );
+        $c = $this->conversation();
+        $this->say($c, 'remove my document Old pricing notes');
+
+        $reqs = $this->decideRequests();
+        $this->assertSame([['id' => $doc->id, 'title' => 'Old pricing notes', 'status' => 'indexed']], $reqs[0]['runtime_context']['knowledge_documents']);
+        $refusal = $reqs[1]['observations'][0]['result']['safe_message'];
+        $this->assertStringContainsString("#{$doc->id} Old pricing notes", $refusal);
+        $this->assertStringNotContainsString('Other tenant doc', $refusal);
+        $this->assertNotNull(\App\Models\KnowledgeDocument::find($doc->id));
+        $reply = AgentMessage::where('conversation_id', $c->id)->where('role', 'assistant')->latest('id')->first();
+        $this->assertNull($reply->secure_input_type, 'no password box for a question that needs no secret');
+    }
+
+    public function test_a_confirmed_step_is_never_run_twice_and_the_model_is_told_it_is_done()
+    {
+        // Real run: after the confirmed removal succeeded, the model called the same removal again.
+        $doc = \App\Models\KnowledgeDocument::create(['user_id' => $this->user1->id, 'title' => 'Old pricing notes', 'file_path' => 'k/x.md', 'file_type' => 'md', 'status' => 'indexed']);
+        $call = ['document_id' => $doc->id];
+        $this->fakeModel(
+            $this->toolCall('remove_knowledge_document', $call),
+            $this->decision(['kind' => 'REQUEST_CONFIRMATION', 'speech_text' => 'Remove Old pricing notes?']),
+        );
+        $c = $this->conversation();
+        $this->say($c, 'remove old pricing notes');
+        $task = AgentTask::where('conversation_id', $c->id)->first();
+        $this->assertSame('WAITING_FOR_APPROVAL', $task->status);
+        $this->assertStringEndsWith('press Confirm in my panel.', $task->last_decision['speech_text']);
+
+        $this->fakeModel(
+            $this->toolCall('remove_knowledge_document', $call),
+            $this->decision(['kind' => 'COMPLETE', 'speech_text' => 'Removed Old pricing notes.']),
+        );
+        $this->actingAs($this->user1)->postJson("/api/agent/tasks/{$task->id}/confirm")->assertStatus(202);
+
+        $this->assertNull(\App\Models\KnowledgeDocument::find($doc->id));
+        $obs = $this->decideRequests()[2]['observations'];
+        $this->assertStringContainsString('Do not repeat it', $obs[0]['result']['next_step']);
+        $this->assertSame('already_done', $this->decideRequests()[3]['observations'][1]['result']['status']);
+        $this->assertSame('SUCCEEDED', $task->fresh()->status);
+        $this->assertSame(1, AgentToolCall::where('task_id', $task->id)->where('status', 'succeeded')->count());
+    }
+
+    public function test_after_a_confirmed_step_a_re_ask_is_replaced_by_the_verified_result()
+    {
+        // Real qwen2.5:3b run: the removal succeeded, then it asked "Would you like to confirm?" again.
+        $doc = \App\Models\KnowledgeDocument::create(['user_id' => $this->user1->id, 'title' => 'Old pricing notes', 'file_path' => 'k/x.md', 'file_type' => 'md', 'status' => 'indexed']);
+        $this->fakeModel(
+            $this->toolCall('remove_knowledge_document', ['document_id' => $doc->id]),
+            $this->decision(['kind' => 'REQUEST_CONFIRMATION', 'speech_text' => 'Remove Old pricing notes?']),
+        );
+        $c = $this->conversation();
+        $this->say($c, 'remove old pricing notes');
+        $task = AgentTask::where('conversation_id', $c->id)->first();
+
+        $this->fakeModel($this->decision(['kind' => 'ASK_CLARIFICATION',
+            'speech_text' => "I will remove your knowledge document 'Old pricing notes'. Would you like to confirm?"]));
+        $this->actingAs($this->user1)->postJson("/api/agent/tasks/{$task->id}/confirm")->assertStatus(202);
+
+        $task->refresh();
+        $this->assertSame('SUCCEEDED', $task->status);
+        $this->assertStringContainsString('removed', $task->last_decision['speech_text']);
+        $this->assertStringNotContainsString('Would you like to confirm', $task->last_decision['speech_text']);
+    }
+
+    public function test_asking_for_confirmation_with_nothing_held_is_just_a_question()
+    {
+        $this->fakeModel($this->decision(['kind' => 'REQUEST_CONFIRMATION', 'speech_text' => 'Should I remove Old pricing notes?']));
+        $c = $this->conversation();
+        $this->say($c, 'remove old pricing notes');
+        $task = AgentTask::where('conversation_id', $c->id)->first();
+        $this->assertSame('WAITING_FOR_INPUT', $task->status, 'no Confirm button that would confirm nothing');
+        $this->assertNull($task->pending_tool_call);
+    }
+
+    public function test_opening_a_page_takes_the_focused_path_and_really_navigates()
+    {
+        // Real run: "Please open the security page" took 547 s through the full agent prompt.
+        $browser = $this->fakeBrowser([['ok', ['success' => true, 'message' => 'Opened Security & Guardrails.', 'page' => '/security']]]);
+        Http::fake([
+            '*/v1/ai/agent/route' => Http::response(['success' => true, 'kind' => 'open_page', 'question' => '', 'page' => '/security'], 200),
+            '*/v1/ai/agent/decide' => Http::response(['success' => true, 'decision' => ['kind' => 'ANSWER', 'speech_text' => 'full loop']], 200),
+            '*' => Http::response(['success' => true], 200),
+        ]);
+        $c = $this->conversation();
+        $this->say($c, 'Please open the security page');
+
+        $this->assertSame([['surface.go_to_page', ['page' => '/security']]], array_map(fn ($r) => [$r[0], $r[1]], $browser->requests));
+        $task = AgentTask::where('conversation_id', $c->id)->first();
+        $this->assertSame('Opened Security & Guardrails.', $task->last_decision['speech_text']);
+        $this->assertSame(0, Http::recorded(fn ($r) => str_contains($r->url(), '/agent/decide'))->count());
+        $route = Http::recorded(fn ($r) => str_contains($r->url(), '/agent/route'))->first()[0]->data();
+        $this->assertContains('/security', array_column($route['pages'], 'route'));
+    }
+
+    public function test_a_page_the_catalog_does_not_have_is_never_opened_from_the_focused_path()
+    {
+        $browser = $this->fakeBrowser([]);
+        Http::fake([
+            '*/v1/ai/agent/route' => Http::response(['success' => true, 'kind' => 'open_page', 'question' => '', 'page' => '/admin/secret'], 200),
+            '*/v1/ai/agent/decide' => Http::response(['success' => true, 'decision' => ['kind' => 'ANSWER', 'speech_text' => 'full loop']], 200),
+            '*' => Http::response(['success' => true], 200),
+        ]);
+        $c = $this->conversation();
+        $this->say($c, 'open the security page');
+
+        $this->assertSame([], $browser->requests);
+        $this->assertSame('full loop', AgentTask::where('conversation_id', $c->id)->first()->last_decision['speech_text']);
+    }
+
+    public function test_unconfirmed_and_read_only_presses_never_carry_the_confirmation_flag()
+    {
+        $browser = $this->fakeBrowser([]);
+        $conn = $this->savedDemoConnection($this->user1);
+        $this->fakeModel(
+            $this->toolCall('press', ['surface' => 'connections.list', 'action' => 'test', 'row' => (string) $conn->id]),
+            $this->decision(['kind' => 'ANSWER', 'speech_text' => 'Tested.']),
+        );
+        $this->say($this->conversation(), 'test blog db');
+        $this->assertSame('surface.press', $browser->requests[0][0]);
+        $this->assertArrayNotHasKey('user_confirmed', $browser->requests[0][1]);
     }
 
     public function test_model_unavailable_is_reported_as_a_service_error_without_fallback()

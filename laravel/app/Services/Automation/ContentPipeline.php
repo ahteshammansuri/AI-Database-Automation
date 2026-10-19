@@ -183,6 +183,9 @@ class ContentPipeline
                         break;
                     }
                     $value = $data[$col];
+                    if ($f['kind'] === 'body' && is_string($value)) {
+                        $value = $this->dropRepeatedTitleHeading($value, $data, $aiText);
+                    }
                     if ($f['kind'] === 'body' && $meta['content_format'] === 'html' && is_string($value)) {
                         $value = Str::markdown($value, ['html_input' => 'strip', 'allow_unsafe_links' => false]);
                     }
@@ -457,6 +460,18 @@ class ContentPipeline
             }
         }
         return null;
+    }
+
+    /** Small models often open the body with "# <title>"; the title already has its own column. */
+    private function dropRepeatedTitleHeading(string $body, array $data, array $aiFields): string
+    {
+        $titleCol = $this->firstField($aiFields, 'title');
+        $title = $titleCol ? trim((string) ($data[$titleCol] ?? '')) : '';
+        if ($title === '' || !preg_match('/^\s*#{1,2}\s+(.+?)\s*(\R|$)/u', $body, $m)) {
+            return $body;
+        }
+        similar_text(mb_strtolower($m[1]), mb_strtolower($title), $pct);
+        return $pct >= 80 ? ltrim(mb_substr($body, mb_strlen($m[0]))) : $body;
     }
 
     private function matchOption(string $label, array $options): ?string

@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 from ai_service.app.services.data_planner import data_planner
+from ai_service.app.services.data_sql_writer import write_select
 
 router = APIRouter(prefix="/v1/ai/data", tags=["Data Agent"])
 
@@ -40,3 +41,23 @@ def plan_data_query(req: DataPlanRequest):
         return DataPlanResponse(success=True, plan=plan)
     except Exception as e:
         return DataPlanResponse(success=False, plan={}, error=str(e))
+
+
+class DataSqlRequest(BaseModel):
+    question: str
+    schema_slice: Dict[str, Any]
+    dialect: str = "mysql"
+    timezone: str = "UTC"
+    previous: List[Dict[str, str]] = Field(default_factory=list, description="Rejected attempts: {sql, error}")
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    api_key: Optional[str] = None
+    deadline_seconds: float = 240.0
+
+
+@router.post("/sql")
+def write_sql(req: DataSqlRequest):
+    """The user's model proposes one SELECT; Laravel validates it with /v1/sql/validate-select."""
+    return write_select(req.question, req.schema_slice, dialect=req.dialect, timezone=req.timezone,
+                        previous=req.previous, provider=req.provider, model=req.model, api_key=req.api_key,
+                        deadline_seconds=req.deadline_seconds)

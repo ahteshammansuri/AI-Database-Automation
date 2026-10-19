@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 import threading
 import time
@@ -11,6 +12,8 @@ from ai_service.app.providers.base import (
     ProviderUnavailableError,
 )
 from ai_service.app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class OllamaProvider(BaseAIProvider):
@@ -336,6 +339,19 @@ class OllamaProvider(BaseAIProvider):
         final["content"] = "".join(content_parts)
         return final
 
+    @staticmethod
+    def _agent_ctx(messages: List[Dict[str, str]], json_schema: Dict[str, Any]) -> int:
+        """
+        One fixed context window for every agent decision. Changing num_ctx between requests makes
+        Ollama reload the model and drop its cached prompt prefix, which costs minutes on a CPU.
+        """
+        chars = sum(len(m.get("content", "")) for m in messages) + len(json.dumps(json_schema))
+        needed = chars // 3 + settings.AGENT_NUM_PREDICT + 256
+        if needed > settings.AGENT_NUM_CTX_MAX:
+            logger.warning("Agent prompt (~%d tokens) exceeds AGENT_NUM_CTX_MAX=%d; the oldest text may be cut.",
+                           needed, settings.AGENT_NUM_CTX_MAX)
+        return settings.AGENT_NUM_CTX_MAX
+
     def chat_structured(
         self,
         messages: List[Dict[str, str]],
@@ -353,7 +369,7 @@ class OllamaProvider(BaseAIProvider):
             "stream": True,
             "keep_alive": "30m",
             # Short JSON decisions; a smaller context lowers memory (and swap) pressure on CPU-only machines.
-            "options": {"temperature": temperature, "num_ctx": settings.AGENT_NUM_CTX, "num_predict": 256},
+            "options": {"temperature": temperature, "num_ctx": self._agent_ctx(messages, json_schema), "num_predict": settings.AGENT_NUM_PREDICT},
         }
         deadline = deadline if deadline is not None else time.monotonic() + timeout
         data = self._stream_chat(payload, ttft=settings.AGENT_FIRST_TOKEN_TIMEOUT,

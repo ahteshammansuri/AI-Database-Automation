@@ -18,12 +18,16 @@ class RunAgentTurnJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $timeout = 660;
+    /** Above orbit.max_turn_seconds (1500) and below the agent worker's --timeout (1600). */
+    public int $timeout = 1560;
     public int $tries = 1;
 
     public function __construct(public int $taskId, public string $turnId)
     {
         $this->onQueue('agent');
+        if (config('queue.default') === 'database') {
+            $this->onConnection('agent');
+        }
     }
 
     public function handle(AgentOrchestrator $orchestrator): void

@@ -37,6 +37,7 @@ import { SearchableSelect } from "../components/common/SearchableSelect";
 import { useLiveEvents } from "../context/LiveEventsContext";
 import { useToast } from "../context/ToastContext";
 import { useOrbitSurface } from "../hooks/useOrbitSurface";
+import { useRefreshAfterOrbit } from "../hooks/useRefreshAfterOrbit";
 import { orbitTargets } from "../services/orbitTargets";
 import { useSearchParams } from "react-router-dom";
 import { ContentPreview } from "../components/content/ContentPreview";
@@ -60,7 +61,7 @@ export const ExecutionsPage: React.FC = () => {
   const [isUpdatingRecord, setIsUpdatingRecord] = useState(false);
 
   const { addListener } = useLiveEvents();
-  const { toast, showAlert } = useToast();
+  const { toast, confirm } = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
   const automationFilter = searchParams.get("automation") ? Number(searchParams.get("automation")) : undefined;
   const [versionIdx, setVersionIdx] = useState<number>(0);
@@ -104,12 +105,15 @@ export const ExecutionsPage: React.FC = () => {
   }, [addListener, page, selectedStatus]);
 
   // ---- Orbit surface: the same API calls as the row buttons (row = execution id) --------------
+  useRefreshAfterOrbit(["run_automation_now", "retry_execution", "request_execution_interrupt", "approve_content_version", "reject_content_version", "update_published_record"], () => { loadData(true); });
+
   useOrbitSurface("executions.list", () => {
     const find = (row?: string) => executions.find((e: any) => String(e.id) === String(row));
-    const rowCall = (verb: string, call: (id: number) => Promise<any>) => ({
+    const rowCall = (verb: string, call: (id: number) => Promise<any>, ask?: (id: number) => Promise<boolean>) => ({
       target: (row?: string) => `executions.row.${row}`,
       run: async (row?: string) => {
         if (!find(row)) return { success: false, message: `No run ${row} in the visible list (try the status filter or read_screen).` };
+        if (ask && !(await ask(Number(row)))) return { success: false, message: `${verb} was not confirmed in the popup; nothing changed.` };
         try {
           setProcessingId(Number(row));
           const res: any = await call(Number(row));
@@ -135,6 +139,7 @@ export const ExecutionsPage: React.FC = () => {
         },
       },
       actions: {
+        refresh: { run: async () => { await loadData(true); return { success: true, message: "Run history reloaded." }; } },
         view: {
           target: (row) => `executions.row.${row}`,
           run: async (row) => {
@@ -145,7 +150,7 @@ export const ExecutionsPage: React.FC = () => {
           },
         },
         retry: rowCall("Retry", (id) => api.retryExecution(id)),
-        cancel: rowCall("Cancel", (id) => api.cancelExecution(id)),
+        cancel: rowCall("Cancel", (id) => api.cancelExecution(id), askCancel),
         pause: rowCall("Pause", (id) => api.pauseExecution(id)),
         resume: rowCall("Resume", (id) => api.resumeExecution(id)),
         publish_now: rowCall("Publish", (id) => api.publishNow(id)),
@@ -217,27 +222,29 @@ export const ExecutionsPage: React.FC = () => {
     }
   };
 
-  const handleCancel = (id: number) => {
-    showAlert({
+  // One popup for both paths: the person's Cancel button and Orbit's press (Orbit clicks its
+  // confirm button only after the user already confirmed in Orbit's panel).
+  function askCancel(id: number) {
+    return confirm({
       title: "Cancel Execution?",
       text: `Are you sure you want to cancel execution #${id} before target database write?`,
-      icon: "warning",
-      showCancelButton: true,
       confirmButtonText: "Yes, Cancel Job",
       cancelButtonText: "Keep Running",
-      onConfirm: async () => {
-        try {
-          setProcessingId(id);
-          const res = await api.cancelExecution(id);
-          toast.success("Job Cancelled", res.message || "Execution cancelled safely.");
-          loadData(true);
-        } catch (err: any) {
-          toast.error("Cancel Failed", err.message);
-        } finally {
-          setProcessingId(null);
-        }
-      },
     });
+  }
+
+  const handleCancel = async (id: number) => {
+    if (!(await askCancel(id))) return;
+    try {
+      setProcessingId(id);
+      const res = await api.cancelExecution(id);
+      toast.success("Job Cancelled", res.message || "Execution cancelled safely.");
+      loadData(true);
+    } catch (err: any) {
+      toast.error("Cancel Failed", err.message);
+    } finally {
+      setProcessingId(null);
+    }
   };
 
   const handlePause = async (id: number) => {

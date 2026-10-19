@@ -255,6 +255,34 @@ class AiServiceClient
      * One step of Orbit's observe-act loop. Never throws: transport failures come back
      * as success=false with an error category so the caller can report them honestly.
      */
+    /** Small focused model call: is the message one read-only question about the user's data? */
+    public function routeUtterance(array $payload, int $timeoutSeconds = 150): array
+    {
+        return $this->smallAgentCall('route', $payload, $timeoutSeconds);
+    }
+
+    /** Small focused model call: the reply to the user from a verified query result, in their language. */
+    public function composeDataAnswer(array $payload, int $timeoutSeconds = 150): array
+    {
+        return $this->smallAgentCall('answer', $payload, $timeoutSeconds);
+    }
+
+    protected function smallAgentCall(string $endpoint, array $payload, int $timeoutSeconds): array
+    {
+        try {
+            $res = $this->agentClient($timeoutSeconds)->post("{$this->baseUrl}/v1/ai/agent/{$endpoint}", $payload + [
+                'deadline_seconds' => max(15, $timeoutSeconds - 10),
+            ]);
+            if ($res->successful() && is_array($res->json())) {
+                return $res->json();
+            }
+
+            return ['success' => false, 'error_category' => 'AI_SERVICE_ERROR', 'error' => "AI service HTTP {$res->status()}."];
+        } catch (\Throwable $e) {
+            return ['success' => false, 'error_category' => 'AI_SERVICE_UNAVAILABLE', 'error' => 'The AI service could not be reached.'];
+        }
+    }
+
     public function decide(array $payload, int $timeoutSeconds = 150): array
     {
         try {
@@ -341,6 +369,51 @@ class AiServiceClient
                 'has_limit' => false,
                 'errors' => ['SQL analyzer service unreachable: ' . $e->getMessage()],
             ];
+        }
+    }
+
+    /**
+     * The user's model proposes one read-only SELECT for a question (never executed by the AI service).
+     *
+     * @return array{success: bool, sql?: string, assumptions?: array, clarification?: string, error?: string, error_category?: string}
+     */
+    public function writeSelectSql(array $params, int $timeoutSeconds = 260): array
+    {
+        try {
+            $res = $this->agentClient($timeoutSeconds)->post("{$this->baseUrl}/v1/ai/data/sql", $params + [
+                'deadline_seconds' => max(20, $timeoutSeconds - 15),
+            ]);
+            if ($res->successful() && is_array($res->json())) {
+                return $res->json();
+            }
+
+            return ['success' => false, 'error_category' => 'AI_SERVICE_ERROR', 'error' => "AI service HTTP {$res->status()}."];
+        } catch (\Throwable $e) {
+            return ['success' => false, 'error_category' => 'AI_SERVICE_UNREACHABLE', 'error' => 'The AI service did not answer: ' . $e->getMessage()];
+        }
+    }
+
+    /**
+     * Read gate for a model-written SELECT: AST parse, single statement, allow-listed tables and functions,
+     * columns checked against the readable schema (secrets omitted), forced LIMIT.
+     *
+     * @param array<string, list<string>> $schema readable table => readable columns
+     * @return array{valid: bool, sql: ?string, tables: array, errors: array}
+     */
+    public function validateSelect(string $sql, string $dialect, array $schema, int $maxLimit = 200, array $relations = [], array $primaryKeys = [], ?int $forceLimit = null, ?string $question = null): array
+    {
+        try {
+            $res = $this->client()->post("{$this->baseUrl}/v1/sql/validate-select", array_filter([
+                'sql' => $sql, 'dialect' => $dialect, 'schema' => (object) $schema, 'max_limit' => $maxLimit,
+                'relations' => $relations, 'primary_keys' => (object) $primaryKeys, 'force_limit' => $forceLimit, 'question' => $question,
+            ], fn ($v) => $v !== null));
+            if ($res->successful() && is_array($res->json())) {
+                return $res->json() + ['valid' => false, 'sql' => null, 'tables' => [], 'errors' => []];
+            }
+
+            return ['valid' => false, 'sql' => null, 'tables' => [], 'errors' => ["SQL gate HTTP {$res->status()}."], 'gate_unavailable' => true];
+        } catch (\Throwable $e) {
+            return ['valid' => false, 'sql' => null, 'tables' => [], 'errors' => ['SQL gate unreachable: ' . $e->getMessage()], 'gate_unavailable' => true];
         }
     }
 

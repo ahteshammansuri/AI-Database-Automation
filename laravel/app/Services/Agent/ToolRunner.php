@@ -39,7 +39,15 @@ class ToolRunner
     {
         $tool = $def['name'];
         $check = SurfaceCatalog::check($tool, $args);
-        [$status, $res] = $this->ui->request($task, "surface.{$tool}", $args, $check['timeout']);
+        $payload = $args;
+        $timeout = $check['timeout'];
+        if ($tool === 'press' && !empty($check['consequential'])) {
+            // Reaching here means ToolPolicyGate saw the user's explicit confirmation, so the browser may
+            // click the page's own confirmation popup (visibly). Without this flag it never does.
+            $payload['user_confirmed'] = true;
+            $timeout += 6;
+        }
+        [$status, $res] = $this->ui->request($task, "surface.{$tool}", $payload, $timeout);
 
         if ($status === 'headless') {
             return $this->result(false, 'NO_BROWSER', 'The portal is not open in a browser, so Orbit cannot operate the screen. Ask the user to open the portal, or use a backend tool.');

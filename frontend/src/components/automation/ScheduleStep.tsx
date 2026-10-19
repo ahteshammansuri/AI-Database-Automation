@@ -41,7 +41,7 @@ interface Props {
 }
 
 const POLICIES = [
-  { value: "KEEP_DRAFT" as const, title: "Keep it as a draft", text: "Nothing is published. You can still approve it later from Approvals." },
+  { value: "KEEP_DRAFT" as const, title: "Keep it as a draft", text: "Nothing is published and the run stops. The draft stays in the run history." },
   { value: "AUTO_PUBLISH_LATEST" as const, title: "Publish it anyway", text: "The latest version is published at the scheduled time if nobody rejected it." },
   { value: "CANCEL" as const, title: "Cancel the run", text: "The run stops and nothing is written." },
 ];

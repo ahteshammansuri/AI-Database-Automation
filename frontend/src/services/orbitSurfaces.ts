@@ -20,7 +20,7 @@ export function catalogField(cat: CatalogSurface | undefined, name: string): Cat
   const dyn = cat.fields.find((f) => f.dynamic && f.name.endsWith(".*") && name.startsWith(f.name.slice(0, -1)));
   return dyn ? { ...dyn, name } : undefined;
 }
-export interface CatalogAction { id: string; label: string; row?: boolean; consequential?: boolean; timeout_s?: number; verifies?: string }
+export interface CatalogAction { id: string; label: string; row?: boolean; consequential?: boolean; destructive?: boolean; timeout_s?: number; verifies?: string }
 export interface CatalogSurface {
   id: string; route: string; title: string; purpose?: string; openable?: boolean;
   fields: CatalogField[]; actions: CatalogAction[];

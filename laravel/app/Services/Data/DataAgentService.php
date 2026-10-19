@@ -7,6 +7,7 @@ use App\Models\DataQueryResult;
 use App\Models\DbConnection;
 use App\Models\User;
 use App\Services\AiServiceClient;
+use App\Services\Agent\ModelSelector;
 use Illuminate\Support\Str;
 
 class DataAgentService
@@ -26,6 +27,16 @@ class DataAgentService
      * Process a natural language question about database structure or data.
      */
     public function ask(User $user, string $utterance, ?int $connectionId = null, array $options = []): array
+    {
+        $res = $this->answer($user, $utterance, $connectionId, $options);
+        // Every reply says plainly whether it answered (tools and the UI rely on it).
+        $res['success'] ??= ($res['type'] ?? '') !== 'error';
+        $res['message'] ??= $res['headline'] ?? $res['question'] ?? ($res['success'] ? 'Done.' : 'The question could not be answered.');
+
+        return $res;
+    }
+
+    protected function answer(User $user, string $utterance, ?int $connectionId, array $options): array
     {
         $u = trim($utterance);
         $uLower = strtolower($u);
@@ -51,6 +62,8 @@ class DataAgentService
             $tableNames = array_keys($tables);
             $count = count($tableNames);
             return [
+                'success' => true,
+                'message' => "Your database '{$connection->name}' has {$count} tables.",
                 'type' => 'schema_overview',
                 'headline' => "Your database '{$connection->name}' has {$count} tables.",
                 'tables' => $tableNames,
@@ -79,6 +92,8 @@ class DataAgentService
             $targetTable = $this->findBestMatchingTable($tables, $uLower, $convState->active_table ?: 'users');
             $report = $this->dummyDetector->detect($connection, $targetTable);
             return [
+                'success' => true,
+                'message' => "Analyzed table '{$targetTable}': found {$report['dummy_count']} likely dummy/test records.",
                 'type' => 'dummy_data_report',
                 'headline' => "Analyzed table '{$targetTable}': found {$report['dummy_count']} likely dummy/test records with {$report['confidence']} confidence.",
                 'report' => $report,
@@ -86,84 +101,292 @@ class DataAgentService
             ];
         }
 
-        // 6. Natural Language Query Planning & Execution Pipeline
-        $schemaSlice = $this->schemaLinker->slice($connection, $u);
-        $tz = $connection->data_timezone ?: ($user->timezone ?: 'Asia/Kolkata');
+        // 6. Everything else: one model-written SELECT through the validated read gate.
+        return $this->answerWithSql($user, $connection, $convState, $u, $catalog, $options);
+    }
 
-        // Call AI planner service
-        $plan = $this->aiClient->generateDataPlan([
-            'utterance' => $u,
-            'schema_slice' => $schemaSlice,
-            'context' => [
-                'active_connection' => $connection->name,
-                'active_table' => $convState->active_table,
-            ],
-            'timezone' => $tz,
-        ]);
+    /** Attempts per question: the first query plus up to two corrections with the real error. */
+    protected const MAX_SQL_ATTEMPTS = 3;
+    protected const MAX_ROWS = 200;
 
-        if (empty($plan) || !isset($plan['intent'])) {
-            // Local fallback planner
-            $plan = $this->fallbackPlan($u, $schemaSlice, $tz, $convState->active_table);
-        }
-
-        // Validate plan against live schema and access policy
-        $valErrors = $this->validator->validate($connection, $plan);
-        if (!empty($valErrors)) {
-            // If validation fails, try to repair or return honest explanation
-            return [
-                'type' => 'error',
-                'headline' => 'Query planning failed validation against live schema.',
-                'errors' => $valErrors,
-                'connection' => ['id' => $connection->id, 'name' => $connection->name],
-            ];
-        }
-
-        // Compile to parameterized SQL
-        $compiled = $this->compiler->compile($connection, $plan, $catalog);
-
-        // Execute in read-only transaction
+    /**
+     * Answer a question with a SELECT written by the user's model, accepted only if the read gate
+     * validates it against the readable live schema (AST, single SELECT, allow-listed tables and
+     * functions, no secret columns, forced LIMIT) and the database runs it read-only. A rejected query
+     * is retried with the exact error. Never substitutes a different query when it cannot answer.
+     */
+    protected function answerWithSql(User $user, DbConnection $connection, DataConversationState $convState, string $question, array $catalog, array $options): array
+    {
+        $connInfo = ['id' => $connection->id, 'name' => $connection->name, 'driver' => $connection->driver];
+        $slice = $this->schemaLinker->slice($connection, $question, ['max_tables' => 6]);
+        $readable = $this->readableSchema($connection, $catalog);
+        // Real keys let the gate catch joins that would inflate counts and sums (fan-out).
+        $relations = array_values(array_filter(array_map(fn ($fk) => [
+            'table' => $fk['table'] ?? null, 'columns' => $fk['columns'] ?? [], 'ref_table' => $fk['ref_table'] ?? null, 'ref_columns' => $fk['ref_columns'] ?? [],
+        ], $catalog['foreign_keys'] ?? []), fn ($fk) => isset($readable[$fk['table']], $readable[$fk['ref_table']])));
+        $primaryKeys = array_filter(array_map(fn ($t) => (array) ($t['primary_key'] ?? []), array_intersect_key($catalog['tables'] ?? [], $readable)));
+        $dialect = in_array(strtolower((string) ($connection->driver ?: 'mysql')), ['pgsql', 'postgres', 'postgresql'], true) ? 'postgres' : 'mysql';
+        $tz = $connection->data_timezone ?: ($user->timezone ?? null) ?: 'UTC';
+        $model = $options['model'] ?? ModelSelector::for($user);
         $revealPii = !empty($options['reveal_pii']);
-        $readResult = $this->readExecutor->execute($connection, $compiled['sql'], $compiled['bindings'], $revealPii);
+        $previous = [];
+        $softRepaired = false;
 
-        // Update active table
-        $primaryTable = $compiled['primary_table'];
-        $convState->update([
-            'active_table' => $primaryTable,
-            'last_query_plan' => $plan,
-        ]);
+        for ($attempt = 1; $attempt <= self::MAX_SQL_ATTEMPTS; $attempt++) {
+            $written = $this->aiClient->writeSelectSql([
+                'question' => $question,
+                'schema_slice' => $slice,
+                'dialect' => $dialect,
+                'timezone' => $tz,
+                'previous' => $previous,
+                'provider' => $model['provider'] ?? null,
+                'model' => $model['model'] ?? null,
+                'api_key' => $model['api_key'] ?? null,
+            ]);
+            if (empty($written['success'])) {
+                return $this->failure($written['error_category'] ?? 'MODEL_UNAVAILABLE',
+                    'I could not work out a query for that: ' . ($written['error'] ?? 'the model did not answer') . ' Nothing was guessed.',
+                    $connInfo, $previous);
+            }
+            $sql = trim((string) ($written['sql'] ?? ''));
+            if ($sql === '') {
+                $ask = $written['clarification'] ?: 'The tables I can read do not hold that information.';
+                return ['success' => true, 'type' => 'clarification', 'headline' => $ask, 'message' => $ask,
+                    'tables_considered' => array_keys($slice['tables'] ?? []), 'connection' => $connInfo];
+            }
 
-        // Compose response
-        $composed = AnswerComposer::compose($u, $plan, $readResult, $compiled['assumptions']);
+            $gate = $this->aiClient->validateSelect($sql, $dialect, $readable, self::MAX_ROWS, $relations, $primaryKeys, null, $question);
+            if (!empty($gate['gate_unavailable'])) {
+                return $this->failure('AI_SERVICE_UNREACHABLE', 'The query safety check is not reachable, so nothing was run.', $connInfo, $previous);
+            }
+            if (empty($gate['valid'])) {
+                $previous[] = ['sql' => $sql, 'error' => implode(' ', (array) ($gate['errors'] ?? ['rejected']))];
+                continue;
+            }
 
-        // Persist query result for re-inspection and caching
-        $resultRecord = DataQueryResult::create([
+            // Filters the question never asked for, or a ranking question answered without sorting: one
+            // rewrite with the exact issue. If the model insists, the answer still states its real filter.
+            $issues = [];
+            if (!empty($gate['unasked_filters'])) {
+                $issues[] = 'The question does not ask to filter on ' . implode(' AND ', array_map('strval', (array) $gate['unasked_filters']))
+                    . '; remove those conditions unless the user asked for them.';
+            }
+            if (!empty($gate['ranks_child_rows'])) {
+                $r = (array) $gate['ranks_child_rows'];
+                $issues[] = "The question ranks {$r['entity']}, but the query sorts individual {$r['child']} rows; GROUP BY the {$r['entity']} id "
+                    . "and SUM (or COUNT) {$r['child']}.{$r['column']} per {$r['entity']}, then ORDER BY that total.";
+            }
+            if (!empty($gate['missing_order'])) {
+                $issues[] = 'The question asks for a ranking (top / most / least) but the query does not sort by the ranked value; aggregate it and ORDER BY it.';
+            }
+            if ($issues && !$softRepaired && $attempt < self::MAX_SQL_ATTEMPTS) {
+                $softRepaired = true;
+                $previous[] = ['sql' => $sql, 'error' => implode(' ', $issues)];
+                continue;
+            }
+
+            // Access policy on the tables the query really reads (blocked tables are refused and audited).
+            try {
+                $this->policy->assertCanRead($connection, (array) ($gate['tables'] ?? []));
+            } catch (DataException $e) {
+                return $this->failure($e->errorCode ?: 'TABLE_BLOCKED', $e->getMessage(), $connInfo, $previous);
+            }
+
+            $read = $this->readExecutor->execute($connection, (string) $gate['sql'], [], $revealPii);
+            if (empty($read['success'])) {
+                $previous[] = ['sql' => $sql, 'error' => 'The database rejected it: ' . mb_substr((string) ($read['error'] ?? ''), 0, 300)];
+                continue;
+            }
+
+            // A top-N that ended inside a tie hides tied rows: run the same validated query wider.
+            $tie = self::tieInfo($read['rows'] ?? []);
+            if ($tie && $tie['all_tied'] && ($read['row_count'] ?? 0) >= (int) ($gate['limit'] ?? PHP_INT_MAX) && (int) ($gate['limit'] ?? 0) < 50) {
+                $wide = $this->aiClient->validateSelect($sql, $dialect, $readable, self::MAX_ROWS, $relations, $primaryKeys, 50);
+                $wideRead = !empty($wide['valid']) ? $this->readExecutor->execute($connection, (string) $wide['sql'], [], $revealPii) : null;
+                if (!empty($wideRead['success'])) {
+                    [$read, $gate] = [$wideRead, $wide + ['notes' => $gate['notes'] ?? []]];
+                }
+            }
+
+            return $this->composeAnswer($user, $connection, $convState, $question, $read, $gate, $written, $attempt);
+        }
+
+        $last = end($previous);
+        return $this->failure('QUERY_NOT_ANSWERED',
+            'I could not build a valid query for that after ' . self::MAX_SQL_ATTEMPTS . ' attempts. Last problem: ' . ($last['error'] ?? 'unknown') . ' Nothing was guessed.',
+            $connInfo, $previous);
+    }
+
+    /** Readable tables and columns for the gate: blocked tables and secret columns are left out. */
+    protected function readableSchema(DbConnection $connection, array $catalog): array
+    {
+        $schema = [];
+        foreach ($catalog['tables'] ?? [] as $table => $meta) {
+            if ($this->policy->getTableClass($connection, (string) $table) === 'blocked') {
+                continue;
+            }
+            $cols = array_values(array_filter(array_keys($meta['columns'] ?? []), fn ($c) => !ColumnClassifier::isSecret((string) $c)));
+            if ($cols) {
+                $schema[$table] = $cols;
+            }
+        }
+
+        return $schema;
+    }
+
+    /**
+     * Ranking results: the measure is the last numeric column that is not an id; rows sharing the top
+     * value are a tie. Returns null when there is nothing to compare.
+     */
+    public static function tieInfo(array $rows): ?array
+    {
+        if (count($rows) < 2) {
+            return null;
+        }
+        $cols = array_keys($rows[0]);
+        $measure = self::measureColumn($rows);
+        if ($measure === null) {
+            return null;
+        }
+        $label = self::labelColumn($rows, $measure) ?? $cols[0];
+        $top = (float) $rows[0][$measure];
+        $tied = array_values(array_filter($rows, fn ($r) => (float) $r[$measure] === $top));
+        if (count($tied) < 2) {
+            return null;
+        }
+
+        return ['measure' => $measure, 'value' => $rows[0][$measure], 'names' => array_map(fn ($r) => (string) $r[$label], $tied),
+            'all_tied' => count($tied) === count($rows)];
+    }
+
+    /**
+     * Plain factual sentence for a result, plus the names/numbers a reply must contain.
+     *
+     * @return array{0: string, 1: list<string>}
+     */
+    public static function describeResult(array $rows, int $count, int $limit = 0, ?array $orderBy = null): array
+    {
+        if ($count === 0) {
+            return ['The query ran and returned no rows.', []];
+        }
+        $fmt = fn ($v) => is_numeric($v) ? (string) (0 + $v) : (string) $v;
+        $human = fn (string $col) => trim(str_replace('_', ' ', $col));
+        $first = $rows[0];
+        if ($count === 1 && count($first) === 1) {
+            $col = array_key_first($first);
+            return [ucfirst($human($col)) . ": {$fmt($first[$col])}.", [$fmt($first[$col])]];
+        }
+        if (($orderBy === null || in_array(self::measureColumn($rows), $orderBy, true)) && ($tie = self::tieInfo($rows))) {
+            $names = array_slice($tie['names'], 0, 12);
+            $more = $tie['all_tied'] && $limit && $count >= $limit ? ' (there may be more beyond these)' : '';
+            $dir = self::rankWord($rows, $tie['measure']);
+            return ["It is a tie: " . count($tie['names']) . " share the {$dir} {$human($tie['measure'])} ({$fmt($tie['value'])} each): " . implode(', ', $names)
+                . (count($tie['names']) > 12 ? ', …' : '') . "{$more}.", array_merge([$fmt($tie['value'])], $names)];
+        }
+        $measure = self::measureColumn($rows);
+        $label = $measure ? self::labelColumn($rows, $measure) : null;
+        // Ranking words only when the query really sorts by that value (a plain list is not a ranking).
+        $ranked = $orderBy === null || in_array($measure, $orderBy, true);
+        if ($measure && $label && count($rows) >= 2 && $ranked) {
+            $next = $rows[1];
+            $dir = self::rankWord($rows, $measure);
+            return ["{$first[$label]} has the {$dir} {$human($measure)}: {$fmt($first[$measure])} (next: {$next[$label]} with {$fmt($next[$measure])}).",
+                [(string) $first[$label], $fmt($first[$measure])]];
+        }
+        $text = collect($first)->map(fn ($v, $k) => "{$k}: " . (is_scalar($v) || $v === null ? var_export($v, true) : json_encode($v)))->take(8)->implode(', ');
+
+        return [$count === 1 ? "Result: {$text}." : "{$count} rows. First: {$text}.", []];
+    }
+
+    /** "highest" when rows are sorted descending by the measure, else "lowest". */
+    protected static function rankWord(array $rows, string $measure): string
+    {
+        $values = array_map(fn ($r) => (float) $r[$measure], $rows);
+        return end($values) <= $values[0] ? 'highest' : 'lowest';
+    }
+
+    protected static function measureColumn(array $rows): ?string
+    {
+        foreach (array_reverse(array_keys($rows[0] ?? [])) as $c) {
+            if (!preg_match('/(^id$|_id$)/i', $c) && collect($rows)->every(fn ($r) => is_numeric($r[$c] ?? null))) {
+                return $c;
+            }
+        }
+
+        return null;
+    }
+
+    protected static function labelColumn(array $rows, string $measure): ?string
+    {
+        return collect(array_keys($rows[0]))->first(fn ($c) => $c !== $measure
+            && collect($rows)->every(fn ($r) => is_string($r[$c] ?? null) && !is_numeric($r[$c]) && !str_contains((string) $r[$c], '***')));
+    }
+
+    protected function composeAnswer(User $user, DbConnection $connection, DataConversationState $convState, string $question,
+                                     array $read, array $gate, array $written, int $attempt): array
+    {
+        $rows = array_slice($read['rows'] ?? [], 0, 50);
+        $count = (int) ($read['row_count'] ?? 0);
+        $tables = array_values((array) ($gate['tables'] ?? []));
+        $orderBy = array_key_exists('order_by', $gate) ? (array) $gate['order_by'] : null; // null: sort unknown
+        [$headline, $facts] = self::describeResult($rows, $count, (int) ($gate['limit'] ?? 0), $orderBy);
+        if (!empty($gate['where'])) {
+            $headline .= ' (Counted only rows where ' . mb_substr(str_replace('`', '', (string) $gate['where']), 0, 200) . '.)';
+        }
+        $assumptions = array_values(array_merge((array) ($written['assumptions'] ?? []), (array) ($gate['notes'] ?? [])));
+        $diagnostics = [
+            'sql' => $read['sql'] ?? $gate['sql'],
+            'execution_time_ms' => $read['execution_time_ms'] ?? null,
+            'assumptions' => $assumptions,
+            'tables' => $tables,
+            'attempts' => $attempt,
+        ];
+
+        $convState->update(['active_table' => $tables[0] ?? null, 'last_query_plan' => ['sql' => $diagnostics['sql']]]);
+        $record = DataQueryResult::create([
             'user_id' => $user->id,
             'connection_id' => $connection->id,
-            'query_hash' => hash('sha256', $compiled['sql'] . json_encode($compiled['bindings'])),
-            'user_question' => $u,
-            'compiled_sql' => $compiled['sql'],
-            'bindings' => $compiled['bindings'],
-            'row_count' => $readResult['row_count'],
-            'masked_rows' => $composed['rows'],
-            'columns' => $composed['columns'],
-            'assumptions' => $composed['assumptions'],
-            'how_i_got_this' => $composed['diagnostics'],
+            'query_hash' => hash('sha256', (string) $diagnostics['sql']),
+            'user_question' => $question,
+            'compiled_sql' => $diagnostics['sql'],
+            'bindings' => [],
+            'row_count' => $count,
+            'masked_rows' => $rows,
+            'columns' => $read['columns'] ?? [],
+            'assumptions' => $assumptions,
+            'how_i_got_this' => $diagnostics,
             'expires_at' => now()->addDays(7),
         ]);
-
-        $convState->update(['last_result_id' => $resultRecord->id]);
+        $convState->update(['last_result_id' => $record->id]);
 
         return [
+            'success' => true,
             'type' => 'data_query',
-            'result_id' => $resultRecord->id,
-            'headline' => $composed['headline'],
-            'row_count' => $composed['row_count'],
-            'columns' => $composed['columns'],
-            'rows' => $composed['rows'],
-            'diagnostics' => $composed['diagnostics'],
-            'assumptions' => $composed['assumptions'],
+            'result_id' => $record->id,
+            'headline' => $headline,
+            'message' => $headline,
+            // Names and numbers any reply built from this result must contain (checked by Orbit).
+            'facts' => $facts,
+            'row_count' => $count,
+            'columns' => $read['columns'] ?? [],
+            'rows' => $rows,
+            'diagnostics' => $diagnostics,
+            'assumptions' => $assumptions,
             'connection' => ['id' => $connection->id, 'name' => $connection->name, 'driver' => $connection->driver],
-            'active_table' => $primaryTable,
+            'active_table' => $tables[0] ?? null,
+        ];
+    }
+
+    protected function failure(string $category, string $message, array $connInfo, array $attempts = []): array
+    {
+        return [
+            'success' => false,
+            'type' => 'error',
+            'error_category' => $category,
+            'error' => $message,
+            'headline' => $message,
+            'connection' => $connInfo,
+            'attempts' => array_map(fn ($a) => ['sql' => mb_substr($a['sql'], 0, 400), 'error' => mb_substr($a['error'], 0, 300)], $attempts),
         ];
     }
 
@@ -175,6 +398,9 @@ class DataAgentService
         $connections = DbConnection::where('user_id', $user->id)->where('is_active', true)->get();
         if ($connections->isEmpty()) {
             return [
+                'success' => false,
+                'error_category' => 'NO_CONNECTION',
+                'error' => 'No active database connections found. Please connect your database first in the Connections tab.',
                 'type' => 'no_connection',
                 'headline' => 'No active database connections found. Please connect your database first in the Connections tab.',
             ];
@@ -207,6 +433,8 @@ class DataAgentService
 
         // Multiple connections and no active established: ask user
         return [
+            'success' => true,
+            'message' => 'You have several connected databases: ' . $connections->pluck('name')->implode(', ') . '. Ask the user which one to use.',
             'type' => 'disambiguation',
             'needs_clarification' => true,
             'question' => 'You have multiple connected databases. Which database would you like to query?',
@@ -318,275 +546,5 @@ class DataAgentService
             }
         }
         return isset($tables[$default]) ? $default : (array_key_first($tables) ?: 'users');
-    }
-
-    protected function fallbackPlan(string $utterance, array $schemaSlice, string $timezone, ?string $activeTable): array
-    {
-        $u = strtolower($utterance);
-        $tables = array_keys($schemaSlice['tables'] ?? []);
-
-        // 1. Identify primary table
-        $table = null;
-        $tableKeywords = [
-            'users' => ['user', 'customer', 'account', 'people', 'registered'],
-            'orders' => ['order', 'purchase', 'sales', 'revenue'],
-            'order_items' => ['order item', 'order_item', 'item in order', 'quantity of items', 'items sold'],
-            'products' => ['product', 'item', 'stock', 'inventory', 'price'],
-            'categories' => ['categor'],
-            'payments' => ['payment', 'paid', 'transaction'],
-            'posts' => ['post', 'article', 'blog', 'news'],
-            'post_comments' => ['comment'],
-            'audit_logs' => ['audit', 'log'],
-            'page_views' => ['page_view', 'page view', 'visit'],
-        ];
-
-        foreach ($tableKeywords as $t => $keywords) {
-            foreach ($keywords as $kw) {
-                if (str_contains($u, $kw)) {
-                    $table = $t;
-                    break 2;
-                }
-            }
-        }
-
-        if (!$table) {
-            $table = $activeTable && in_array($activeTable, $tables, true) ? $activeTable : ($tables[0] ?? 'users');
-        }
-
-        // 2. Identify intent and aggregations
-        $intent = 'list';
-        $select = [];
-        $groupBy = [];
-        $orderBy = [];
-        $joins = [];
-        $filters = [];
-        $assumptions = [];
-        $timeWindow = null;
-        $limit = 50;
-
-        // Resolve actual column names from schemaSlice
-        $ordersTotalCol = isset($schemaSlice['tables']['orders']['columns']['total']) ? 'total' : 'total_amount';
-        $orderItemsQtyCol = isset($schemaSlice['tables']['order_items']['columns']['qty']) ? 'qty' : 'quantity';
-        $productsStockCol = isset($schemaSlice['tables']['products']['columns']['stock']) ? 'stock' : 'stock_quantity';
-        $paymentsMethodCol = isset($schemaSlice['tables']['payments']['columns']['method']) ? 'method' : 'payment_method';
-        $postsAuthorCol = isset($schemaSlice['tables']['posts']['columns']['author_id']) ? 'author_id' : 'user_id';
-
-        if (str_contains($u, 'how many') || str_contains($u, 'count') || str_contains($u, 'total number')) {
-            $intent = 'count';
-            $select = [['column' => '*', 'table' => $table, 'agg' => 'count', 'alias' => 'total_count']];
-        } elseif (str_contains($u, 'total revenue') || str_contains($u, 'total sales') || (str_contains($u, 'total') && str_contains($u, 'amount'))) {
-            $intent = 'aggregate';
-            $col = $table === 'orders' ? $ordersTotalCol : ($table === 'payments' ? 'amount' : 'price');
-            $select = [['column' => $col, 'table' => $table, 'agg' => 'sum', 'alias' => 'total_sum']];
-        } elseif (str_contains($u, 'total quantity') || str_contains($u, 'items sold')) {
-            $intent = 'aggregate';
-            $table = 'order_items';
-            $select = [['column' => $orderItemsQtyCol, 'table' => $table, 'agg' => 'sum', 'alias' => 'total_quantity']];
-        } elseif (str_contains($u, 'average') || str_contains($u, 'avg')) {
-            $intent = 'aggregate';
-            $col = $table === 'orders' ? $ordersTotalCol : 'price';
-            $select = [['column' => $col, 'table' => $table, 'agg' => 'avg', 'alias' => 'average_value']];
-        } elseif (str_contains($u, 'highest') || str_contains($u, 'most expensive') || str_contains($u, 'max price')) {
-            $intent = 'list';
-            $select = [['column' => '*', 'table' => $table]];
-            $col = $table === 'orders' ? $ordersTotalCol : 'price';
-            $orderBy = [['column' => $col, 'direction' => 'DESC', 'table' => $table]];
-            $limit = 1;
-        } elseif (str_contains($u, 'minimum') || str_contains($u, 'cheapest') || str_contains($u, 'min price')) {
-            $intent = 'list';
-            $select = [['column' => '*', 'table' => $table]];
-            $col = $table === 'orders' ? $ordersTotalCol : 'price';
-            $orderBy = [['column' => $col, 'direction' => 'ASC', 'table' => $table]];
-            $limit = 1;
-        } elseif (str_contains($u, 'minimum stock') || str_contains($u, 'lowest stock')) {
-            $intent = 'list';
-            $table = 'products';
-            $select = [['column' => '*', 'table' => $table]];
-            $orderBy = [['column' => $productsStockCol, 'direction' => 'ASC', 'table' => $table]];
-            $limit = 1;
-        } else {
-            $select = [['column' => '*', 'table' => $table]];
-        }
-
-        // Top N / Limit detection
-        if (preg_match('/top\s+(\d+)/i', $u, $m)) {
-            $limit = (int) $m[1];
-            if (empty($orderBy)) {
-                $col = $table === 'products' ? 'price' : ($table === 'orders' ? $ordersTotalCol : 'id');
-                $orderBy = [['column' => $col, 'direction' => 'DESC', 'table' => $table]];
-            }
-        } elseif (preg_match('/(?:recent|latest)\s+(\d+)/i', $u, $m)) {
-            $limit = (int) $m[1];
-            $orderBy = [['column' => 'created_at', 'direction' => 'DESC', 'table' => $table]];
-        }
-
-        // Group by detection
-        if (str_contains($u, 'by region')) {
-            $intent = 'aggregate';
-            $groupBy = ['region'];
-            $select = [
-                ['column' => 'region', 'table' => $table],
-                ['column' => '*', 'table' => $table, 'agg' => 'count', 'alias' => 'user_count'],
-            ];
-        } elseif (str_contains($u, 'by status')) {
-            $intent = 'aggregate';
-            $groupBy = ['status'];
-            $select = [
-                ['column' => 'status', 'table' => $table],
-                ['column' => '*', 'table' => $table, 'agg' => 'count', 'alias' => 'item_count'],
-            ];
-        } elseif (str_contains($u, 'by category')) {
-            $intent = 'aggregate';
-            $groupBy = ['category_id'];
-            $select = [
-                ['column' => 'category_id', 'table' => $table],
-                ['column' => '*', 'table' => $table, 'agg' => 'count', 'alias' => 'product_count'],
-            ];
-        } elseif (str_contains($u, 'by payment method') || str_contains($u, 'by payment_method')) {
-            $intent = 'aggregate';
-            $table = 'payments';
-            $groupBy = [$paymentsMethodCol];
-            $select = [
-                ['column' => $paymentsMethodCol, 'table' => $table],
-                ['column' => 'amount', 'table' => $table, 'agg' => 'sum', 'alias' => 'total_amount'],
-            ];
-        }
-
-        // Value grounding & filters
-        if (str_contains($u, 'rajasthan') || str_contains($u, 'region rj')) {
-            $filters[] = ['column' => 'region', 'op' => '=', 'value' => 'RJ', 'table' => $table];
-            $assumptions[] = "Mapped 'Rajasthan' to region code 'RJ'";
-        } elseif (str_contains($u, 'maharashtra') || str_contains($u, 'region mh')) {
-            $filters[] = ['column' => 'region', 'op' => '=', 'value' => 'MH', 'table' => $table];
-            $assumptions[] = "Mapped 'Maharashtra' to region code 'MH'";
-        } elseif (preg_match('/region\s*=\s*([a-z0-9_]+)/i', $u, $rm)) {
-            $filters[] = ['column' => 'region', 'op' => '=', 'value' => strtoupper($rm[1]), 'table' => $table];
-        }
-
-        if (str_contains($u, 'completed')) {
-            $filters[] = ['column' => 'status', 'op' => '=', 'value' => 'completed', 'table' => $table];
-        } elseif (str_contains($u, 'cancelled')) {
-            $filters[] = ['column' => 'status', 'op' => '=', 'value' => 'cancelled', 'table' => $table];
-        } elseif (str_contains($u, 'processing')) {
-            $filters[] = ['column' => 'status', 'op' => '=', 'value' => 'processing', 'table' => $table];
-        } elseif (str_contains($u, 'pending')) {
-            $filters[] = ['column' => 'status', 'op' => '=', 'value' => 'pending', 'table' => $table];
-        } elseif (str_contains($u, 'active status') || str_contains($u, 'status is active') || str_contains($u, 'users where status is active')) {
-            $filters[] = ['column' => 'status', 'op' => '=', 'value' => 'active', 'table' => $table];
-        } elseif (str_contains($u, 'published posts') || str_contains($u, 'posts that are published')) {
-            $filters[] = ['column' => 'status', 'op' => '=', 'value' => 'published', 'table' => 'posts'];
-        } elseif (str_contains($u, 'draft posts') || str_contains($u, 'posts that are draft')) {
-            $filters[] = ['column' => 'status', 'op' => '=', 'value' => 'draft', 'table' => 'posts'];
-        }
-
-        if (str_contains($u, 'out of stock') || str_contains($u, 'stock = 0')) {
-            $table = 'products';
-            $filters[] = ['column' => $productsStockCol, 'op' => '=', 'value' => 0, 'table' => 'products'];
-        } elseif (str_contains($u, 'in stock')) {
-            $table = 'products';
-            $filters[] = ['column' => $productsStockCol, 'op' => '>', 'value' => 0, 'table' => 'products'];
-        }
-
-        if (preg_match('/price\s+(?:greater than|>)\s+(\d+(?:\.\d+)?)/i', $u, $pm)) {
-            $filters[] = ['column' => 'price', 'op' => '>', 'value' => (float)$pm[1], 'table' => $table];
-        } elseif (preg_match('/price\s+(?:less than|<)\s+(\d+(?:\.\d+)?)/i', $u, $pm)) {
-            $filters[] = ['column' => 'price', 'op' => '<', 'value' => (float)$pm[1], 'table' => $table];
-        }
-
-        if (preg_match('/(?:user|by user)\s+(\d+)/i', $u, $um)) {
-            $userIdVal = (int) $um[1];
-            if ($table === 'posts') {
-                $filters[] = ['column' => $postsAuthorCol, 'op' => '=', 'value' => $userIdVal, 'table' => 'posts'];
-            } elseif ($table === 'users') {
-                $filters[] = ['column' => 'id', 'op' => '=', 'value' => $userIdVal, 'table' => 'users'];
-            } else {
-                $filters[] = ['column' => 'user_id', 'op' => '=', 'value' => $userIdVal, 'table' => $table];
-            }
-        }
-
-        if (preg_match('/(?:order|in order|for order)\s+(\d+)/i', $u, $om)) {
-            $filters[] = ['column' => $table === 'orders' ? 'id' : 'order_id', 'op' => '=', 'value' => (int)$om[1], 'table' => $table];
-        }
-
-        if (preg_match('/(?:post|on post)\s+(\d+)/i', $u, $posm)) {
-            $filters[] = ['column' => $table === 'posts' ? 'id' : 'post_id', 'op' => '=', 'value' => (int)$posm[1], 'table' => $table];
-        }
-
-        if (str_contains($u, 'credit_card') || str_contains($u, 'credit card')) {
-            $table = 'payments';
-            $filters[] = ['column' => $paymentsMethodCol, 'op' => '=', 'value' => 'credit_card', 'table' => 'payments'];
-        }
-
-        // Time window detection
-        if (str_contains($u, 'today') || str_contains($u, 'new users')) {
-            $timeWindow = [
-                'column' => 'created_at',
-                'from' => 'start_of_day',
-                'to' => 'end_of_day',
-                'timezone' => $timezone,
-                'label' => 'today',
-            ];
-            $assumptions[] = "Assumed 'created_at' in timezone '{$timezone}' for 'today'";
-        } elseif (str_contains($u, 'yesterday')) {
-            $timeWindow = [
-                'column' => 'created_at',
-                'from' => 'start_of_yesterday',
-                'to' => 'end_of_yesterday',
-                'timezone' => $timezone,
-                'label' => 'yesterday',
-            ];
-            $assumptions[] = "Assumed 'created_at' in timezone '{$timezone}' for 'yesterday'";
-        } elseif (str_contains($u, 'last 7 days')) {
-            $timeWindow = [
-                'column' => 'created_at',
-                'from' => '7_days_ago',
-                'to' => 'now',
-                'timezone' => $timezone,
-                'label' => 'last 7 days',
-            ];
-            $assumptions[] = "Assumed 'created_at' in timezone '{$timezone}' for 'last 7 days'";
-        } elseif (str_contains($u, 'this week')) {
-            $timeWindow = [
-                'column' => 'created_at',
-                'from' => 'start_of_week',
-                'to' => 'now',
-                'timezone' => $timezone,
-                'label' => 'this week',
-            ];
-            $assumptions[] = "Assumed 'created_at' in timezone '{$timezone}' for 'this week'";
-        } elseif (str_contains($u, 'this month')) {
-            $timeWindow = [
-                'column' => 'created_at',
-                'from' => 'start_of_month',
-                'to' => 'now',
-                'timezone' => $timezone,
-                'label' => 'this month',
-            ];
-            $assumptions[] = "Assumed 'created_at' in timezone '{$timezone}' for 'this month'";
-        }
-
-        // Joins detection
-        if (str_contains($u, 'user details') || str_contains($u, 'user name') || str_contains($u, 'author name')) {
-            $joins[] = ['from' => $table, 'to' => 'users', 'via_fk' => 'user_id'];
-        } elseif (str_contains($u, 'category') && $table === 'products') {
-            $joins[] = ['from' => 'products', 'to' => 'categories', 'via_fk' => 'category_id'];
-        } elseif (str_contains($u, 'product name') && $table === 'order_items') {
-            $joins[] = ['from' => 'order_items', 'to' => 'products', 'via_fk' => 'product_id'];
-        } elseif (str_contains($u, 'payment details') && $table === 'orders') {
-            $joins[] = ['from' => 'orders', 'to' => 'payments', 'via_fk' => 'order_id'];
-        }
-
-        return [
-            'intent' => $intent,
-            'tables' => array_values(array_unique(array_merge([$table], array_column($joins, 'to')))),
-            'select' => $select,
-            'filters' => $filters,
-            'joins' => $joins,
-            'group_by' => $groupBy,
-            'order_by' => $orderBy,
-            'time_window' => $timeWindow,
-            'limit' => $limit,
-            'assumptions' => $assumptions,
-        ];
     }
 }

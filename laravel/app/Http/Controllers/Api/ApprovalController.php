@@ -26,7 +26,7 @@ class ApprovalController extends Controller
     public function index(Request $request)
     {
         $pendingVersions = ContentVersion::where('user_id', $request->user()->id)
-            ->where('status', 'PENDING_APPROVAL')
+            ->awaitingDecision()
             ->with(['execution.automation:id,name,target_table,timezone,timeout_policy,connection_id', 'execution.automation.connection:id,name,database_name'])
             ->orderBy('created_at', 'desc')
             ->get();

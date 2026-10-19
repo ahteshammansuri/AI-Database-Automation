@@ -8,6 +8,7 @@ import {
   X,
   HelpCircle,
 } from "lucide-react";
+import { orbitTargets } from "../services/orbitTargets";
 
 export type ToastType = "success" | "error" | "warning" | "info";
 
@@ -39,6 +40,11 @@ interface ToastContextType {
   };
   showAlert: (options: SweetAlertOptions) => void;
   closeAlert: () => void;
+  /**
+   * Ask for confirmation and resolve true (confirmed) or false (cancelled). Used by both human
+   * clicks and Orbit: the buttons are Orbit targets ("dialog.confirm" / "dialog.cancel").
+   */
+  confirm: (options: Omit<SweetAlertOptions, "onConfirm" | "onCancel" | "showCancelButton">) => Promise<boolean>;
 }
 
 const ToastContext = createContext<ToastContextType>({
@@ -50,6 +56,7 @@ const ToastContext = createContext<ToastContextType>({
   },
   showAlert: () => {},
   closeAlert: () => {},
+  confirm: async () => false,
 });
 
 export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -82,16 +89,39 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     info: (title: string, message?: string) => addToast("info", title, message),
   };
 
-  const showAlert = useCallback((options: SweetAlertOptions) => {
-    setActiveAlert(options);
+  // A pending confirm() is answered "no" if anything replaces or closes its popup, so callers never hang.
+  const pendingConfirmRef = useRef<((ok: boolean) => void) | null>(null);
+  const settlePendingConfirm = useCallback((ok: boolean) => {
+    const resolve = pendingConfirmRef.current;
+    pendingConfirmRef.current = null;
+    resolve?.(ok);
   }, []);
+
+  const showAlert = useCallback((options: SweetAlertOptions) => {
+    settlePendingConfirm(false);
+    setActiveAlert(options);
+  }, [settlePendingConfirm]);
 
   const closeAlert = useCallback(() => {
+    settlePendingConfirm(false);
     setActiveAlert(null);
-  }, []);
+  }, [settlePendingConfirm]);
+
+  const confirm = useCallback((options: Omit<SweetAlertOptions, "onConfirm" | "onCancel" | "showCancelButton">) =>
+    new Promise<boolean>((resolve) => {
+      settlePendingConfirm(false);
+      pendingConfirmRef.current = resolve;
+      setActiveAlert({
+        icon: "warning",
+        ...options,
+        showCancelButton: true,
+        onConfirm: () => settlePendingConfirm(true),
+        onCancel: () => settlePendingConfirm(false),
+      });
+    }), [settlePendingConfirm]);
 
   return (
-    <ToastContext.Provider value={{ toast, showAlert, closeAlert }}>
+    <ToastContext.Provider value={{ toast, showAlert, closeAlert, confirm }}>
       {children}
 
       {/* Floating Animated Toast Container */}
@@ -236,6 +266,7 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               <div className="pt-2 flex items-center justify-center gap-2.5">
                 {activeAlert.showCancelButton && (
                   <button
+                    ref={(el) => (el ? orbitTargets.register("dialog.cancel", el) : orbitTargets.unregister("dialog.cancel"))}
                     onClick={() => {
                       if (activeAlert.onCancel) activeAlert.onCancel();
                       closeAlert();
@@ -246,6 +277,7 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                   </button>
                 )}
                 <button
+                  ref={(el) => (el ? orbitTargets.register("dialog.confirm", el) : orbitTargets.unregister("dialog.confirm"))}
                   onClick={() => {
                     if (activeAlert.onConfirm) activeAlert.onConfirm();
                     closeAlert();

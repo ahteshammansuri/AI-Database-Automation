@@ -133,7 +133,7 @@ class DataPlanner:
 
         # Try LLM provider if available
         try:
-            provider = AIProviderFactory.get_provider(provider_type or "ollama", model_name=model_name)
+            provider = AIProviderFactory.get_provider(provider_type or "ollama", model_name)
             for attempt in range(max_attempts):
                 try:
                     raw_json = provider.chat_structured(

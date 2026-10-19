@@ -14,6 +14,10 @@ class Settings(BaseModel):
     AGENT_FIRST_TOKEN_TIMEOUT: float = float(os.getenv("AGENT_FIRST_TOKEN_TIMEOUT", "360"))
     AGENT_IDLE_TIMEOUT: float = float(os.getenv("AGENT_IDLE_TIMEOUT", "60"))
     AGENT_NUM_CTX: int = int(os.getenv("AGENT_NUM_CTX", "4096"))
+    # Upper bound when the prompt needs a larger window (long multi-step turns).
+    AGENT_NUM_CTX_MAX: int = int(os.getenv("AGENT_NUM_CTX_MAX", "12288"))
+    # Room for one decision: speech, slot updates for a long request, and a plan.
+    AGENT_NUM_PREDICT: int = int(os.getenv("AGENT_NUM_PREDICT", "512"))
     AGENT_MAX_TOOLS: int = int(os.getenv("AGENT_MAX_TOOLS", "18"))
 
 

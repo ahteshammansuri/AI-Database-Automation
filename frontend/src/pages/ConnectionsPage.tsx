@@ -31,6 +31,7 @@ import { useToast } from "../context/ToastContext";
 import { orbitTargets } from "../services/orbitTargets";
 import { useOrbitTarget } from "../hooks/useOrbitTarget";
 import { useOrbitSurface } from "../hooks/useOrbitSurface";
+import { useRefreshAfterOrbit } from "../hooks/useRefreshAfterOrbit";
 import { actionTarget, fieldTarget } from "../services/orbitSurfaces";
 import { pageStateService } from "../services/pageStateService";
 
@@ -110,7 +111,7 @@ export const ConnectionsPage: React.FC = () => {
   });
 
   const { addListener } = useLiveEvents();
-  const { toast, showAlert } = useToast();
+  const { toast, confirm } = useToast();
 
   // Fields the user (or Orbit) actually entered, as opposed to untouched defaults.
   const [touched, setTouched] = useState<Record<string, boolean>>({});
@@ -305,6 +306,8 @@ export const ConnectionsPage: React.FC = () => {
     access_mode: form.access_mode, data_timezone: form.data_timezone,
   });
 
+  useRefreshAfterOrbit(["save_database_connection", "update_database_connection", "disconnect_database_connection", "test_database_connection", "scan_database_schema"], () => { loadConnections(true); });
+
   useOrbitSurface("connections.form", () => ({
     isOpen: () => showModal,
     open: () => openCreateModal(),
@@ -421,6 +424,8 @@ export const ConnectionsPage: React.FC = () => {
       remove: {
         target: (row) => `connections.card.${row}`,
         run: async (row) => {
+          if (!connections.find((x: any) => String(x.id) === String(row))) return { success: false, message: `No connection ${row} on screen.` };
+          if (!(await askRemove(Number(row)))) return { success: false, message: "Removal was not confirmed in the popup; nothing changed." };
           try {
             const res: any = await api.deleteConnection(Number(row));
             loadConnections(true);
@@ -497,24 +502,26 @@ export const ConnectionsPage: React.FC = () => {
     setShowModal(true);
   };
 
-  const handleDelete = (id: number) => {
-    showAlert({
+  // Shared by the Remove button and Orbit's remove action, so both see the same popup.
+  function askRemove(id: number) {
+    const name = connections.find((x: any) => x.id === id)?.name;
+    return confirm({
       title: "Remove Connection Profile?",
-      text: "Are you sure you want to remove this connection profile? This does NOT alter target database tables.",
-      icon: "warning",
-      showCancelButton: true,
+      text: `Are you sure you want to remove ${name ? `"${name}"` : "this connection profile"}? This does NOT alter target database tables.`,
       confirmButtonText: "Yes, Remove",
       cancelButtonText: "Keep Connection",
-      onConfirm: async () => {
-        try {
-          await api.deleteConnection(id);
-          toast.success("Connection Profile Removed", "Target database tables remain untouched.");
-          loadConnections();
-        } catch (err: any) {
-          toast.error("Delete Error", err.message);
-        }
-      },
     });
+  }
+
+  const handleDelete = async (id: number) => {
+    if (!(await askRemove(id))) return;
+    try {
+      await api.deleteConnection(id);
+      toast.success("Connection Profile Removed", "Target database tables remain untouched.");
+      loadConnections();
+    } catch (err: any) {
+      toast.error("Delete Error", err.message);
+    }
   };
 
   return (
@@ -1031,21 +1038,21 @@ export const ConnectionsPage: React.FC = () => {
                         mode: "read_only",
                         title: "Read Only",
                         badge: "Safest",
-                        desc: "SELECT, COUNT, schema introspection & queries. All writes blocked.",
+                        desc: "The data assistant only reads (questions, counts, schema). Its edits and deletes are blocked.",
                         border: "border-emerald-300 bg-emerald-50/60 text-emerald-900",
                       },
                       {
                         mode: "read_write",
                         title: "Read & Write",
                         badge: "Preview & Confirm",
-                        desc: "Reads + INSERT & UPDATE with preview & user confirmation. DELETE blocked.",
+                        desc: "Reads + row UPDATE with a before/after preview & your confirmation. DELETE blocked.",
                         border: "border-amber-300 bg-amber-50/60 text-amber-900",
                       },
                       {
                         mode: "read_write_delete",
                         title: "Read, Write & Delete",
                         badge: "Guarded Delete",
-                        desc: "Adds row DELETE with impact analysis, typed confirmation & backup.",
+                        desc: "Adds row DELETE with impact analysis, typed confirmation & a saved copy for undo.",
                         border: "border-purple-300 bg-purple-50/60 text-purple-900",
                       },
                     ].map((m) => {
@@ -1074,7 +1081,7 @@ export const ConnectionsPage: React.FC = () => {
                   <div className="bg-amber-50 border border-amber-200/60 rounded-lg p-2 text-[10px] text-amber-900 flex items-start gap-1.5">
                     <AlertCircle className="w-3.5 h-3.5 text-amber-600 shrink-0 mt-0.5" />
                     <span>
-                      <strong>Recommendation:</strong> Use a database user restricted to your chosen mode (e.g. <code className="font-mono font-bold">fx_ro</code> for read-only, <code className="font-mono font-bold">fx_rw</code> for read-write). The platform strictly enforces its mode policy regardless and never assumes database user privileges are restricted.
+                      <strong>Recommendation:</strong> Use a database user restricted to your chosen mode (e.g. <code className="font-mono font-bold">fx_ro</code> for read-only, <code className="font-mono font-bold">fx_rw</code> for read-write). The platform strictly enforces its mode policy regardless and never assumes database user privileges are restricted. This mode governs the data assistant; automations and Manual Publishing add only the new rows you configure (they need INSERT on their target tables).
                     </span>
                   </div>
                   <div className="pt-1">

@@ -15,8 +15,6 @@ use App\Services\SchemaIntrospectionService;
 use App\Services\SafeDatabaseExecutor;
 use App\Services\AiServiceClient;
 use App\Services\LiveEventService;
-use App\Jobs\ProcessAutomationExecution;
-use App\Jobs\PublishApprovedExecution;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -375,7 +373,7 @@ class AgentToolRegistry
             [
                 'name' => 'create_automation_draft',
                 'label' => 'Create Automation Draft',
-                'description' => 'Configure and persist a new AI content automation workflow with lead-time enforcement.',
+                'description' => 'Create a scheduled automation that writes new rows into a table (blog posts, articles, news, products, FAQs...). Columns you do not specify get the same safe defaults as the builder (AI text, AI-chosen category created if new, generated images, slug from title, publication-time dates). Publication must be at least 15 minutes after generation. Prefer doing it on screen in the builder when the browser is present.',
                 'outcome' => 'Persists Automation record with field mappings, topic prompt, and schedule.',
                 'scope' => 'tenant_user',
                 'read_only' => false,
@@ -393,10 +391,19 @@ class AgentToolRegistry
                         'target_table' => ['type' => 'string'],
                         'name' => ['type' => 'string'],
                         'operation_mode' => ['type' => 'string', 'description' => 'AI_CREATE, AI_ENRICH, or MANUAL_SCHEDULE'],
-                        'topic_prompt' => ['type' => 'string'],
-                        'category_name' => ['type' => 'string'],
-                        'field_mappings' => ['type' => 'array'],
-                        'schedule_type' => ['type' => 'string', 'description' => 'DAILY, WEEKLY, or ONE_TIME'],
+                        'topic_prompt' => ['type' => 'string', 'description' => 'What the content should be about.'],
+                        'category_name' => ['type' => 'string', 'description' => 'Optional category the AI should use (matched or created at run time).'],
+                        'field_mappings' => ['type' => 'array', 'description' => 'Optional per-column overrides; omit to use the safe defaults.'],
+                        'schedule_type' => ['type' => 'string', 'enum' => ['ONE_TIME', 'DAILY', 'WEEKLY']],
+                        'start_date' => ['type' => 'string', 'description' => 'YYYY-MM-DD; the run date for ONE_TIME.'],
+                        'end_date' => ['type' => 'string', 'description' => 'YYYY-MM-DD, last day for DAILY/WEEKLY (optional).'],
+                        'weekly_days' => ['type' => 'array', 'items' => ['type' => 'integer'], 'description' => 'ISO weekdays for WEEKLY: 1=Mon ... 7=Sun.'],
+                        'tone' => ['type' => 'string'],
+                        'length' => ['type' => 'string', 'enum' => ['short', 'medium', 'long']],
+                        'content_format' => ['type' => 'string', 'enum' => ['markdown', 'html']],
+                        'image_provider' => ['type' => 'string', 'enum' => ['auto', 'openai', 'gemini', 'local']],
+                        'reviewer_email' => ['type' => 'string'],
+                        'timeout_policy' => ['type' => 'string', 'enum' => ['KEEP_DRAFT', 'AUTO_PUBLISH_LATEST', 'CANCEL'], 'description' => 'What happens if nobody approves before publication time.'],
                         'generation_time' => ['type' => 'string', 'description' => 'HH:MM format'],
                         'publication_time' => ['type' => 'string', 'description' => 'HH:MM format (>= 15m after generation_time)'],
                         'timezone' => ['type' => 'string', 'description' => 'IANA timezone, e.g. Asia/Kolkata'],
@@ -433,11 +440,21 @@ class AgentToolRegistry
                         'automation_id' => ['type' => 'integer'],
                         'name' => ['type' => 'string'],
                         'topic_prompt' => ['type' => 'string'],
-                        'category_name' => ['type' => 'string'],
-                        'schedule_type' => ['type' => 'string'],
+                        'schedule_type' => ['type' => 'string', 'enum' => ['ONE_TIME', 'DAILY', 'WEEKLY']],
+                        'start_date' => ['type' => 'string'],
+                        'end_date' => ['type' => 'string'],
+                        'weekly_days' => ['type' => 'array', 'items' => ['type' => 'integer']],
                         'generation_time' => ['type' => 'string'],
                         'publication_time' => ['type' => 'string'],
-                        'is_active' => ['type' => 'boolean'],
+                        'timezone' => ['type' => 'string'],
+                        'tone' => ['type' => 'string'],
+                        'length' => ['type' => 'string', 'enum' => ['short', 'medium', 'long']],
+                        'content_format' => ['type' => 'string', 'enum' => ['markdown', 'html']],
+                        'image_provider' => ['type' => 'string', 'enum' => ['auto', 'openai', 'gemini', 'local']],
+                        'requires_approval' => ['type' => 'boolean'],
+                        'reviewer_email' => ['type' => 'string'],
+                        'timeout_policy' => ['type' => 'string', 'enum' => ['KEEP_DRAFT', 'AUTO_PUBLISH_LATEST', 'CANCEL']],
+                        'is_active' => ['type' => 'boolean', 'description' => 'false pauses, true resumes'],
                     ],
                 ],
                 'output_schema' => [
@@ -480,7 +497,7 @@ class AgentToolRegistry
                 'name' => 'run_automation_now',
                 'label' => 'Trigger Immediate Execution',
                 'description' => 'Immediately trigger a scheduled automation execution through the background queue.',
-                'outcome' => 'Creates AutomationExecution record and dispatches ProcessAutomationExecution job.',
+                'outcome' => 'Creates a run that generates now in the background and publishes after the automation\'s usual gap (approval rules apply).',
                 'scope' => 'tenant_user',
                 'read_only' => false,
                 'side_effects' => 'Creates AutomationExecution, enqueues background worker job.',
@@ -507,7 +524,7 @@ class AgentToolRegistry
             [
                 'name' => 'preview_automation_content',
                 'label' => 'Preview AI Content Draft',
-                'description' => 'Generate an ephemeral content preview using the configured AI model without scheduling or inserting into the database.',
+                'description' => 'Run a saved automation once as a dry run: real AI content, the parent records it would use or create, and the exact database write plan. Writes nothing.',
                 'outcome' => 'Returns generated preview JSON object.',
                 'scope' => 'tenant_user',
                 'read_only' => true,
@@ -519,10 +536,10 @@ class AgentToolRegistry
                 'audit_required' => false,
                 'parameters' => [
                     'type' => 'object',
-                    'required' => ['prompt'],
+                    'required' => ['automation_id'],
                     'properties' => [
-                        'prompt' => ['type' => 'string'],
-                        'target_table' => ['type' => 'string'],
+                        'automation_id' => ['type' => 'integer'],
+                        'include_images' => ['type' => 'boolean'],
                     ],
                 ],
                 'output_schema' => [
@@ -552,7 +569,9 @@ class AgentToolRegistry
                 'parameters' => [
                     'type' => 'object',
                     'properties' => [
-                        'status' => ['type' => 'string'],
+                        'status' => ['type' => 'string', 'description' => 'e.g. PUBLISHED, FAILED, PENDING_APPROVAL, MISSED'],
+                        'automation_id' => ['type' => 'integer'],
+                        'automation_name' => ['type' => 'string', 'description' => 'Part of the automation name'],
                         'limit' => ['type' => 'integer'],
                     ],
                 ],
@@ -739,7 +758,7 @@ class AgentToolRegistry
                 'name' => 'approve_content_version',
                 'label' => 'Approve Content Draft',
                 'description' => 'Approve a pending content version draft to proceed to scheduled or immediate publication.',
-                'outcome' => 'Marks version approved and dispatches PublishApprovedExecution.',
+                'outcome' => 'Approves the draft; it publishes at its scheduled time (immediately if that time has passed).',
                 'scope' => 'tenant_user',
                 'read_only' => false,
                 'side_effects' => 'Updates ContentVersion, triggers background publisher.',
@@ -767,7 +786,7 @@ class AgentToolRegistry
                 'name' => 'reject_content_version',
                 'label' => 'Reject Content Draft',
                 'description' => 'Reject a pending content draft and trigger regeneration with corrective feedback.',
-                'outcome' => 'Records rejection feedback and triggers ProcessAutomationExecution.',
+                'outcome' => 'Rejects the draft with feedback and writes a new version (stops after three rejections).',
                 'scope' => 'tenant_user',
                 'read_only' => false,
                 'side_effects' => 'Updates version to rejected, dispatches regeneration job.',
@@ -1024,9 +1043,9 @@ class AgentToolRegistry
             ],
             [
                 'name' => 'list_audit_logs',
-                'label' => 'List Audit Logs',
-                'description' => 'Retrieve system audit trail records for actions performed in this tenant workspace.',
-                'outcome' => 'Returns recent audit log records.',
+                'label' => 'Search the audit log',
+                'description' => 'Search the user\'s audit trail (what was created, changed, deleted, approved, published, logged in...). Filter by free text, action, resource type and date range. Returns real counts, the first and last matching time, counts per action and the latest matching entries. Use it to answer questions like "did I ever add a connection?" or "what did I change yesterday?". If nothing matches it lists the action names that exist.',
+                'outcome' => 'Returns matching audit entries with totals.',
                 'scope' => 'tenant_user',
                 'read_only' => true,
                 'side_effects' => 'None',
@@ -1038,22 +1057,50 @@ class AgentToolRegistry
                 'parameters' => [
                     'type' => 'object',
                     'properties' => [
+                        'query' => ['type' => 'string', 'description' => 'Words to look for, e.g. "connection", "deleted", a table or automation name.'],
+                        'action' => ['type' => 'string', 'description' => 'Part of an action name, e.g. CONNECTION_CREATED, DELETED, APPROVED.'],
+                        'resource_type' => ['type' => 'string', 'description' => 'e.g. DbConnection, Automation, AutomationExecution, ContentVersion.'],
+                        'since' => ['type' => 'string', 'description' => 'YYYY-MM-DD or ISO date-time (inclusive).'],
+                        'until' => ['type' => 'string', 'description' => 'YYYY-MM-DD (whole day) or ISO date-time.'],
                         'limit' => ['type' => 'integer'],
                     ],
                 ],
                 'output_schema' => [
                     'type' => 'object',
                     'properties' => [
-                        'logs' => ['type' => 'array'],
+                        'total_matching' => ['type' => 'integer'],
+                        'entries' => ['type' => 'array'],
                     ],
                 ],
+            ],
+            [
+                'name' => 'get_audit_log_entry',
+                'label' => 'Inspect an audit entry',
+                'description' => 'Read one audit entry in full (its details/metadata), by its id from list_audit_logs.',
+                'outcome' => 'Returns the full audit entry.',
+                'scope' => 'tenant_user',
+                'read_only' => true,
+                'side_effects' => 'None',
+                'risk_level' => 'LOW',
+                'requires_confirmation' => false,
+                'idempotent' => true,
+                'retryable' => true,
+                'audit_required' => false,
+                'parameters' => [
+                    'type' => 'object',
+                    'required' => ['log_id'],
+                    'properties' => [
+                        'log_id' => ['type' => 'integer'],
+                    ],
+                ],
+                'output_schema' => ['type' => 'object'],
             ],
             // Natural-Language Data Agent tools (ADR-010)
             [
                 'name' => 'ask_database',
                 'label' => 'Ask Database Question',
-                'description' => 'Query database schema, count records, find tables, or inspect data using natural language.',
-                'outcome' => 'Executes validated read-only queries with schema linking and returns masked results with diagnostics.',
+                'description' => 'Answer any read-only question about the data in a connected database: counts, totals, rankings ("which customer has the most orders/refunds"), lists, lookups by email or id, date ranges. Pass the question in English with the details the user gave. The server writes one SELECT, checks it against the live schema and runs it read-only; results show emails/phones masked.',
+                'outcome' => 'Executes one validated read-only query and returns masked rows, the SQL used and its assumptions.',
                 'scope' => 'tenant_user',
                 'read_only' => true,
                 'side_effects' => 'None',
@@ -1067,7 +1114,6 @@ class AgentToolRegistry
                     'properties' => [
                         'question' => ['type' => 'string'],
                         'connection_id' => ['type' => 'integer'],
-                        'reveal_pii' => ['type' => 'boolean'],
                     ],
                     'required' => ['question'],
                 ],
@@ -1207,6 +1253,7 @@ class AgentToolRegistry
      *
      * - secret_params: arguments filled from SecretVault at execution time; hidden from the model.
      * - always_confirm: needs explicit user confirmation regardless of autonomy level.
+     * - confirm_by_button: destructive; only the Confirm button in Orbit's panel confirms it (not a typed "yes").
      * - postcondition: authoritative check run after a successful call.
      */
     public const TOOL_META = [
@@ -1228,12 +1275,12 @@ class AgentToolRegistry
             'description' => 'Save a new MySQL connection profile for the user. Re-tests connectivity first and refuses to save if the test fails. Requires name, host, database, username (port defaults to 3306). The password is supplied securely by the app.',
         ],
         'update_database_connection' => ['side_effect_class' => 'write', 'secret_params' => ['password' => 'database_password']],
-        'disconnect_database_connection' => ['side_effect_class' => 'write', 'always_confirm' => true],
+        'disconnect_database_connection' => ['side_effect_class' => 'write', 'always_confirm' => true, 'confirm_by_button' => true],
         'scan_database_schema' => ['side_effect_class' => 'platform_metadata', 'postcondition' => 'schema_snapshot_exists'],
         'get_schema_scan_status' => ['side_effect_class' => 'platform_metadata'],
         'create_automation_draft' => ['side_effect_class' => 'write', 'postcondition' => 'automation_persisted'],
         'update_automation' => ['side_effect_class' => 'write'],
-        'remove_automation' => ['side_effect_class' => 'write', 'always_confirm' => true],
+        'remove_automation' => ['side_effect_class' => 'write', 'always_confirm' => true, 'confirm_by_button' => true],
         'run_automation_now' => ['side_effect_class' => 'external'],
         'update_published_record' => ['side_effect_class' => 'external', 'always_confirm' => true],
         'approve_content_version' => ['side_effect_class' => 'external', 'postcondition' => 'version_approved'],
@@ -1242,7 +1289,7 @@ class AgentToolRegistry
         'request_execution_interrupt' => ['side_effect_class' => 'write'],
         'test_ai_provider' => ['secret_params' => ['api_key' => 'api_key']],
         'save_ai_provider' => ['side_effect_class' => 'write', 'secret_params' => ['api_key' => 'api_key']],
-        'remove_knowledge_document' => ['side_effect_class' => 'write', 'always_confirm' => true],
+        'remove_knowledge_document' => ['side_effect_class' => 'write', 'always_confirm' => true, 'confirm_by_button' => true],
         'ask_database' => ['side_effect_class' => 'read'],
         'find_dummy_data' => ['side_effect_class' => 'read'],
         'preview_data_change' => ['side_effect_class' => 'platform_metadata'],
@@ -1452,52 +1499,52 @@ class AgentToolRegistry
                 return self::lookupTableValues($user, $args);
 
             case 'list_automations':
-                return self::listAutomations($user);
+                return Tools\AutomationTools::list($user);
 
             case 'get_automation_details':
-                return self::getAutomationDetails($user, $args);
+                return Tools\AutomationTools::details($user, $args);
 
             case 'create_automation_draft':
-                return self::createAutomationDraft($user, $args);
+                return Tools\AutomationTools::create($user, $args);
 
             case 'update_automation':
-                return self::updateAutomation($user, $args);
+                return Tools\AutomationTools::update($user, $args);
 
             case 'remove_automation':
-                return self::deleteAutomation($user, $args);
+                return Tools\AutomationTools::delete($user, $args);
 
             case 'run_automation_now':
-                return self::runAutomationNow($user, $args);
+                return Tools\AutomationTools::runNow($user, $args);
 
             case 'preview_automation_content':
-                return self::previewAutomationContent($user, $args);
+                return Tools\AutomationTools::preview($user, $args);
 
             case 'list_executions':
-                return self::listExecutions($user, $args);
+                return Tools\AutomationTools::listExecutions($user, $args);
 
             case 'get_execution_status':
-                return self::getExecutionStatus($user, $args);
+                return Tools\AutomationTools::executionStatus($user, $args);
 
             case 'retry_execution':
-                return self::retryExecution($user, $args);
+                return Tools\AutomationTools::retry($user, $args);
 
             case 'request_execution_interrupt':
                 return self::requestExecutionInterrupt($user, $args);
 
             case 'explain_execution_failure':
-                return self::explainExecutionFailure($user, $args);
+                return Tools\AutomationTools::explainFailure($user, $args);
 
             case 'update_published_record':
-                return self::updatePublishedRecord($user, $args);
+                return Tools\AutomationTools::updatePublishedRecord($user, $args);
 
             case 'get_pending_approvals':
-                return self::getPendingApprovals($user);
+                return Tools\AutomationTools::pendingApprovals($user);
 
             case 'approve_content_version':
-                return self::approveContentVersion($user, $args);
+                return Tools\AutomationTools::approve($user, $args);
 
             case 'reject_content_version':
-                return self::rejectContentVersion($user, $args);
+                return Tools\AutomationTools::reject($user, $args);
 
             case 'list_ai_providers':
                 return self::listAiProviders($user);
@@ -1524,14 +1571,18 @@ class AgentToolRegistry
                 return self::getDashboardSummary($user);
 
             case 'list_audit_logs':
-                return self::listAuditLogs($user, $args);
+                return Tools\AuditTools::search($user, $args);
+
+            case 'get_audit_log_entry':
+                return Tools\AuditTools::inspect($user, $args);
 
             case 'ask_database':
+                // PII stays masked for Orbit: revealing it is the user's own audited action in the data assistant.
                 return app(\App\Services\Data\DataAgentService::class)->ask(
                     $user,
                     $args['question'],
                     $args['connection_id'] ?? null,
-                    ['reveal_pii' => $args['reveal_pii'] ?? false]
+                    ['reveal_pii' => false]
                 );
 
             case 'find_dummy_data':
@@ -1891,8 +1942,8 @@ class AgentToolRegistry
         }
 
         try {
-            $service = app(SafeDatabaseExecutor::class);
-            $records = $service->fetchLookupRecords($conn, $table, 10);
+            // Same read-only lookup the portal's dropdowns use (labels of rows, no secret columns).
+            $records = app(\App\Services\SchemaIntrospectionService::class)->getTableLookupRecords($conn, $table, 10, $args['search'] ?? null);
             return [
                 'success' => true,
                 'table' => $table,
@@ -1905,333 +1956,15 @@ class AgentToolRegistry
         }
     }
 
-    protected static function listAutomations(User $user): array
-    {
-        $automations = Automation::where('user_id', $user->id)
-            ->with(['connection'])
-            ->get()
-            ->map(fn ($a) => [
-                'id' => $a->id,
-                'name' => $a->name,
-                'target_table' => $a->target_table,
-                'connection_name' => $a->connection?->name,
-                'schedule_type' => $a->schedule_type,
-                'generation_time' => $a->generation_time,
-                'publication_time' => $a->publication_time,
-                'timezone' => $a->timezone,
-                'requires_approval' => $a->requires_approval,
-                'is_active' => $a->is_active,
-            ]);
 
-        return [
-            'success' => true,
-            'automations' => $automations,
-            'total' => $automations->count(),
-            'message' => "Found {$automations->count()} configured automation(s).",
-        ];
-    }
 
-    protected static function getAutomationDetails(User $user, array $args): array
-    {
-        $automation = Automation::where('user_id', $user->id)->with(['connection'])->find($args['automation_id'] ?? 0);
-        if (!$automation) {
-            return ['success' => false, 'error' => 'Automation not found.'];
-        }
 
-        return [
-            'success' => true,
-            'automation' => [
-                'id' => $automation->id,
-                'name' => $automation->name,
-                'target_table' => $automation->target_table,
-                'connection_id' => $automation->connection_id,
-                'connection_name' => $automation->connection?->name,
-                'prompt_context' => $automation->prompt_context,
-                'field_mappings' => $automation->field_mappings,
-                'schedule_type' => $automation->schedule_type,
-                'generation_time' => $automation->generation_time,
-                'publication_time' => $automation->publication_time,
-                'timezone' => $automation->timezone,
-                'requires_approval' => $automation->requires_approval,
-                'is_active' => $automation->is_active,
-            ],
-        ];
-    }
 
-    protected static function createAutomationDraft(User $user, array $args): array
-    {
-        $connId = (int) ($args['connection_id'] ?? 0);
-        $conn = DbConnection::where('user_id', $user->id)->find($connId);
-        if (!$conn) {
-            return ['success' => false, 'error' => 'Invalid or unauthorized database connection ID.'];
-        }
 
-        $targetTable = trim($args['target_table'] ?? '') ?: 'posts';
-        $name = trim($args['name'] ?? '');
-        if (empty($name)) {
-            return ['success' => false, 'error' => 'Automation name is required.'];
-        }
 
-        // Enforce Lead Time Buffer
-        $genTime = $args['generation_time'] ?? '08:00';
-        $pubTime = $args['publication_time'] ?? '09:00';
-        $timezone = $args['timezone'] ?? 'Asia/Kolkata';
 
-        $leadTimeValidation = self::validateLeadTime($genTime, $pubTime);
-        if (!$leadTimeValidation['valid']) {
-            return ['success' => false, 'error' => $leadTimeValidation['error']];
-        }
 
-        // Check if target table is safe
-        $safety = new DatabaseSafetyService();
-        if ($safety->isTableSensitive($targetTable)) {
-            return [
-                'success' => false,
-                'error' => "Target table '{$targetTable}' contains restricted system/auth data and cannot be automated.",
-            ];
-        }
 
-        $fieldMappings = $args['field_mappings'] ?? [
-            ['field_name' => 'title', 'mapping_type' => 'AI_GENERATED'],
-            ['field_name' => 'content', 'mapping_type' => 'AI_GENERATED'],
-            ['field_name' => 'slug', 'mapping_type' => 'DERIVED_SLUG', 'source_field' => 'title'],
-            ['field_name' => 'status', 'mapping_type' => 'FIXED_VALUE', 'fixed_value' => 'published'],
-        ];
-
-        $promptContext = $args['topic_prompt'] ?? "High quality articles about {$name}";
-        if (!empty($args['category_name'])) {
-            $promptContext .= " [Category: {$args['category_name']}]";
-        }
-
-        $automation = Automation::create([
-            'user_id' => $user->id,
-            'connection_id' => $conn->id,
-            'name' => $name,
-            'target_table' => $targetTable,
-            'operation_mode' => $args['operation_mode'] ?? 'AI_CREATE',
-            'prompt_context' => $promptContext,
-            'field_mappings' => $fieldMappings,
-            'schedule_type' => $args['schedule_type'] ?? 'DAILY',
-            'generation_time' => $genTime,
-            'publication_time' => $pubTime,
-            'timezone' => $timezone,
-            'requires_approval' => (bool) ($args['requires_approval'] ?? false),
-            'timeout_policy' => 'AUTO_PUBLISH_LATEST',
-            'is_active' => (bool) ($args['is_active'] ?? true),
-        ]);
-
-        AuditLog::log(
-            $user->id,
-            'AGENT_AUTOMATION_CREATED',
-            'Automation',
-            (string) $automation->id,
-            ['name' => $automation->name, 'target_table' => $automation->target_table]
-        );
-
-        return [
-            'success' => true,
-            'automation_id' => $automation->id,
-            'name' => $automation->name,
-            'target_table' => $automation->target_table,
-            'is_active' => $automation->is_active,
-            'message' => "Automation '{$automation->name}' created and configured for {$automation->target_table} (Schedule: {$genTime} -> {$pubTime} in {$timezone}).",
-        ];
-    }
-
-    protected static function updateAutomation(User $user, array $args): array
-    {
-        $automation = Automation::where('user_id', $user->id)->find($args['automation_id'] ?? 0);
-        if (!$automation) {
-            return ['success' => false, 'error' => 'Automation not found.'];
-        }
-
-        $dataToUpdate = [];
-        if (!empty($args['name'])) $dataToUpdate['name'] = trim($args['name']);
-        if (isset($args['is_active'])) $dataToUpdate['is_active'] = (bool) $args['is_active'];
-        if (!empty($args['schedule_type'])) $dataToUpdate['schedule_type'] = $args['schedule_type'];
-
-        $genTime = $args['generation_time'] ?? $automation->generation_time;
-        $pubTime = $args['publication_time'] ?? $automation->publication_time;
-        if (!empty($args['generation_time']) || !empty($args['publication_time'])) {
-            $validation = self::validateLeadTime($genTime, $pubTime);
-            if (!$validation['valid']) {
-                return ['success' => false, 'error' => $validation['error']];
-            }
-            $dataToUpdate['generation_time'] = $genTime;
-            $dataToUpdate['publication_time'] = $pubTime;
-        }
-
-        if (!empty($args['category_name']) || !empty($args['topic_prompt'])) {
-            $currentContext = $automation->prompt_context;
-            if (!empty($args['category_name'])) {
-                $newCat = trim($args['category_name']);
-                if (preg_match('/\[Category:.*?\]/', $currentContext)) {
-                    $currentContext = preg_replace('/\[Category:.*?\]/', "[Category: {$newCat}]", $currentContext);
-                } else {
-                    $currentContext .= " [Category: {$newCat}]";
-                }
-            }
-            if (!empty($args['topic_prompt'])) {
-                $currentContext = trim($args['topic_prompt']) . (preg_match('/\[Category:.*?\]/', $currentContext, $m) ? " {$m[0]}" : "");
-            }
-            $dataToUpdate['prompt_context'] = $currentContext;
-        }
-
-        if (!empty($dataToUpdate)) {
-            $automation->update($dataToUpdate);
-            AuditLog::log($user->id, 'AGENT_AUTOMATION_UPDATED', 'Automation', (string) $automation->id, $dataToUpdate);
-        }
-
-        return [
-            'success' => true,
-            'automation_id' => $automation->id,
-            'message' => "Automation '{$automation->name}' updated successfully.",
-        ];
-    }
-
-    protected static function deleteAutomation(User $user, array $args): array
-    {
-        $automation = Automation::where('user_id', $user->id)->find($args['automation_id'] ?? 0);
-        if (!$automation) {
-            return ['success' => false, 'error' => 'Automation not found.'];
-        }
-
-        $name = $automation->name;
-        $id = $automation->id;
-        $automation->delete();
-
-        AuditLog::log($user->id, 'AGENT_AUTOMATION_DELETED', 'Automation', (string) $id);
-
-        return [
-            'success' => true,
-            'automation_id' => $id,
-            'message' => "Automation '{$name}' deleted from platform.",
-        ];
-    }
-
-    protected static function runAutomationNow(User $user, array $args): array
-    {
-        $automationId = (int) ($args['automation_id'] ?? 0);
-        $automation = Automation::where('user_id', $user->id)->find($automationId);
-        if (!$automation) {
-            return ['success' => false, 'error' => 'Automation workflow not found.'];
-        }
-
-        $idempotencyKey = 'agent_run_' . $automation->id . '_' . date('Y-m-d_H-i-s') . '_' . Str::random(6);
-
-        $execution = AutomationExecution::create([
-            'automation_id' => $automation->id,
-            'user_id' => $user->id,
-            'status' => 'PENDING_GENERATION',
-            'idempotency_key' => $idempotencyKey,
-            'timeline_events' => [
-                [
-                    'stage' => 'DISPATCHED_BY_AGENT',
-                    'timestamp' => now()->toIso8601String(),
-                    'message' => 'Agent requested immediate execution.',
-                ],
-            ],
-        ]);
-
-        ProcessAutomationExecution::dispatch($execution->id);
-
-        return [
-            'success' => true,
-            'execution_id' => $execution->id,
-            'status' => $execution->status,
-            'message' => "Execution #{$execution->id} queued for immediate background processing.",
-        ];
-    }
-
-    protected static function previewAutomationContent(User $user, array $args): array
-    {
-        $prompt = trim($args['prompt'] ?? 'General technology update');
-        $targetTable = $args['target_table'] ?? 'posts';
-
-        try {
-            $ai = new AiServiceClient();
-            $res = $ai->generateContent([
-                'prompt' => $prompt,
-                'target_table' => $targetTable,
-                'required_fields' => ['title', 'slug', 'content', 'excerpt'],
-            ]);
-            return [
-                'success' => true,
-                'preview' => $res['data'] ?? [],
-                'message' => 'Preview content generated successfully.',
-            ];
-        } catch (\Throwable $e) {
-            return [
-                'success' => false,
-                'error' => 'Preview generation failed: ' . $e->getMessage(),
-            ];
-        }
-    }
-
-    protected static function listExecutions(User $user, array $args): array
-    {
-        $query = AutomationExecution::where('user_id', $user->id)->with(['automation'])->latest('id');
-        if (!empty($args['status'])) {
-            $query->where('status', $args['status']);
-        }
-        $limit = min((int) ($args['limit'] ?? 10), 50);
-        $executions = $query->limit($limit)->get()->map(fn ($e) => [
-            'id' => $e->id,
-            'automation_id' => $e->automation_id,
-            'automation_name' => $e->automation?->name,
-            'status' => $e->status,
-            'target_record_id' => $e->target_record_id,
-            'created_at' => $e->created_at->toIso8601String(),
-        ]);
-
-        return [
-            'success' => true,
-            'executions' => $executions,
-            'total' => $executions->count(),
-            'message' => "Found {$executions->count()} execution record(s).",
-        ];
-    }
-
-    protected static function getExecutionStatus(User $user, array $args): array
-    {
-        $execution = AutomationExecution::where('user_id', $user->id)->find($args['execution_id'] ?? 0);
-        if (!$execution) {
-            return ['success' => false, 'error' => 'Execution record not found.'];
-        }
-
-        return [
-            'success' => true,
-            'id' => $execution->id,
-            'automation_id' => $execution->automation_id,
-            'status' => $execution->status,
-            'target_record_id' => $execution->target_record_id,
-            'error_message' => $execution->error_message,
-            'timeline_events' => $execution->timeline_events ?? [],
-            'created_at' => $execution->created_at->toIso8601String(),
-        ];
-    }
-
-    protected static function retryExecution(User $user, array $args): array
-    {
-        $execution = AutomationExecution::where('user_id', $user->id)->find($args['execution_id'] ?? 0);
-        if (!$execution) {
-            return ['success' => false, 'error' => 'Execution not found.'];
-        }
-
-        $execution->update([
-            'status' => 'PENDING_GENERATION',
-            'error_message' => null,
-        ]);
-
-        ProcessAutomationExecution::dispatch($execution->id);
-
-        return [
-            'success' => true,
-            'execution_id' => $execution->id,
-            'status' => $execution->status,
-            'message' => "Execution #{$execution->id} reset and re-queued for processing.",
-        ];
-    }
 
     protected static function requestExecutionInterrupt(User $user, array $args): array
     {
@@ -2257,167 +1990,10 @@ class AgentToolRegistry
         ];
     }
 
-    protected static function explainExecutionFailure(User $user, array $args): array
-    {
-        $query = AutomationExecution::where('user_id', $user->id)->where('status', 'FAILED')->orderBy('id', 'desc');
-        if (!empty($args['execution_id'])) {
-            $query->where('id', $args['execution_id']);
-        }
-        $failed = $query->first();
 
-        if (!$failed) {
-            return [
-                'success' => true,
-                'message' => 'No failed executions found in your workspace history.',
-            ];
-        }
 
-        $err = $failed->error_message ?: 'Unknown error occurred during execution.';
-        $diag = 'Analysis: ';
-        if (str_contains(strtolower($err), 'lead time')) {
-            $diag .= 'Generation lead time was under 15 minutes before publication. Safe fix: adjust publication time to be at least 15 minutes after generation.';
-        } elseif (str_contains(strtolower($err), 'connection')) {
-            $diag .= 'Target database was unreachable. Safe fix: verify host, port, firewall rules, and password in Connections.';
-        } elseif (str_contains(strtolower($err), 'restricted')) {
-            $diag .= 'Table access was blocked by safety policy. Safe fix: select an eligible content table (e.g. posts, customer_blogs).';
-        } else {
-            $diag .= "Review configuration or retry: \"{$err}\".";
-        }
 
-        return [
-            'success' => true,
-            'execution_id' => $failed->id,
-            'automation_name' => $failed->automation?->name,
-            'error_message' => $err,
-            'explanation' => $diag,
-            'can_retry' => true,
-        ];
-    }
 
-    protected static function updatePublishedRecord(User $user, array $args): array
-    {
-        $execution = AutomationExecution::where('user_id', $user->id)->find($args['execution_id'] ?? 0);
-        if (!$execution) {
-            return ['success' => false, 'error' => 'Execution record not found.'];
-        }
-
-        if ($execution->status !== 'PUBLISHED' || empty($execution->target_record_id)) {
-            return ['success' => false, 'error' => 'Only published executions with a verified target record ID can be updated.'];
-        }
-
-        $fields = $args['fields'] ?? [];
-        if (empty($fields) || !is_array($fields)) {
-            return ['success' => false, 'error' => 'Update fields payload must not be empty.'];
-        }
-
-        $automation = $execution->automation;
-        if (!$automation || !$automation->connection) {
-            return ['success' => false, 'error' => 'Associated database connection not available.'];
-        }
-
-        $res = SafeDatabaseExecutor::executeScopedUpdate(
-            $automation->connection,
-            $automation->target_table,
-            (int) $execution->target_record_id,
-            $fields
-        );
-
-        if (!$res['success']) {
-            return ['success' => false, 'error' => $res['error'] ?? 'Scoped update failed.'];
-        }
-
-        AuditLog::log(
-            $user->id,
-            'AGENT_RECORD_UPDATED',
-            'AutomationExecution',
-            (string) $execution->id,
-            ['fields_updated' => array_keys($fields)]
-        );
-
-        return [
-            'success' => true,
-            'target_record_id' => $execution->target_record_id,
-            'message' => "Record #{$execution->target_record_id} in table '{$automation->target_table}' was updated successfully.",
-        ];
-    }
-
-    protected static function getPendingApprovals(User $user): array
-    {
-        $pending = AutomationExecution::where('user_id', $user->id)
-            ->where('status', 'PENDING_APPROVAL')
-            ->with(['automation', 'contentVersions'])
-            ->get()
-            ->map(fn ($e) => [
-                'execution_id' => $e->id,
-                'automation_name' => $e->automation?->name,
-                'target_table' => $e->automation?->target_table,
-                'latest_version' => $e->contentVersions->last()?->version_number ?? 1,
-                'payload_preview' => $e->contentVersions->last()?->payload ?? [],
-                'created_at' => $e->created_at->toIso8601String(),
-            ]);
-
-        return [
-            'success' => true,
-            'pending_approvals' => $pending,
-            'count' => $pending->count(),
-            'message' => "Found {$pending->count()} content draft(s) pending approval.",
-        ];
-    }
-
-    protected static function approveContentVersion(User $user, array $args): array
-    {
-        $version = ContentVersion::where('user_id', $user->id)->find($args['version_id'] ?? 0);
-        if (!$version) {
-            return ['success' => false, 'error' => 'Draft version not found.'];
-        }
-
-        $execution = AutomationExecution::where('user_id', $user->id)->find($version->execution_id);
-        if (!$execution) {
-            return ['success' => false, 'error' => 'Unauthorized or invalid execution.'];
-        }
-
-        // Same persisted state as the email approval flow (EmailApprovalService).
-        $version->update(['status' => 'APPROVED']);
-        $execution->update(['status' => 'APPROVED']);
-
-        PublishApprovedExecution::dispatch($execution->id, $version->id);
-
-        return [
-            'success' => true,
-            'version_id' => $version->id,
-            'execution_id' => $execution->id,
-            'message' => "Draft Version #{$version->version_number} approved and dispatched for publication.",
-        ];
-    }
-
-    protected static function rejectContentVersion(User $user, array $args): array
-    {
-        $version = ContentVersion::where('user_id', $user->id)->find($args['version_id'] ?? 0);
-        if (!$version) {
-            return ['success' => false, 'error' => 'Draft version not found.'];
-        }
-
-        $execution = AutomationExecution::where('user_id', $user->id)->find($version->execution_id);
-        if (!$execution) {
-            return ['success' => false, 'error' => 'Unauthorized or invalid execution.'];
-        }
-
-        $feedback = trim($args['feedback'] ?? 'Please revise the draft.');
-        $version->update([
-            'status' => 'REJECTED',
-            'rejection_feedback' => $feedback,
-        ]);
-
-        $execution->update(['status' => 'REJECTED']);
-
-        ProcessAutomationExecution::dispatch($execution->id);
-
-        return [
-            'success' => true,
-            'version_id' => $version->id,
-            'message' => "Version #{$version->version_number} rejected. Triggered regeneration with feedback: \"{$feedback}\".",
-        ];
-    }
 
     protected static function listAiProviders(User $user): array
     {
@@ -2593,24 +2169,6 @@ class AgentToolRegistry
         ];
     }
 
-    protected static function listAuditLogs(User $user, array $args): array
-    {
-        $limit = min((int) ($args['limit'] ?? 15), 50);
-        $logs = AuditLog::where('user_id', $user->id)->latest('id')->limit($limit)->get()->map(fn ($l) => [
-            'id' => $l->id,
-            'action' => $l->action,
-            'resource_type' => $l->resource_type,
-            'resource_id' => $l->resource_id,
-            'created_at' => $l->created_at->toIso8601String(),
-        ]);
-
-        return [
-            'success' => true,
-            'logs' => $logs,
-            'total' => $logs->count(),
-            'message' => "Retrieved {$logs->count()} recent audit event(s).",
-        ];
-    }
 
     protected static function validateLeadTime(string $genTime, string $pubTime): array
     {

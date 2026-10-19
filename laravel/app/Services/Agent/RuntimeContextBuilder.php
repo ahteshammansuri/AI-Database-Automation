@@ -7,6 +7,7 @@ use App\Models\AgentTask;
 use App\Models\Automation;
 use App\Models\AutomationExecution;
 use App\Models\DbConnection;
+use App\Models\KnowledgeDocument;
 use App\Models\SchemaSnapshot;
 use App\Models\User;
 
@@ -20,7 +21,7 @@ class RuntimeContextBuilder
     {
     }
 
-    public function build(User $user, AgentTask $task, array $modelInfo): array
+    public function build(User $user, AgentTask $task, array $modelInfo, ?string $utterance = null): array
     {
         $connections = DbConnection::where('user_id', $user->id)->orderBy('id')->limit(20)->get()
             ->map(fn ($c) => [
@@ -50,6 +51,8 @@ class RuntimeContextBuilder
             'page' => self::sanitizePage($task->page_context ?? []),
             'connections' => $connections,
             'automations' => $automations,
+            'knowledge_documents' => KnowledgeDocument::where('user_id', $user->id)->orderByDesc('id')->limit(20)->get(['id', 'title', 'status'])
+                ->map(fn ($d) => ['id' => $d->id, 'title' => $d->title, 'status' => $d->status])->all(),
             'pending_approvals' => AutomationExecution::where('user_id', $user->id)->where('status', 'PENDING_APPROVAL')->count(),
             'model' => $modelInfo,
             'credentials_captured' => $this->vault->capturedKinds($task),
@@ -69,6 +72,10 @@ class RuntimeContextBuilder
             ], fn ($v) => $v !== null),
         ];
 
+        if ($utterance !== null && ($hint = $this->dataHint($user, $utterance))) {
+            $context['data_hint'] = $hint;
+        }
+
         $focusConnection = $this->focusedConnectionId($task, $connections);
         if ($focusConnection) {
             $snap = SchemaSnapshot::where('user_id', $user->id)->where('connection_id', $focusConnection)->latest('id')->first();
@@ -86,6 +93,113 @@ class RuntimeContextBuilder
         }
 
         return $context;
+    }
+
+    /**
+     * Tables and stored values of the user's own databases that the utterance names (in any language the
+     * words are mixed into, e.g. "kaun sa user ... order refund"): a schema-derived signal that the user
+     * is asking about their data. Uses the latest scan, else the briefly cached live catalog.
+     */
+    public function dataHint(User $user, string $utterance): ?array
+    {
+        $stem = function (string $w): string {
+            $w = strtolower($w);
+            return match (true) {
+                str_ends_with($w, 'ies') && strlen($w) > 4 => substr($w, 0, -3) . 'y',
+                str_ends_with($w, 'ses') && strlen($w) > 4 => substr($w, 0, -2),
+                str_ends_with($w, 's') && !str_ends_with($w, 'ss') && strlen($w) > 3 => substr($w, 0, -1),
+                default => $w,
+            };
+        };
+        $words = array_values(array_unique(array_filter(
+            array_map($stem, preg_split('/[^\p{L}\p{N}_]+/u', mb_strtolower($utterance)) ?: []),
+            fn ($w) => mb_strlen($w) >= 3,
+        )));
+        if (!$words) {
+            return null;
+        }
+
+        $best = null;
+        foreach (DbConnection::where('user_id', $user->id)->where('is_active', true)->orderBy('id')->limit(5)->get() as $conn) {
+            $tables = $this->tablesFor($user, $conn);
+            $matchedTables = [];
+            $values = [];
+            foreach ($tables as $t) {
+                if (in_array($stem($t['name']), $words, true)) {
+                    $matchedTables[] = $t['name'];
+                }
+                foreach ($t['enums'] as $col => $vals) {
+                    foreach ($vals as $v) {
+                        $lv = strtolower((string) $v);
+                        foreach ($words as $w) {
+                            if (mb_strlen($w) >= 5 && (str_starts_with($lv, $w) || str_starts_with($w, $lv)) && count($values) < 6) {
+                                $values[] = "{$t['name']}.{$col} = '{$v}'";
+                            }
+                        }
+                    }
+                }
+            }
+            $score = count($matchedTables) * 2 + count($values);
+            if ($score > 0 && (!$best || $score > $best['score'])) {
+                $best = ['score' => $score, 'connection_id' => $conn->id, 'connection' => $conn->name,
+                    'tables' => array_slice(array_values(array_unique($matchedTables)), 0, 6), 'values' => array_values(array_unique($values))];
+            }
+        }
+        if (!$best) {
+            return null;
+        }
+        unset($best['score']);
+        $best['meaning'] = 'The utterance names data in this database: it is a question about the user\'s data (use ask_database).';
+
+        return $best;
+    }
+
+    /**
+     * The portal page (from the server's surface catalog) whose title or route the utterance names, e.g.
+     * "security page" -> /security. Lets Orbit open a page without the long agent prompt.
+     */
+    public function pageHint(string $utterance): ?array
+    {
+        $words = array_unique(array_filter(preg_split('/[^\p{L}\p{N}]+/u', mb_strtolower($utterance)) ?: [], fn ($w) => mb_strlen($w) >= 3));
+        $stem = fn (string $w) => str_ends_with($w, 's') && strlen($w) > 3 ? substr($w, 0, -1) : $w;
+        $words = array_map($stem, $words);
+        $best = null;
+        foreach (SurfaceCatalog::data()['pages'] ?? [] as $page) {
+            $tokens = array_unique(array_filter(array_map($stem, preg_split('/[^\p{L}\p{N}]+/u', mb_strtolower($page['title'] . ' ' . str_replace(['/', '-'], ' ', $page['route']))) ?: []), fn ($w) => mb_strlen($w) >= 3));
+            $score = count(array_intersect($tokens, $words));
+            if ($score > 0 && (!$best || $score > $best['score'])) {
+                $best = ['score' => $score, 'route' => $page['route'], 'title' => $page['title']];
+            }
+        }
+        if (!$best) {
+            return null;
+        }
+        unset($best['score']);
+
+        return $best;
+    }
+
+    /** @return list<array{name: string, enums: array<string, list<string>>}> */
+    protected function tablesFor(User $user, DbConnection $conn): array
+    {
+        $snap = SchemaSnapshot::where('user_id', $user->id)->where('connection_id', $conn->id)->latest('id')->first();
+        if ($snap) {
+            return collect($snap->schema_payload['tables'] ?? [])->map(fn ($t) => [
+                'name' => (string) ($t['name'] ?? $t['table_name'] ?? ''),
+                'enums' => collect($t['columns'] ?? [])->filter(fn ($c) => !empty($c['enum_values']))
+                    ->mapWithKeys(fn ($c) => [$c['name'] => array_values($c['enum_values'])])->all(),
+            ])->filter(fn ($t) => $t['name'] !== '')->values()->all();
+        }
+        try {
+            $catalog = app(\App\Services\Data\LiveSchemaService::class)->getCatalog($conn);
+        } catch (\Throwable) {
+            return [];
+        }
+
+        return collect($catalog['tables'] ?? [])->map(fn ($t, $name) => [
+            'name' => (string) $name,
+            'enums' => collect($t['columns'] ?? [])->filter(fn ($c) => !empty($c['enum']))->map(fn ($c) => array_values($c['enum']))->all(),
+        ])->values()->all();
     }
 
     /**

@@ -331,3 +331,15 @@ def test_tool_selection_keeps_core_tools_and_caps_count(monkeypatch):
     assert len(offered) <= decider_mod.settings.AGENT_MAX_TOOLS
     msgs, _ = AgentDecider.build_messages(req, decider_mod.RagInfo(), offered)
     assert "OTHER TOOLS" in msgs[0]["content"] and "extra_tool_39" in msgs[0]["content"]
+
+
+def test_plain_question_sent_as_wait_for_user_is_treated_as_a_clarification():
+    """Real qwen2.5:3b output: WAIT_FOR_USER with no secret and no missing fields (was rejected 3 times)."""
+    d = AgentDecider.validate_decision(json.dumps({
+        "kind": "WAIT_FOR_USER", "speech_text": "Are you sure you want to remove Old pricing notes?", "emotion_hint": "neutral",
+    }), ["remove_knowledge_document"])
+    assert d.kind == "ASK_CLARIFICATION"
+    secret = AgentDecider.validate_decision(json.dumps({
+        "kind": "WAIT_FOR_USER", "speech_text": "Type the password in the form.", "secure_input_type": "database_password",
+    }), [])
+    assert secret.kind == "WAIT_FOR_USER"

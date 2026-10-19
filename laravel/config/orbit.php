@@ -9,10 +9,11 @@ return [
     'default_model' => env('AI_MODEL', 'qwen2.5:3b'),
 
     // Observe-act loop bounds. Defaults suit CPU-only local models, where one decision can
-    // take tens of seconds. Keep: decide < turn < job timeout (RunAgentTurnJob) < worker
-    // --timeout (run_all.sh) < queue retry_after (config/queue.php).
-    'max_iterations' => (int) env('ORBIT_MAX_ITERATIONS', 8),
-    'max_turn_seconds' => (int) env('ORBIT_MAX_TURN_SECONDS', 600),
+    // take tens of seconds, and multi-step on-screen work (e.g. all five builder steps from one
+    // long request needs ~15-20 decisions). Keep: decide < turn < job timeout (RunAgentTurnJob)
+    // < worker --timeout (run_all.sh: 1600) < retry_after of the "agent" queue connection (1620).
+    'max_iterations' => (int) env('ORBIT_MAX_ITERATIONS', 24),
+    'max_turn_seconds' => (int) env('ORBIT_MAX_TURN_SECONDS', 1500),
     'decide_timeout_seconds' => (int) env('ORBIT_DECIDE_TIMEOUT', 300),
     'max_repairs' => (int) env('ORBIT_MAX_REPAIRS', 1),
 

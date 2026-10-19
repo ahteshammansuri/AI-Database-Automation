@@ -182,7 +182,9 @@ export function explain(col: PlanColumn, m: Mapping | undefined, ctx: { titleCol
   switch (mode) {
     case "AI":
       if (col.kind === "image") {
-        const size = /(og_|social|share|meta_img|meta_image)/.test(col.name) ? "1200×630 social card" : /(thumb|avatar|icon|square)/.test(col.name) ? "800×800 square" : "1600×900 banner";
+        // Same name rules as the server (ImageFieldService::roleFor).
+        const n = col.name.toLowerCase();
+        const size = /(og_|social|share|meta_img|meta_image|seo_image|twitter)/.test(n) ? "1200×630 social card" : /(thumb|avatar|icon|square|logo)/.test(n) ? "800×800 square" : "1600×900 banner";
         return `An image (${size}) is created from the generated title and summary, stored, and its URL saved here.`;
       }
       if (col.kind === "title") return `AI writes the headline${col.max_length ? ` (max ${col.max_length} characters)` : ""}.`;

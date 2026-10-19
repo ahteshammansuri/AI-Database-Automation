@@ -1,9 +1,14 @@
 {
-  "source": "docs/orbit-agent/product_context_rag.md",
-  "sha256": "dbfb60bc0253566c208f51ee4d940d6aba1a33ddf167a8c004c52cc8de64499d",
-  "version": "dbfb60bc0253",
+  "sources": [
+    "docs/orbit-agent/automations_guide.md",
+    "docs/orbit-agent/portal_tour.md",
+    "docs/orbit-agent/product_context_rag.md",
+    "docs/orbit-agent/security_guide.md"
+  ],
+  "sha256": "a20d547ec2f1d1cf2fdae6658c041b2fe36c09ca033f6473121db60b64b5cc86",
+  "version": "a20d547ec2f1",
   "embedding_backend": "ollama:nomic-embed-text",
   "dimension": 768,
-  "chunks": 25,
-  "indexed_at": "2026-10-16T12:52:45Z"
+  "chunks": 65,
+  "indexed_at": "2026-10-19T10:45:25Z"
 }

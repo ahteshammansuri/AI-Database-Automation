@@ -15,7 +15,7 @@ import { InlineAiFieldAssist } from "../components/common/InlineAiFieldAssist";
 import { useToast } from "../context/ToastContext";
 import { useAuth } from "../context/AuthContext";
 import { FieldMappingStep } from "../components/automation/FieldMappingStep";
-import { FieldPlan, Mapping, mappingProblems, modeOf, serializeMappings } from "../components/automation/fieldPlan";
+import { FieldPlan, Mapping, Mode as ColumnMode, PlanColumn, explain, mappingFor, mappingProblems, modeOf, modeOptions, serializeMappings } from "../components/automation/fieldPlan";
 import { ScheduleStep, ScheduleConfig, ApprovalConfig } from "../components/automation/ScheduleStep";
 import { ContentPreview } from "../components/content/ContentPreview";
 import { MIN_GAP_MINUTES, browserTimeZone, gapMinutes, todayIn, addDays, formatTime12 } from "../lib/schedule";
@@ -478,9 +478,111 @@ export const AutomationBuilderPage: React.FC = () => {
     },
   }), step === 1);
 
+  // Per-column controls, the same rules as the mapping step's own dropdowns and editors.
+  const planColumn = (key: string): PlanColumn | null => {
+    const name = key.slice(key.indexOf(".") + 1);
+    return fieldPlan?.columns.find((c) => c.name === name) ?? null;
+  };
+  const allowedModes = (c: PlanColumn) => modeOptions(c).filter((o) => !manual || !["AI", "AI_CREATE", "AI_REUSE"].includes(o.value));
+  const titleColumn = fieldPlan?.title_column ?? null;
+  const setColumnMapping = (c: PlanColumn, m: Mapping) => setMappings((p) => ({ ...p, [c.name]: m }));
+  const fixedValueError = (c: PlanColumn, v: any): string | null => {
+    const text = String(v ?? "");
+    if (c.max_length && text.length > c.max_length) return `${c.name} allows at most ${c.max_length} characters.`;
+    if (c.kind === "image" && text && !/^https?:\/\//i.test(text)) return `${c.name} needs an http(s) image URL.`;
+    return null;
+  };
+
   useOrbitSurface("builder.mappings", () => ({
     target: stepTarget(2),
-    describe: () => (fieldPlan?.columns ?? []).filter((c) => !c.is_secret).map((c) => ({ column: c.name, kind: c.kind, how: modeOf(mappings[c.name], c), value: mappings[c.name]?.fixed_value ?? undefined, problem: problems[c.name] })),
+    describe: () => (fieldPlan?.columns ?? []).filter((c) => !c.is_secret).map((c) => ({
+      column: c.name, kind: c.kind, required: c.required || undefined,
+      how: modeOf(mappings[c.name], c), choices: allowedModes(c).map((o) => o.value),
+      value: mappings[c.name]?.fixed_value ?? undefined,
+      instructions: mappings[c.name]?.instructions || undefined,
+      means: explain(c, mappings[c.name], { titleColumn, length: genOptions.length, format: genOptions.content_format, manual }),
+      linked_table: c.relation?.table, problem: problems[c.name],
+    })),
+    fields: {
+      "how.*": {
+        get: (key) => { const c = planColumn(String(key)); return c ? modeOf(mappings[c.name], c) : null; },
+        set: (v, key) => {
+          const c = planColumn(String(key));
+          if (!c) return `There is no column '${String(key).slice(4)}' in ${targetTable || "this table"}.`;
+          if (c.is_secret) return `${c.name} is protected and is never written.`;
+          const allowed = allowedModes(c);
+          const want = String(v ?? "").trim();
+          const hit = allowed.find((o) => o.value === want.toUpperCase() || o.label.toLowerCase() === want.toLowerCase());
+          if (!hit) return `${c.name} can be filled by: ${allowed.map((o) => `${o.value} (${o.label})`).join(", ")}.`;
+          setColumnMapping(c, mappingFor(hit.value as ColumnMode, c, mappings[c.name], titleColumn));
+          return null;
+        },
+        options: (key) => { const c = planColumn(String(key)); return c ? allowedModes(c) : []; },
+        target: (key) => `builder.col.${String(key).slice(4)}`,
+      },
+      "value.*": {
+        get: (key) => { const c = planColumn(String(key)); return c ? mappings[c.name]?.fixed_value ?? null : null; },
+        set: async (v, key) => {
+          const c = planColumn(String(key));
+          if (!c) return `There is no column '${String(key).slice(6)}' in ${targetTable || "this table"}.`;
+          if (c.is_secret) return `${c.name} is protected and is never written.`;
+          const current = mappings[c.name];
+          if (c.relation) {
+            const want = String(v ?? "").trim();
+            const rows: any[] = selectedConnId ? await api.getLookupValues(selectedConnId, c.relation.table, want) : [];
+            const label = (r: any) => String(r.label ?? r.name ?? r.title ?? r.slug ?? r.id);
+            const hit = rows.find((r) => String(r.id) === want) ?? rows.find((r) => label(r).toLowerCase() === want.toLowerCase());
+            if (!hit) return `No ${c.relation.entity} matches "${want}" in ${c.relation.table}.${rows.length ? ` Close matches: ${rows.slice(0, 5).map(label).join(", ")}.` : ""}`;
+            setColumnMapping(c, { ...mappingFor("FIXED_REL", c, current, titleColumn), fixed_value: hit.id });
+            return null;
+          }
+          let value: any = v;
+          if (c.kind === "enum") {
+            const hit = c.enum_values.find((e) => e.toLowerCase() === String(v ?? "").trim().toLowerCase());
+            if (!hit) return `${c.name} must be one of: ${c.enum_values.join(", ")}.`;
+            value = hit;
+          } else if (c.kind === "boolean") {
+            const t = String(v ?? "").trim().toLowerCase();
+            if (!["1", "0", "true", "false", "yes", "no", "on", "off"].includes(t)) return `${c.name} is yes/no.`;
+            value = ["1", "true", "yes", "on"].includes(t) ? 1 : 0;
+          } else if (c.kind === "number") {
+            const n = Number(v);
+            if (String(v ?? "").trim() === "" || !Number.isFinite(n)) return `${c.name} needs a number.`;
+            value = n;
+          } else if (c.kind === "datetime") {
+            const m = String(v ?? "").trim().match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})(?::\d{2})?$/);
+            if (!m) return `${c.name} needs a date and time like 2026-11-02 09:30.`;
+            value = `${m[1]} ${m[2]}:00`;
+          }
+          const base = current && modeOf(current, c) === "FIXED" ? current : mappingFor("FIXED", c, current, titleColumn);
+          setColumnMapping(c, { ...base, fixed_value: value });
+          return fixedValueError(c, value);
+        },
+        options: async (key) => {
+          const c = planColumn(String(key));
+          if (!c) return [];
+          if (c.kind === "enum") return c.enum_values.map((e) => ({ value: e, label: e }));
+          if (c.relation && selectedConnId) {
+            const rows: any[] = await api.getLookupValues(selectedConnId, c.relation.table);
+            return rows.slice(0, 50).map((r) => ({ value: r.id, label: String(r.label ?? r.name ?? r.title ?? r.slug ?? r.id) }));
+          }
+          return [];
+        },
+        target: (key) => `builder.col.${String(key).slice(6)}`,
+      },
+      "instructions.*": {
+        get: (key) => { const c = planColumn(String(key)); return c ? mappings[c.name]?.instructions ?? "" : null; },
+        set: (v, key) => {
+          const c = planColumn(String(key));
+          if (!c) return `There is no column '${String(key).slice(13)}' in ${targetTable || "this table"}.`;
+          const mode = modeOf(mappings[c.name], c);
+          if (!["AI", "AI_CREATE", "AI_REUSE"].includes(mode)) return `${c.name} is not filled by AI (it is ${mode}); set how.${c.name} to an AI choice first.`;
+          setColumnMapping(c, { ...mappings[c.name]!, instructions: String(v ?? "").slice(0, 500) });
+          return null;
+        },
+        target: (key) => `builder.col.${String(key).slice(13)}`,
+      },
+    },
     actions: { back: { run: () => goBack(1) }, next: { run: () => goNext(2) } },
   }), step === 2);
 
@@ -496,7 +598,49 @@ export const AutomationBuilderPage: React.FC = () => {
       model: { get: () => aiConfig.model, set: (v) => { setAiConfig((p) => ({ ...p, model: String(v ?? "").trim() })); return null; }, target: () => stepTarget(3) },
       topic: { get: () => aiConfig.topic, set: (v) => { const t = String(v ?? "").trim(); if (!t) return "Topic is required."; setAiConfig((p) => ({ ...p, topic: t })); return null; }, target: () => stepTarget(3) },
       tone: { get: () => genOptions.tone, set: (v) => { setGenOptions((p) => ({ ...p, tone: String(v ?? "") })); return null; }, target: () => stepTarget(3) },
+      length: {
+        get: () => genOptions.length,
+        set: (v) => { const l = String(v ?? "").toLowerCase(); if (!["short", "medium", "long"].includes(l)) return "Use short, medium or long."; setGenOptions((p) => ({ ...p, length: l as GenerationOptions["length"] })); return null; },
+        options: () => [{ value: "short", label: "Short (about 350 words)" }, { value: "medium", label: "Medium (about 750 words)" }, { value: "long", label: "Long (about 1,300 words)" }],
+        target: () => stepTarget(3),
+      },
+      content_format: {
+        get: () => genOptions.content_format,
+        set: (v) => { const f = String(v ?? "").toLowerCase(); if (!["markdown", "html"].includes(f)) return "Use markdown or html."; setGenOptions((p) => ({ ...p, content_format: f as GenerationOptions["content_format"] })); return null; },
+        options: () => [{ value: "markdown", label: "Markdown" }, { value: "html", label: "HTML" }],
+        target: () => stepTarget(3),
+      },
+      image_provider: {
+        get: () => genOptions.image_provider,
+        set: (v) => { const f = String(v ?? "").toLowerCase(); if (!["auto", "openai", "gemini", "local"].includes(f)) return "Use auto, openai, gemini or local."; setGenOptions((p) => ({ ...p, image_provider: f as GenerationOptions["image_provider"] })); return null; },
+        options: () => [{ value: "auto", label: "Best available" }, { value: "openai", label: "OpenAI images (your key)" }, { value: "gemini", label: "Gemini images (your key)" }, { value: "local", label: "Designed cover (local, free)" }],
+        target: () => stepTarget(3),
+      },
+      image_style: { get: () => genOptions.image_style, set: (v) => { setGenOptions((p) => ({ ...p, image_style: String(v ?? "").slice(0, 200) })); return null; }, target: () => stepTarget(3) },
+      documents: {
+        get: () => aiConfig.document_ids.map((id) => knowledgeDocs.find((d) => d.id === id)?.title ?? id).join(", "),
+        set: (v) => {
+          const wanted = String(v ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+          const ids: number[] = [];
+          for (const w of wanted) {
+            const doc = knowledgeDocs.find((d) => String(d.id) === w || d.title.toLowerCase() === w.toLowerCase());
+            if (!doc) return `No knowledge document "${w}". Documents: ${knowledgeDocs.map((d) => d.title).join(", ") || "none uploaded yet"}.`;
+            if (!ids.includes(doc.id)) ids.push(doc.id);
+          }
+          setAiConfig((p) => ({ ...p, document_ids: ids }));
+          return null;
+        },
+        options: () => knowledgeDocs.map((d) => ({ value: d.id, label: d.title })),
+        target: () => stepTarget(3),
+      },
     },
+    describe: () => ({
+      provider: aiConfig.provider, model: aiConfig.model || "(provider default)", topic: aiConfig.topic, tone: genOptions.tone,
+      length: genOptions.length, content_format: genOptions.content_format, writes_images: hasImage,
+      image_provider: genOptions.image_provider, image_provider_resolved: fieldPlan?.image_provider?.reason,
+      documents: aiConfig.document_ids.map((id) => knowledgeDocs.find((d) => d.id === id)?.title ?? id),
+      available_documents: knowledgeDocs.map((d) => d.title),
+    }),
     actions: { back: { run: () => goBack(2) }, next: { run: () => goNext(3) } },
   }), step === 3);
 
@@ -511,6 +655,16 @@ export const AutomationBuilderPage: React.FC = () => {
       generation_time: { get: () => schedule.generation_time, set: (v) => { if (!timeOk(v)) return "Use HH:MM (24h)."; setSchedule((p) => ({ ...p, generation_time: String(v) })); return null; }, target: () => stepTarget(4) },
       publication_time: { get: () => schedule.publication_time, set: (v) => { if (!timeOk(v)) return "Use HH:MM (24h)."; setSchedule((p) => ({ ...p, publication_time: String(v) })); return null; }, target: () => stepTarget(4) },
       require_approval: { get: () => String(approval.require_approval), set: (v) => { setApproval((p) => ({ ...p, require_approval: String(v) === "true" })); return null; }, options: () => [{ value: "true", label: "Require approval" }, { value: "false", label: "No approval" }], target: () => stepTarget(4) },
+      timeout_policy: {
+        get: () => approval.timeout_policy,
+        set: (v) => { const t = String(v ?? "").toUpperCase(); if (!["KEEP_DRAFT", "AUTO_PUBLISH_LATEST", "CANCEL"].includes(t)) return "Use KEEP_DRAFT, AUTO_PUBLISH_LATEST or CANCEL."; setApproval((p) => ({ ...p, timeout_policy: t as ApprovalConfig["timeout_policy"] })); return null; },
+        options: () => [
+          { value: "KEEP_DRAFT", label: "Keep it as a draft (nothing is published)" },
+          { value: "AUTO_PUBLISH_LATEST", label: "Publish it anyway" },
+          { value: "CANCEL", label: "Cancel the run" },
+        ],
+        target: () => stepTarget(4),
+      },
       reviewer_email: { get: () => approval.reviewer_email, set: (v) => { const e = String(v ?? "").trim(); if (e && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) return "That is not a valid email."; setApproval((p) => ({ ...p, reviewer_email: e })); return null; }, target: () => stepTarget(4) },
     },
     actions: { back: { run: () => goBack(3) }, next: { run: () => goNext(4) } },
@@ -518,7 +672,18 @@ export const AutomationBuilderPage: React.FC = () => {
 
   useOrbitSurface("builder.review", () => ({
     target: stepTarget(5),
-    describe: () => ({ name, table: targetTable, mode, schedule, approval: approval.require_approval, preview: preview ? JSON.stringify(preview.payload).slice(0, 400) : null }),
+    describe: () => ({
+      name, table: targetTable, mode, schedule, approval: approval.require_approval, reviewer: approval.reviewer_email || undefined,
+      preview: preview
+        ? {
+            record: Object.fromEntries(Object.entries(preview.payload ?? {}).map(([k, v]) => [k, typeof v === "string" ? v.slice(0, 160) : v])),
+            write_plan: preview.meta?.write_plan,
+            missing_fields: preview.meta?.missing_fields,
+            next_runs: preview.schedule?.next_runs,
+          }
+        : null,
+      preview_error: previewError?.message,
+    }),
     actions: {
       preview: { run: async () => { await handlePreview(); return { success: true, message: "Preview generated (shown on screen)." }; } },
       back: { run: () => goBack(4) },

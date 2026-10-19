@@ -28,6 +28,7 @@ import { formatInstant } from "../lib/schedule";
 import { StatusPill } from "../components/common/StatusPill";
 import { useToast } from "../context/ToastContext";
 import { useOrbitSurface } from "../hooks/useOrbitSurface";
+import { useRefreshAfterOrbit } from "../hooks/useRefreshAfterOrbit";
 import { orbitTargets } from "../services/orbitTargets";
 
 interface PendingApprovalItem {
@@ -106,8 +107,34 @@ export const ApprovalsPage: React.FC = () => {
   }, []);
 
   // ---- Orbit surface: same API calls as the review modal (row = draft id) ---------------------
+  useRefreshAfterOrbit(["approve_content_version", "reject_content_version"], () => { loadData(); });
+
   useOrbitSurface("approvals.list", () => {
     const find = (row?: string) => approvals.find((a) => String(a.id) === String(row));
+    // The same two choices as the review buttons: approve for the scheduled time, or publish now.
+    const approveCall = (publishNow: boolean) => ({
+      target: (row?: string) => `approvals.row.${row}`,
+      run: async (row?: string) => {
+        const item = find(row);
+        if (!item) return { success: false, message: `No draft ${row} waiting for approval.` };
+        try {
+          setIsPublishing(true);
+          const payload = selectedItem && String(selectedItem.id) === String(row) ? editPayload : item.payload;
+          const res: any = await api.portalApprove(item.id, { publish_now: publishNow, payload });
+          setSelectedItem(null);
+          loadData();
+          return {
+            success: true,
+            message: res?.message || (publishNow ? "Approved and published." : "Approved; it publishes at its scheduled time."),
+            resource: { type: "ContentVersion", id: item.id },
+          };
+        } catch (err: any) {
+          return { success: false, message: err.message || "Approval failed." };
+        } finally {
+          setIsPublishing(false);
+        }
+      },
+    });
     return {
       describe: () => approvals.map((a: any) => ({
         id: a.id, version: a.version_number, status: a.status, created_at: a.created_at,
@@ -118,6 +145,7 @@ export const ApprovalsPage: React.FC = () => {
         reject_feedback: { get: () => rejectFeedback, set: (v) => { setRejectFeedback(String(v ?? "").slice(0, 2000)); return null; } },
       },
       actions: {
+        refresh: { run: async () => { await loadData(); return { success: true, message: "Approval queue reloaded." }; } },
         open: {
           target: (row) => `approvals.row.${row}`,
           run: (row) => {
@@ -127,25 +155,8 @@ export const ApprovalsPage: React.FC = () => {
             return { success: true, message: "Draft opened for review.", data: { payload: item.payload } };
           },
         },
-        approve: {
-          target: (row) => `approvals.row.${row}`,
-          run: async (row) => {
-            const item = find(row);
-            if (!item) return { success: false, message: `No draft ${row} waiting for approval.` };
-            try {
-              setIsPublishing(true);
-              const payload = selectedItem && String(selectedItem.id) === String(row) ? editPayload : item.payload;
-              const res: any = await api.portalApprove(item.id, { publish_now: true, payload });
-              setSelectedItem(null);
-              loadData();
-              return { success: true, message: res?.message || "Approved and published.", resource: { type: "ContentVersion", id: item.id } };
-            } catch (err: any) {
-              return { success: false, message: err.message || "Approval failed." };
-            } finally {
-              setIsPublishing(false);
-            }
-          },
-        },
+        approve: approveCall(false),
+        approve_publish_now: approveCall(true),
         reject: {
           target: (row) => `approvals.row.${row}`,
           run: async (row) => {

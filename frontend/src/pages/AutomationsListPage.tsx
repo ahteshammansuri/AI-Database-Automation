@@ -8,6 +8,7 @@ import { SearchableSelect } from "../components/common/SearchableSelect";
 import { useToast } from "../context/ToastContext";
 import { orbitTargets } from "../services/orbitTargets";
 import { useOrbitSurface } from "../hooks/useOrbitSurface";
+import { useRefreshAfterOrbit } from "../hooks/useRefreshAfterOrbit";
 import { pageStateService } from "../services/pageStateService";
 import { formatInstant, relativeFromNow } from "../lib/schedule";
 
@@ -22,7 +23,7 @@ export const AutomationsListPage: React.FC = () => {
   const [editingModel, setEditingModel] = useState<string>("llama3.2:1b");
   const [editingPrompt, setEditingPrompt] = useState<string>("");
   const [isSavingModal, setIsSavingModal] = useState<boolean>(false);
-  const { toast, showAlert } = useToast();
+  const { toast, confirm } = useToast();
 
   const loadData = async () => {
     try {
@@ -44,6 +45,8 @@ export const AutomationsListPage: React.FC = () => {
   }, [navigate]);
 
   // ---- Orbit surface: the same API calls the row buttons make (row = automation id) ------------
+  useRefreshAfterOrbit(["create_automation_draft", "update_automation", "remove_automation", "run_automation_now"], () => { loadData(); });
+
   useOrbitSurface("automations.list", () => {
     const find = (row?: string) => automations.find((a: any) => String(a.id) === String(row));
     return {
@@ -89,6 +92,7 @@ export const AutomationsListPage: React.FC = () => {
           target: (row) => `automations.row.${row}`,
           run: async (row) => {
             if (!find(row)) return { success: false, message: `No automation ${row} in the list.` };
+            if (!(await askDelete(Number(row)))) return { success: false, message: "Deletion was not confirmed in the popup; nothing changed." };
             try {
               await api.deleteAutomation(Number(row));
               loadData();
@@ -129,24 +133,26 @@ export const AutomationsListPage: React.FC = () => {
     }
   };
 
-  const handleDelete = (id: number) => {
-    showAlert({
+  // Shared by the Delete button and Orbit's remove action, so both see the same popup.
+  function askDelete(id: number) {
+    const name = automations.find((a: any) => a.id === id)?.name;
+    return confirm({
       title: "Delete Automation Pipeline?",
-      text: "Are you sure you want to delete this automation pipeline? Any scheduled runs will be cancelled.",
-      icon: "warning",
-      showCancelButton: true,
+      text: `Are you sure you want to delete ${name ? `"${name}"` : "this automation pipeline"}? Any scheduled runs will be cancelled.`,
       confirmButtonText: "Yes, Delete",
       cancelButtonText: "Cancel",
-      onConfirm: async () => {
-        try {
-          await api.deleteAutomation(id);
-          toast.success("Automation Deleted", "The automation pipeline has been removed.");
-          loadData();
-        } catch (err: any) {
-          toast.error("Delete Failed", err.message);
-        }
-      },
     });
+  }
+
+  const handleDelete = async (id: number) => {
+    if (!(await askDelete(id))) return;
+    try {
+      await api.deleteAutomation(id);
+      toast.success("Automation Deleted", "The automation pipeline has been removed.");
+      loadData();
+    } catch (err: any) {
+      toast.error("Delete Failed", err.message);
+    }
   };
 
   return (

@@ -7,7 +7,7 @@ import { useVoiceLifecycle } from "../../hooks/useVoiceLifecycle";
 import { useMascotTravel, MASCOT_BOX } from "../../hooks/useMascotTravel";
 import { usePressAndHold } from "../../hooks/usePressAndHold";
 import { Mic, MicOff } from "lucide-react";
-import { OrbitCaption, OrbitSecretChip } from "./OrbitOverlays";
+import { OrbitSpeechBubble, OrbitSecretChip } from "./OrbitOverlays";
 
 const GESTURE_STATE: Record<string, CharacterState> = {
   tap: "clicking",
@@ -82,11 +82,14 @@ export const FloatingMascot: React.FC = () => {
         initial={false}
         animate={{ x: placement.x, y: placement.y }}
         transition={transition}
-        className="fixed top-0 left-0 z-50 select-none pointer-events-none"
+        className="fixed top-0 left-0 z-[70] select-none pointer-events-none"
         style={{ width: MASCOT_BOX.width, height: MASCOT_BOX.height }}
       >
         <div className="relative flex flex-col items-center pointer-events-auto">
-          <OrbitCaption />
+          <OrbitSpeechBubble
+            align={placement.x + MASCOT_BOX.width >= 252 ? "right" : "left"}
+            below={placement.y < 150}
+          />
           <button
             type="button"
             {...bind}

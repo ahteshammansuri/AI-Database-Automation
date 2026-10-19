@@ -6,6 +6,7 @@ import { DatePicker } from "../ui/DatePicker";
 import { TimePicker } from "../ui/TimePicker";
 import { FieldPlan, Mapping, Mode, PlanColumn, explain, groupColumns, mappingFor, modeOf, modeOptions } from "./fieldPlan";
 import { todayIn } from "../../lib/schedule";
+import { orbitTargets } from "../../services/orbitTargets";
 
 interface Props {
   plan: FieldPlan;
@@ -38,7 +39,10 @@ const ColumnRow: React.FC<{ col: PlanColumn } & Omit<Props, "plan" | "problems">
   const Icon = col.relation ? Link2 : col.kind === "image" ? ImageIcon : isAi ? Cpu : Settings2;
 
   return (
-    <div className={`rounded-xl border p-3 sm:p-4 transition ${problem ? "border-rose-300 bg-rose-50/40" : "border-slate-200 bg-white hover:border-slate-300"}`}>
+    <div
+      ref={(el) => (el ? orbitTargets.register(`builder.col.${col.name}`, el) : orbitTargets.unregister(`builder.col.${col.name}`))}
+      className={`rounded-xl border p-3 sm:p-4 transition ${problem ? "border-rose-300 bg-rose-50/40" : "border-slate-200 bg-white hover:border-slate-300"}`}
+    >
       <div className="grid gap-3 md:grid-cols-[minmax(0,13rem)_minmax(0,1fr)] md:gap-4">
         <div className="min-w-0">
           <div className="flex items-center gap-1.5">

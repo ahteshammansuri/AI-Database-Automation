@@ -91,7 +91,7 @@ class SurfaceCatalog
                 'page' => $s['route'],
                 'title' => $s['title'],
                 'fields' => array_map(fn ($f) => $f['name'] . ($f['type'] === 'secret' ? '(secret: user types it)' : '') . (!empty($f['required']) ? '*' : ''), $s['fields'] ?? []),
-                'actions' => array_map(fn ($a) => $a['id'] . (!empty($a['row']) ? '(row)' : '') . (!empty($a['consequential']) ? '!' : ''), $s['actions'] ?? []),
+                'actions' => array_map(fn ($a) => $a['id'] . (!empty($a['row']) ? '(row)' : '') . (!empty($a['destructive']) ? '!!' : (!empty($a['consequential']) ? '!' : '')), $s['actions'] ?? []),
             ];
         }
 
@@ -143,7 +143,8 @@ class SurfaceCatalog
                         return $fail("Field '{$name}' belongs to a row: pass row.");
                     }
                 }
-                return $ok(false, 30);
+                // Orbit types text visibly (up to ~2 s per field) and travels between fields.
+                return $ok(false, 20 + 4 * count($values));
             case 'choose_option':
                 $f = self::field($surface, (string) ($args['field'] ?? ''));
                 if (!$f || (!in_array($f['type'], ['select', 'searchable_select'], true) && empty($f['dynamic']))) {

@@ -53,8 +53,9 @@ class ToolPolicyGate
             }
             $id = (int) $clean[$key];
             if ($id < 1 || !$model::where('user_id', $user->id)->whereKey($id)->exists()) {
-                // Same message whether the record is missing or belongs to someone else.
-                return $this->deny('NOT_FOUND', "No {$this->label($key)} with id {$id} exists in your workspace.", $def);
+                // Same message whether the record is missing or belongs to someone else; it lists only
+                // the user's own items so the model can correct a guessed id.
+                return $this->deny('NOT_FOUND', "No {$this->label($key)} with id {$id} exists in your workspace." . $this->yours($user, $key, $model), $def);
             }
         }
 
@@ -67,7 +68,9 @@ class ToolPolicyGate
             if ($check['consequential'] && !$confirmed) {
                 return [
                     'ok' => false, 'args' => $clean, 'def' => $def, 'error_category' => 'CONFIRMATION_REQUIRED',
-                    'safe_message' => 'Pressing "' . ($clean['action'] ?? '') . '" changes data. Ask the user to confirm exactly what will happen before pressing it.',
+                    'safe_message' => self::needsPanelButton($tool, $clean)
+                        ? 'Pressing "' . ($clean['action'] ?? '') . '" removes or cancels something. Use REQUEST_CONFIRMATION and say exactly what will be removed; only the Confirm button in Orbit\'s panel counts (a typed "yes" does not). After that you press it and confirm the page popup.'
+                        : 'Pressing "' . ($clean['action'] ?? '') . '" changes data. Ask the user to confirm exactly what will happen before pressing it.',
                 ];
             }
 
@@ -80,16 +83,50 @@ class ToolPolicyGate
                 'args' => $clean,
                 'def' => $def,
                 'error_category' => 'CONFIRMATION_REQUIRED',
-                'safe_message' => "'{$tool}' needs the user's explicit confirmation before it runs. Ask the user to confirm exactly what will happen.",
+                'safe_message' => self::needsPanelButton($tool, $clean)
+                    ? "'{$tool}' removes something. Use REQUEST_CONFIRMATION and say exactly what will be removed; only the Confirm button in Orbit's panel counts (a typed \"yes\" does not)."
+                    : "'{$tool}' needs the user's explicit confirmation before it runs. Ask the user to confirm exactly what will happen.",
             ];
         }
 
         return ['ok' => true, 'args' => $clean, 'def' => $def, 'error_category' => null, 'safe_message' => null];
     }
 
+    /**
+     * Destructive steps (removing a connection, automation or document, cancelling a run) are confirmed
+     * only with the Confirm button in Orbit's panel. A typed or spoken "yes" is interpreted by the model,
+     * and the model never decides permissions.
+     */
+    public static function needsPanelButton(string $tool, array $args): bool
+    {
+        if (!empty(AgentToolRegistry::TOOL_META[$tool]['confirm_by_button'])) {
+            return true;
+        }
+        if ($tool !== 'press') {
+            return false;
+        }
+        $surface = SurfaceCatalog::surface((string) ($args['surface'] ?? ''));
+        $action = $surface ? SurfaceCatalog::action($surface, (string) ($args['action'] ?? '')) : null;
+
+        return !empty($action['destructive']);
+    }
+
     protected function deny(string $category, string $message, ?array $def = null): array
     {
         return ['ok' => false, 'args' => [], 'def' => $def, 'error_category' => $category, 'safe_message' => $message];
+    }
+
+    /** The user's own items of this kind (newest first), for self-correction after a wrong id. */
+    protected function yours(User $user, string $key, string $model): string
+    {
+        $labelColumn = ['connection_id' => 'name', 'automation_id' => 'name', 'document_id' => 'title'][$key] ?? null;
+        $rows = $model::where('user_id', $user->id)->latest('id')->limit(10)->get();
+        if ($rows->isEmpty()) {
+            return " You have no {$this->label($key)}s yet.";
+        }
+        $items = $rows->map(fn ($r) => "#{$r->id}" . ($labelColumn ? ' ' . $r->{$labelColumn} : (isset($r->status) ? " ({$r->status})" : '')))->implode(', ');
+
+        return " Your {$this->label($key)}s: {$items}. Use one of these ids (never guess one).";
     }
 
     protected function label(string $key): string

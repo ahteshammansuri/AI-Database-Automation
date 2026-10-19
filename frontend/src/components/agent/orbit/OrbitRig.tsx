@@ -3,6 +3,8 @@ import { ttsAdapter } from "../../../services/ttsAdapter";
 import {
   COLORS, EyeShape, HandShape, MouthShape, NUMERIC_KEYS, OrbitPose, PoseNumbers, applyEmotion, poseFor,
 } from "./poses";
+import { createLipSync, motionLayers } from "./rigMotion";
+import { createBlinker, createIdlePersonality } from "./rigPersonality";
 
 /**
  * Orbit — layered, articulated SVG rig (head, face screen, eyes with pupils and lids,
@@ -98,60 +100,15 @@ function useAnimatedRig(target: OrbitPose, reduced: boolean, calm: boolean) {
   return { cur: current.current, time: (performance.now() - t0.current) / 1000, frame };
 }
 
-/** Mouth openness from real speech playback events. */
-function useLipSync(active: boolean) {
-  const level = useRef(0);
-  const playing = useRef(false);
-  const lastBoundary = useRef(0);
-
-  useEffect(() => {
-    return ttsAdapter.subscribe((e) => {
-      if (e.type === "start") {
-        playing.current = true;
-        lastBoundary.current = 0;
-      } else if (e.type === "boundary") {
-        level.current = 1;
-        lastBoundary.current = performance.now();
-      } else {
-        playing.current = false;
-      }
-    });
-  }, []);
-
-  return (time: number) => {
-    if (!active || !playing.current) {
-      level.current *= 0.85;
-      return level.current;
-    }
-    const sinceWord = performance.now() - lastBoundary.current;
-    if (lastBoundary.current && sinceWord < 260) {
-      level.current = Math.max(level.current * 0.9, 0.25);
-      return level.current;
-    }
-    // Voice without word-boundary events: articulate only while audio is really playing.
-    return 0.25 + 0.45 * Math.abs(Math.sin(time * 11)) * (0.6 + 0.4 * Math.abs(Math.sin(time * 3.1)));
-  };
+/** Mouth openness and vowel roundness, from real speech playback events. */
+function useLipSync() {
+  const lip = useMemo(() => createLipSync((fn) => ttsAdapter.subscribe(fn as any)), []);
+  useEffect(() => lip.dispose, [lip]);
+  return lip;
 }
 
-function useBlink(enabled: boolean) {
-  const [closed, setClosed] = useState(false);
-  useEffect(() => {
-    if (!enabled) return;
-    let timer: any;
-    const schedule = () => {
-      timer = setTimeout(() => {
-        setClosed(true);
-        timer = setTimeout(() => {
-          setClosed(false);
-          schedule();
-        }, 140);
-      }, 2800 + Math.random() * 3400);
-    };
-    schedule();
-    return () => clearTimeout(timer);
-  }, [enabled]);
-  return closed;
-}
+/** States where Orbit is calm and may show idle personality (glances, tilts, being petted). */
+const PERSONALITY_STATES = new Set(["idle", "waiting", "needs_input", "curious"]);
 
 // ---------------------------------------------------------------------------
 // Drawing helpers (3D look from layered gradients: base shading, rim light,
@@ -214,8 +171,8 @@ const Arm: React.FC<{
 );
 
 /** Big glowing ring eyes with a blue iris and white sparkles (design-sheet style). */
-function Eye({ cx, cy, shape, scale, lid, lookX, lookY, uid }: {
-  cx: number; cy: number; shape: EyeShape; scale: number; lid: number; lookX: number; lookY: number; uid: string;
+function Eye({ cx, cy, shape, scale, lid, lookX, lookY, pupil, uid }: {
+  cx: number; cy: number; shape: EyeShape; scale: number; lid: number; lookX: number; lookY: number; pupil: number; uid: string;
 }) {
   const glow = <circle cx={cx} cy={cy} r={19 * scale} fill={`url(#eyeglow-${uid})`} />;
   const arc = { stroke: COLORS.eye, strokeWidth: 3.6, strokeLinecap: "round" as const, fill: "none" };
@@ -235,8 +192,11 @@ function Eye({ cx, cy, shape, scale, lid, lookX, lookY, uid }: {
   const ry = shape === "squint" ? r * 0.45 : r;
   const ix = cx + lookX * 3.2;
   const iy = cy + lookY * 2.6;
-  const ir = shape === "focused" ? 6.8 : 8;
-  const cover = clamp(lid, 0, 1) * ry * 2;
+  const ir = (shape === "focused" ? 6.8 : 8) * pupil;
+  const cover = clamp(lid, 0, 1) * (ry * 2 + 2);
+  // The lid's lower edge is curved like a real eyelid, not a straight shutter.
+  const lidTop = cy - ry - 3;
+  const lidEdge = lidTop + cover;
   return (
     <g>
       {glow}
@@ -245,19 +205,25 @@ function Eye({ cx, cy, shape, scale, lid, lookX, lookY, uid }: {
       <ellipse cx={cx} cy={cy} rx={r} ry={ry} fill="none" stroke={COLORS.eye} strokeWidth={3} />
       {ry > 7 && (
         <g fill="#FFFFFF">
-          <circle cx={ix - 3.4} cy={iy - 3.6} r={3.3} />
-          <circle cx={ix + 3.2} cy={iy + 3} r={1.5} opacity={0.9} />
+          <circle cx={ix - 3.4} cy={iy - 3.6} r={3.5} />
+          <circle cx={ix + 3.2} cy={iy + 3} r={1.6} opacity={0.9} />
+          <circle cx={ix + 3.6} cy={iy - 4.2} r={0.9} opacity={0.75} />
         </g>
       )}
       {shape === "sad" && (
         <path d={`M${cx - r - 2} ${cy - r - 2} L${cx + r + 2} ${cy - r - 2} L${cx - r - 2} ${cy - 2} Z`} fill={`url(#screen-${uid})`} />
       )}
-      {cover > 0.5 && <rect x={cx - r - 3} y={cy - ry - 3} width={2 * r + 6} height={cover + 3} fill="#0A1124" />}
+      {cover > 0.5 && (
+        <path
+          d={`M${cx - r - 3} ${lidTop} H${cx + r + 3} V${lidEdge - 2} Q${cx} ${lidEdge + Math.min(5, cover * 0.35)} ${cx - r - 3} ${lidEdge - 2} Z`}
+          fill="#0A1124"
+        />
+      )}
     </g>
   );
 }
 
-function Mouth({ shape, open }: { shape: MouthShape; open: number }) {
+function Mouth({ shape, open, round = 0.5 }: { shape: MouthShape; open: number; round?: number }) {
   const c = COLORS.eye;
   const s = { stroke: c, strokeWidth: 3, strokeLinecap: "round" as const, fill: "none" };
   switch (shape) {
@@ -265,8 +231,18 @@ function Mouth({ shape, open }: { shape: MouthShape; open: number }) {
       return <path d="M91 104 Q100 117 109 104 Q100 108 91 104 Z" fill={c} stroke={c} strokeWidth={1.5} strokeLinejoin="round" />;
     case "open":
       return <ellipse cx={100} cy={108} rx={5} ry={4} fill={c} />;
-    case "talk":
-      return <ellipse cx={100} cy={108} rx={4.4 + open * 1.6} ry={1.3 + open * 4.6} fill={c} />;
+    case "talk": {
+      // Wider for "ee" sounds, rounder for "oo"; small upturned corners keep it friendly.
+      const rx = 3.6 + open * 1.4 + (1 - round) * 1.6;
+      const ry = 1.2 + open * (3.6 + round * 1.4);
+      return (
+        <g>
+          <ellipse cx={100} cy={108} rx={rx} ry={ry} fill={c} />
+          {open > 0.45 && <ellipse cx={100} cy={108 + ry * 0.45} rx={rx * 0.55} ry={ry * 0.35} fill="#FF8FB8" opacity={0.55} />}
+          <path d={`M${100 - rx - 1.6} ${107} q1 1.4 2 1.2 M${100 + rx + 1.6} ${107} q-1 1.4 -2 1.2`} stroke={c} strokeWidth={1.6} strokeLinecap="round" fill="none" />
+        </g>
+      );
+    }
     case "o":
       return <circle cx={100} cy={108} r={3.2} {...s} />;
     case "flat":
@@ -289,75 +265,79 @@ export const OrbitRig: React.FC<OrbitRigProps> = ({
 }) => {
   const uid = useId().replace(/:/g, "");
   const svgRef = useRef<SVGSVGElement>(null);
-  const pointer = useRef<{ x: number; y: number } | null>(null);
-  const stateSince = useRef({ state, at: performance.now() });
-  if (stateSince.current.state !== state) stateSince.current = { state, at: performance.now() };
+  const pointer = useRef<{ x: number; y: number; at: number } | null>(null);
+  const stateSince = useRef({ state, at: performance.now(), from: state });
+  if (stateSince.current.state !== state) stateSince.current = { state, at: performance.now(), from: stateSince.current.state };
 
-  const pose = useMemo(() => applyEmotion(poseFor(state), state === "speaking" ? emotion : null), [state, emotion]);
-  const { cur, time } = useAnimatedRig(pose, reducedMotion, CALM_STATES.has(state));
-  const blinkClosed = useBlink(!reducedMotion && ["open", "wide", "focused", "sad"].includes(pose.eyes));
-  const mouthLevel = useLipSync(pose.mouth === "talk");
+  const blinker = useMemo(() => createBlinker(), []);
+  const personality = useMemo(() => createIdlePersonality(), []);
+  const lip = useLipSync();
+  const live = !reducedMotion;
+
+  // Being "petted": the pointer resting on Orbit while it is calm makes it happy (personality only).
+  const now = performance.now();
+  let petted = false;
+  if (live && PERSONALITY_STATES.has(state) && pointer.current && svgRef.current && now - pointer.current.at < 4000) {
+    const r = svgRef.current.getBoundingClientRect();
+    petted = pointer.current.x >= r.left && pointer.current.x <= r.right && pointer.current.y >= r.top && pointer.current.y <= r.bottom;
+  }
+  const pose = useMemo(() => {
+    const base = applyEmotion(poseFor(state), state === "speaking" ? emotion : null);
+    return petted ? { ...base, eyes: "happy" as EyeShape, mouth: "grin" as MouthShape, blush: true } : base;
+  }, [state, emotion, petted]);
+  const { cur, time } = useAnimatedRig(pose, reducedMotion, CALM_STATES.has(state) && !petted);
 
   useEffect(() => {
     if (!followPointer || reducedMotion) return;
     const onMove = (e: PointerEvent) => {
-      pointer.current = { x: e.clientX, y: e.clientY };
+      pointer.current = { x: e.clientX, y: e.clientY, at: performance.now() };
     };
     window.addEventListener("pointermove", onMove, { passive: true });
     return () => window.removeEventListener("pointermove", onMove);
   }, [followPointer, reducedMotion]);
 
   const mirrored = facing === "left";
-  const elapsed = (performance.now() - stateSince.current.at) / 1000;
-  const m = new Set(pose.motions);
-  const live = !reducedMotion;
+  const elapsed = (now - stateSince.current.at) / 1000;
 
-  // ---- Gaze: real target first, pointer only when calm --------------------------
-  let lookX = cur.lookX;
-  let lookY = cur.lookY;
-  const gazePoint = lookAt ?? (["idle", "listening", "curious"].includes(state) ? pointer.current : null);
+  // ---- Gaze: real target first, pointer only when calm and recently moved -----------
+  const pointerFresh = !!pointer.current && now - pointer.current.at < 2500;
+  const gazePoint = lookAt ?? (["idle", "listening", "curious"].includes(state) && pointerFresh ? pointer.current : null);
+  let gaze: { x: number; y: number } | null = null;
   if (gazePoint && svgRef.current) {
     const r = svgRef.current.getBoundingClientRect();
     const dx = (gazePoint.x - (r.left + r.width / 2)) / 260;
     const dy = (gazePoint.y - (r.top + r.height * 0.35)) / 260;
-    lookX = clamp(mirrored ? -dx : dx, -1, 1);
-    lookY = clamp(dy, -1, 1);
+    gaze = { x: clamp(mirrored ? -dx : dx, -1, 1), y: clamp(dy, -1, 1) };
   }
 
-  // ---- Procedural motion layers --------------------------------------------------
-  let bodyY = cur.bodyY;
-  const bodyRot = cur.bodyRot;
-  let headRot = cur.headRot;
-  let lElbow = cur.lElbow;
-  let rElbow = cur.rElbow;
-  let breathe = 1;
-  if (live) {
-    if (m.has("float")) bodyY += Math.sin(time * 2.1) * cur.floatAmp;
-    if (m.has("fly")) bodyY += Math.sin(time * 6) * 1.5;
-    if (m.has("breathe")) breathe = 1 + Math.sin(time * 1.4) * 0.014;
-    if (m.has("wave")) rElbow += Math.sin(time * 2 * Math.PI * 2.4) * 26;
-    if (m.has("tap")) rElbow += -Math.max(0, Math.sin(time * 2 * Math.PI * 2.6)) * 22;
-    if (m.has("type")) {
-      lElbow += Math.sin(time * 2 * Math.PI * 5) * 10;
-      rElbow += Math.sin(time * 2 * Math.PI * 5 + Math.PI) * 10;
-    }
-    if (m.has("busy")) {
-      lElbow += Math.sin(time * 2 * Math.PI * 1.8) * 14;
-      rElbow -= Math.sin(time * 2 * Math.PI * 1.8 + 1) * 14;
-    }
-    if (m.has("scan") && !lookAt) lookX = Math.sin(time * 2 * Math.PI * 0.7) * 0.8;
-    if (m.has("nod")) headRot += Math.sin(time * 2 * Math.PI * 1.3) * 3;
-    if (m.has("tilt")) headRot += Math.sin(time * 0.9) * 2;
-    if (m.has("bounce")) bodyY -= Math.abs(Math.sin(elapsed * 2 * Math.PI * 1.7)) * 8 * Math.exp(-elapsed * 1.4);
-    if (m.has("shake")) headRot += Math.sin(elapsed * 2 * Math.PI * 6) * 5 * Math.exp(-elapsed * 2.5);
-    if (m.has("talk")) {
-      rElbow += Math.sin(time * 2.3) * 8;
-      headRot += Math.sin(time * 1.7) * 1.5;
-    }
+  // ---- Procedural motion layers (shared with the 3D renderer) ----------------------
+  const layers = motionLayers(pose, cur, time, elapsed, live, gaze);
+  let { bodyY, headRot, lookX, lookY } = layers;
+  const { bodyRot, lElbow, rElbow, breathe } = layers;
+
+  // Idle personality: glances and curious head tilts, only when calm and not looking at anything.
+  const beat = personality.sample(now, live && PERSONALITY_STATES.has(state) && !lookAt && !pointerFresh);
+  lookX = clamp(lookX + beat.lookX, -1, 1);
+  lookY = clamp(lookY + beat.lookY, -1, 1);
+  headRot += beat.headRot;
+  if (petted && live) {
+    headRot += Math.sin(time * 5) * 3; // happy wiggle
+    bodyY -= Math.abs(Math.sin(time * 4)) * 1.5;
   }
 
-  const lid = Math.max(cur.lid, blinkClosed ? 1 : 0);
-  const mouthOpen = pose.mouth === "talk" ? mouthLevel(time) : cur.mouthOpen;
+  // Landing: a small squash when Orbit arrives after flying.
+  const landing = live && stateSince.current.from === "moving" && state !== "moving" && elapsed < 0.6
+    ? Math.exp(-elapsed * 7) * Math.cos(elapsed * 18) : 0;
+  const squashY = 1 - landing * 0.07;
+  const squashX = 1 + landing * 0.05;
+  bodyY += landing * 2;
+
+  const lid = Math.max(cur.lid, blinker.lid(now, live && ["open", "wide", "focused", "sad"].includes(pose.eyes)));
+  const talking = pose.mouth === "talk";
+  const lipLevel = lip.sample(time, talking);
+  const mouthOpen = talking ? lipLevel : cur.mouthOpen;
+  const mouthRound = talking ? lip.round(time) : 0.5;
+  const pupil = pose.eyes === "wide" || state === "listening" || petted ? 1.12 : 1;
   const listeningGlow = state === "listening" ? clamp(audioLevel, 0, 1) : 0;
   const glow = clamp(cur.glow + listeningGlow * 0.4 + (live ? Math.sin(time * 3) * 0.06 : 0), 0, 1);
   const core = pose.core;
@@ -489,7 +469,7 @@ export const OrbitRig: React.FC<OrbitRigProps> = ({
           </g>
         )}
 
-        <g transform={`translate(0 ${bodyY}) rotate(${bodyRot} 100 180)`}>
+        <g transform={`translate(0 ${bodyY}) rotate(${bodyRot} 100 180) translate(100 214) scale(${squashX} ${squashY}) translate(-100 -214)`}>
           {/* Cape tail flowing behind (drawn first) */}
           <path
             d={`M118 150 C${142 + flutter * 6} ${158 - flutter * 4} ${158 + flutter * 14} ${180 - flutter * 6} ${168 + flutter * 18} ${204 - flutter * 8}
@@ -502,8 +482,12 @@ export const OrbitRig: React.FC<OrbitRigProps> = ({
           />
 
           {/* Hover feet with glowing soles */}
-          {[86, 114].map((x, i) => (
-            <g key={x} transform={`rotate(${cur.feetTuck * (i ? -18 : 18)} ${x} ${feetY})`}>
+          {[86, 114].map((x, i) => {
+            // Hovering feet dangle and sway out of phase; flying feet tuck in and trail behind.
+            const dangle = live ? Math.sin(time * 2.1 + i * 1.3) * 4 * (1 - cur.feetTuck) : 0;
+            const trail = cur.feetTuck * 14;
+            return (
+            <g key={x} transform={`rotate(${cur.feetTuck * (i ? -18 : 18) + dangle + trail} ${x} ${feetY - 6})`}>
               <ellipse cx={x} cy={feetY + 12} rx={13 + cur.thruster * 3} ry={5 + cur.thruster * 5} fill={paint.sole}
                 opacity={0.45 + cur.thruster * 0.55} />
               <path d={`M${x - 10} ${feetY + 2} Q${x - 10} ${feetY - 9} ${x} ${feetY - 9} Q${x + 10} ${feetY - 9} ${x + 10} ${feetY + 2}
@@ -512,7 +496,8 @@ export const OrbitRig: React.FC<OrbitRigProps> = ({
               <ellipse cx={x} cy={feetY + 6} rx={8} ry={2.2} fill="#7DE3FF" opacity={0.6 + cur.thruster * 0.4} />
               <ellipse cx={x - 3} cy={feetY - 4} rx={4} ry={2.2} fill="#FFFFFF" opacity={0.8} />
             </g>
-          ))}
+            );
+          })}
 
           {/* Body: small glossy bean */}
           <g transform={`translate(100 182) scale(1 ${breathe}) translate(-100 -182)`}>
@@ -576,7 +561,7 @@ export const OrbitRig: React.FC<OrbitRigProps> = ({
           {/* Head (pivots at the neck) */}
           <g transform={`rotate(${headRot} ${NECK.x} ${NECK.y}) translate(0 ${cur.headY})`}>
             {/* Antenna */}
-            <g transform={`rotate(${cur.antennaRot + (live ? Math.sin(time * 2.6) * 2 : 0)} 100 34)`}>
+            <g transform={`rotate(${cur.antennaRot + beat.antenna + (live ? Math.sin(time * 2.6) * 2 : 0)} 100 34)`}>
               <path d="M100 34 L100 16" stroke="#D3DAEC" strokeWidth={3.4} strokeLinecap="round" />
               <circle cx={100} cy={11} r={15} fill={`url(#core-${uid})`} opacity={0.35 + glow * 0.5} />
               <circle cx={100} cy={11} r={6.8} fill={`url(#orb-${uid})`} />
@@ -607,13 +592,13 @@ export const OrbitRig: React.FC<OrbitRigProps> = ({
 
             {/* Face (shifts slightly with gaze to suggest a head turn) */}
             <g transform={`translate(${lookX * 4} ${lookY * 2.5})`}>
-              <Eye cx={EYE_L.x} cy={EYE_L.y} shape={pose.eyes} scale={cur.eyeScale} lid={lid} lookX={lookX} lookY={lookY} uid={uid} />
-              <Eye cx={EYE_R.x} cy={EYE_R.y} shape={pose.eyes} scale={cur.eyeScale} lid={lid} lookX={lookX} lookY={lookY} uid={uid} />
+              <Eye cx={EYE_L.x} cy={EYE_L.y} shape={pose.eyes} scale={cur.eyeScale} lid={lid} lookX={lookX} lookY={lookY} pupil={pupil} uid={uid} />
+              <Eye cx={EYE_R.x} cy={EYE_R.y} shape={pose.eyes} scale={cur.eyeScale} lid={lid} lookX={lookX} lookY={lookY} pupil={pupil} uid={uid} />
               <g opacity={pose.blush ? 1 : 0.55}>
                 <ellipse cx={63} cy={106} rx={9} ry={5} fill={`url(#blush-${uid})`} />
                 <ellipse cx={137} cy={106} rx={9} ry={5} fill={`url(#blush-${uid})`} />
               </g>
-              <Mouth shape={pose.mouth} open={mouthOpen} />
+              <Mouth shape={pose.mouth} open={mouthOpen} round={mouthRound} />
             </g>
           </g>
 

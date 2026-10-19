@@ -58,3 +58,43 @@ def test_rag_indexing_and_query():
         headers=AUTH_HEADERS
     )
     assert del_res.status_code == 200
+
+
+def test_product_guides_are_indexed_together_with_named_sources(tmp_path, monkeypatch):
+    """Orbit's product knowledge is every guide in docs/orbit-agent, each chunk attributable to its guide."""
+    from ai_service.app.rag.service import rag_service
+
+    monkeypatch.setattr(settings, "INDEX_DIR", str(tmp_path / "idx"))
+    guides = tmp_path / "guides"
+    guides.mkdir()
+    (guides / "security_guide.md").write_text(
+        "# Security\n\n## Never possible\nDROP, TRUNCATE and ALTER can never run against a connected database.\n")
+    (guides / "automations_guide.md").write_text(
+        "# Automations\n\n## Schedule\nPublication must be at least 15 minutes after generation.\n")
+    paths = sorted(str(p) for p in guides.glob("*.md"))
+    monkeypatch.setattr(rag_service, "_product_doc_paths", lambda: paths)
+
+    total = rag_service.ensure_product_context_indexed()
+    assert total == 2
+
+    res = rag_service.retrieve_for_agent(4242, "can truncate or drop run on my database")
+    product = [c for c in res["chunks"] if c["scope"] == "product"]
+    assert product and product[0]["source_id"].startswith("product:security_guide:")
+    assert product[0]["heading"].startswith("Security")
+
+    # Editing any guide re-indexes; unchanged guides are not re-embedded.
+    version = res["index_version"]
+    assert rag_service.ensure_product_context_indexed() == 2
+    assert rag_service._read_manifest(0)["version"] == version
+    (guides / "automations_guide.md").write_text(
+        "# Automations\n\n## Schedule\nPublication is at least 15 minutes after generation.\n\n## Images\nImage columns get a banner.\n")
+    assert rag_service.ensure_product_context_indexed() == 3
+    assert rag_service._read_manifest(0)["version"] != version
+    assert len(rag_service._read_manifest(0)["sources"]) == 2
+
+
+def test_real_product_guides_exist_and_cover_the_portal():
+    from ai_service.app.rag.service import rag_service
+
+    names = {p.rsplit("/", 1)[-1] for p in rag_service._product_doc_paths()}
+    assert {"product_context_rag.md", "automations_guide.md", "security_guide.md", "portal_tour.md"} <= names

@@ -117,9 +117,10 @@ class SchemaLinker
                     continue; // Secrets never sent to LLM prompt
                 }
                 $cleanCols[$cName] = [
-                    'type' => $cMeta['type'] ?? $cMeta['data_type'] ?? 'varchar',
+                    'type' => $cMeta['raw_type'] ?? $cMeta['type'] ?? $cMeta['data_type'] ?? 'varchar',
+                    'values' => !empty($cMeta['enum']) ? array_values($cMeta['enum']) : null,
                     'nullable' => $cMeta['nullable'] ?? $cMeta['is_nullable'] ?? true,
-                    'is_primary' => $cMeta['is_primary'] ?? false,
+                    'is_primary' => ($cMeta['is_primary'] ?? false) || in_array($cName, (array) ($tMeta['primary_key'] ?? []), true),
                     'temporal_role' => $cMeta['temporal_role'] ?? null,
                     'is_pii' => ColumnClassifier::isPii($cName),
                 ];
@@ -140,8 +141,10 @@ class SchemaLinker
             }
         }
 
-        // 4. Value Grounding lookup (e.g. "Rajasthan" -> "RJ")
-        $groundedValues = $this->groundValues($connection, $tablesSlice, $utterance);
+        // 4. Value grounding: real stored values of short categorical columns, so the model can map the
+        //    user's words to them (e.g. "Rajasthan" -> 'RJ', "refund" -> 'refunded').
+        $this->attachCategoryValues($connection, $tablesSlice, $allTables);
+        $groundedValues = [];
 
         return [
             'tables' => $tablesSlice,
@@ -150,36 +153,47 @@ class SchemaLinker
         ];
     }
 
+    /** At most this many columns are sampled per question, each from a bounded row sample. */
+    private const MAX_SAMPLED_COLUMNS = 40;
+    private const MAX_CATEGORY_VALUES = 25;
+
     /**
-     * Map natural language value expressions to actual distinct stored column values.
+     * Attach the distinct stored values of short text columns that look categorical (few distinct values
+     * in a bounded sample). Read-only and time-limited; personal, secret and label columns are skipped.
+     * Best effort: on any error the slice is returned without values.
      */
-    protected function groundValues(DbConnection $connection, array $tablesSlice, string $utterance): array
+    protected function attachCategoryValues(DbConnection $connection, array &$tablesSlice, array $allTables): void
     {
-        $grounded = [];
-        $u = strtolower($utterance);
-
-        // Region / State grounding check
-        if (str_contains($u, 'rajasthan')) {
-            $grounded['rajasthan'] = [
-                'target_column' => 'region',
-                'matched_value' => 'RJ',
-                'confidence' => 0.95,
-                'column_candidates' => ['region', 'rgn_cd', 'state'],
-            ];
-        }
-
-        // Status grounding check
-        if (str_contains($u, 'active') || str_contains($u, 'inactive') || str_contains($u, 'pending')) {
-            foreach ($tablesSlice as $tName => $tData) {
-                if (isset($tData['columns']['status'])) {
-                    if (str_contains($u, 'active')) $grounded['active'] = ['target_column' => 'status', 'matched_value' => 'active'];
-                    if (str_contains($u, 'pending')) $grounded['pending'] = ['target_column' => 'status', 'matched_value' => 'pending'];
-                    if (str_contains($u, 'inactive')) $grounded['inactive'] = ['target_column' => 'status', 'matched_value' => 'inactive'];
+        $candidates = [];
+        foreach ($tablesSlice as $t => $tData) {
+            foreach ($tData['columns'] as $c => $cData) {
+                $meta = $allTables[$t]['columns'][$c] ?? [];
+                if (!empty($cData['values']) || ($meta['family'] ?? '') !== 'string' || !empty($meta['is_label'])
+                    || ColumnClassifier::isPii($c) || ColumnClassifier::isSecret($c) || (int) ($meta['max_length'] ?? 255) > 64) {
+                    continue;
                 }
+                $candidates[] = [$t, $c];
             }
         }
+        if (!$candidates) {
+            return;
+        }
 
-        return $grounded;
+        try {
+            $this->targetConnector->read($connection, function (PDO $pdo, $dialect) use (&$tablesSlice, $candidates) {
+                foreach (array_slice($candidates, 0, self::MAX_SAMPLED_COLUMNS) as [$t, $c]) {
+                    $qc = $dialect->quoteIdentifier($c);
+                    $qt = $dialect->quoteIdentifier($t);
+                    $vals = $pdo->query("SELECT DISTINCT v FROM (SELECT {$qc} AS v FROM {$qt} WHERE {$qc} IS NOT NULL LIMIT 5000) s LIMIT "
+                        . (self::MAX_CATEGORY_VALUES + 1))->fetchAll(PDO::FETCH_COLUMN);
+                    if ($vals && count($vals) <= self::MAX_CATEGORY_VALUES) {
+                        $tablesSlice[$t]['columns'][$c]['values'] = array_map(fn ($v) => mb_substr((string) $v, 0, 40), $vals);
+                    }
+                }
+            }, 3000);
+        } catch (\Throwable) {
+            // Grounding only improves the query; the question is still answered without it.
+        }
     }
 
     private function matchesSynonym(string $subject, array $words): bool

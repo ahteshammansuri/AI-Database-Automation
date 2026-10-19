@@ -96,7 +96,7 @@ export const LandingPage: React.FC = () => {
       summary: "Extracts grounded domain knowledge from uploaded Markdown, TXT, or PDF documents via local FAISS vectors and publishes FAQs.",
       highlight: "100% grounded in your uploaded documents. No hallucinated business rules.",
       features: [
-        "Local vector embeddings (SentenceTransformers) indexed in private FAISS",
+        "Local vector embeddings (Ollama nomic-embed-text) indexed in private FAISS",
         "Extracts real user questions and generates validated answers",
         "Atomic updates to support_faqs and help_articles tables",
         "Auditable source chunk references stored alongside every generated record",
@@ -823,7 +823,7 @@ export const LandingPage: React.FC = () => {
                 <span>2. Python AI & RAG Engine</span>
               </div>
               <p className="text-xs text-slate-300 leading-relaxed">
-                Dedicated FastAPI microservice providing local Ollama integration, SentenceTransformer embeddings, FAISS vector indexing, and structured Pydantic JSON generation.
+                Dedicated FastAPI microservice providing local Ollama integration, local embeddings (nomic-embed-text), FAISS vector indexing, and structured Pydantic JSON generation.
               </p>
               <div className="p-3 bg-slate-900/80 rounded-xl text-[11px] font-mono text-violet-300 space-y-1 border border-slate-800">
                 <div>• Local Ollama / Hybrid Cloud Adapters</div>

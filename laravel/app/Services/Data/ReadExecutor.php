@@ -60,6 +60,7 @@ class ReadExecutor
                 'sql' => $sql,
                 'row_count' => count($maskedRows),
                 'execution_time_ms' => $elapsedMs,
+                'pii_revealed' => $revealPii,
             ]);
 
             return [

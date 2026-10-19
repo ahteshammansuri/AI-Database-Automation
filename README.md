@@ -260,7 +260,8 @@ Orbit is the articulated companion in the bottom-right corner of the signed-in p
 
 1. Every request you speak (or type) goes to **your configured model**, together with live context: current page and form, your connections, the current task, recent conversation, and relevant passages from the product guide and your knowledge base.
 2. The model picks a **real registered tool**. Laravel checks it (ownership, arguments, confirmation policy), runs it, verifies the result, and sends the result back to the model, which decides the next step.
-3. Orbit **visibly operates the page**: it flies to the real button or field, fills controlled form state, and presses controls. It then speaks only what actually happened.
+3. Orbit **visibly operates the page**: it flies to the real button or field, types values visibly through the page's own inputs, picks options and presses controls. It then speaks only what actually happened.
+4. Product knowledge comes from retrieval (embeddings + FAISS) over the guides in [`docs/orbit-agent/`](docs/orbit-agent/) (product overview, automations, security, portal tour) and your own knowledge base, not from hard-coded answers.
 
 How it is built: [`docs/orbit-agent/ARCHITECTURE.md`](docs/orbit-agent/ARCHITECTURE.md). The pre-upgrade audit: [`docs/orbit-agent/CURRENT_STATE_AUDIT.md`](docs/orbit-agent/CURRENT_STATE_AUDIT.md).
 
@@ -275,18 +276,23 @@ On CPU-only machines a single model decision can take **20–90 s**, and longer 
 
 ### Using Orbit
 - **Talk:** hold Orbit (or the mic button) and speak; release to send. Or tap to start and stop. `Ctrl/Cmd+J` toggles listening. Speaking again interrupts Orbit's reply.
-- **It does the work on screen.** Ask "connect my database", "create a daily blog automation", "approve the pending draft" or "how do I add an OpenAI key?". Orbit goes to the page, opens the form, fills what it knows, asks only for what's missing, picks options from the real dropdowns, and presses the real buttons, while you watch. Changes that matter (deleting, publishing, running) wait for your OK.
+- **It does the work on screen.** Ask "connect my database", "create a daily blog automation", "approve the pending draft" or "how do I add an OpenAI key?". Orbit goes to the page, opens the form, fills what it knows, asks only for what's missing, picks options from the real dropdowns, and presses the real buttons, while you watch. One long request is enough: Orbit keeps every detail you gave (names, table, topic, dates, times, timezone, emails) and fills multi-step forms such as the five-step Automation Builder step by step, including how each column is filled.
+- **Validation:** when a field is rejected, Orbit says which field and why, and asks for a correction.
+- **Confirmations:** changes that matter (running, approving, publishing, editing records) wait for your OK. Removals and cancellations (a connection, an automation, a knowledge document, a run) are confirmed **only with the Confirm button in Orbit's panel**, never by a typed or spoken "yes". After you confirm, Orbit presses the page's own button and then clicks the page's own confirmation popup in front of you.
+- **Speech bubble:** while the panel is closed, a small bubble next to Orbit shows what it is doing, the question it is waiting on, a pending confirmation ("Open to confirm"), or a short version of its answer.
+- **Questions about your data, in any language:** "Aisa kaun sa customer hai jismein sabse zyada order kiye ho?" or "how many orders were refunded this month?". Orbit writes one read-only query with your model, a safety gate checks it against your live schema (no secret columns, no writes, forced limits), and the answer comes from the real rows — ties are named, emails and phones stay masked. If it cannot answer safely it says why instead of guessing.
+- **Questions and tours:** ask about security, your audit log ("did I ever delete a connection?"), runs, approvals, providers or knowledge documents; Orbit answers from real tool results and the product guides. Ask "show me around" for a guided tour from page to page.
 - **Passwords and API keys:** Orbit points at the form's own password/key box and you type it there yourself. Press Enter or "Continue with Orbit". The value goes only from that form to the portal's API; it never reaches the AI model, the chat or the logs.
 - **Type instead:** a small toggle in the panel, for accessibility or when voice is unavailable.
 - **Stop / Pause / Resume** control a running task. No new step starts after Stop; anything already committed is reported as committed.
 - **Memory:** Orbit remembers what you said earlier in the conversation, such as the connection name and earlier answers.
-- **Character:** Orbit is a real-time 3D character (Three.js) that reacts to what is really happening. With no WebGL it falls back to a vector version.
+- **Character:** Orbit is an articulated vector character whose poses follow what is really happening (flying to a target, tapping, typing, thinking, celebrating only after a verified result). At rest it blinks, glances around, tilts its head and reacts when you rest the pointer on it. A 3D renderer exists as an option (`renderer="3d"`).
 - **Voice privacy:** browser speech recognition in Chrome/Edge may send audio to the browser vendor. Orbit tells you this the first time you use it.
 
 ### Required background worker
-Orbit's turns run on the `agent` queue; `./run_all.sh` starts two dedicated workers (restart it after updating):
+Orbit's turns run on a dedicated `agent` queue connection (long multi-step turns up to 25 minutes); `./run_all.sh` starts the workers (restart it after updating):
 ```bash
-php artisan queue:work --queue=agent --sleep=1 --tries=1 --timeout=700
+php artisan queue:work agent --queue=agent --sleep=1 --tries=1 --timeout=1600
 ```
 
 ---

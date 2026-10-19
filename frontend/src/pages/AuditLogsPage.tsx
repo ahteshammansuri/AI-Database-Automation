@@ -3,6 +3,7 @@ import React, { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { FileText, RefreshCw, ShieldCheck, Search, Filter, Eye, X } from "lucide-react";
 import { api } from "../services/api";
+import { orbitTargets } from "../services/orbitTargets";
 
 export const AuditLogsPage: React.FC = () => {
   const [logs, setLogs] = useState<any[]>([]);
@@ -18,6 +19,18 @@ export const AuditLogsPage: React.FC = () => {
         get: () => filterAction,
         set: (v) => { const f = String(v).toUpperCase(); if (!["ALL", "CONNECTION", "SCHEMA", "AUTOMATION", "APPROVAL"].includes(f)) return "Use ALL, CONNECTION, SCHEMA, AUTOMATION or APPROVAL."; setFilterAction(f); return null; },
         options: () => ["ALL", "CONNECTION", "SCHEMA", "AUTOMATION", "APPROVAL"].map((v) => ({ value: v, label: v })),
+      },
+    },
+    actions: {
+      refresh: { run: async () => { await fetchLogs(); return { success: true, message: "Audit log reloaded." }; } },
+      inspect: {
+        target: (row) => `audit.row.${row}`,
+        run: (row) => {
+          const log = logs.find((l: any) => String(l.id) === String(row));
+          if (!log) return { success: false, message: `Entry ${row} is not in the loaded list; use get_audit_log_entry for older entries.` };
+          setSelectedMeta(log.metadata);
+          return { success: true, message: "Entry details opened.", data: { action: log.action, resource: log.resource_type, resource_id: log.resource_id, at: log.created_at } };
+        },
       },
     },
   }));
@@ -131,7 +144,11 @@ export const AuditLogsPage: React.FC = () => {
                 </tr>
               ) : (
                 filteredLogs.map((log) => (
-                  <tr key={log.id} className="hover:bg-slate-50/60 transition group">
+                  <tr
+                    key={log.id}
+                    ref={(el) => (el ? orbitTargets.register(`audit.row.${log.id}`, el) : orbitTargets.unregister(`audit.row.${log.id}`))}
+                    className="hover:bg-slate-50/60 transition group"
+                  >
                     <td className="px-5 py-3.5 whitespace-nowrap text-xs text-slate-500 font-mono">
                       {new Date(log.created_at).toLocaleString()}
                     </td>
@@ -147,7 +164,7 @@ export const AuditLogsPage: React.FC = () => {
                       {log.resource_id || "—"}
                     </td>
                     <td className="px-5 py-3.5 whitespace-nowrap text-xs text-slate-500 font-mono">
-                      {log.ip_address || "127.0.0.1"}
+                      {log.ip_address || "—"}
                     </td>
                     <td className="px-5 py-3.5 text-right">
                       {log.metadata ? (

@@ -90,14 +90,15 @@ class DocIngestionService:
     def ingest_default_corpus(self) -> List[Dict[str, Any]]:
         """
         Ingests the standard platform corpus:
-        - docs/orbit-agent/product_context_rag.md
+        - docs/orbit-agent/*.md (product overview, automations, security, portal tour)
         - docs/SECURITY_MODEL.md
         - docs/DECISIONS.md
         - prompts/*.txt, prompts/*.md
         """
         results = []
         files_to_ingest = [
-            (self.root_dir / "docs" / "orbit-agent" / "product_context_rag.md", 0, "product_docs"),
+            (p, 0, "product_docs") for p in sorted((self.root_dir / "docs" / "orbit-agent").glob("*.md"))
+        ] + [
             (self.root_dir / "docs" / "SECURITY_MODEL.md", 0, "product_docs"),
             (self.root_dir / "docs" / "DECISIONS.md", 0, "product_docs"),
             (self.root_dir / "docs" / "tasks" / "2026-10-15_nl_data_agent.md", 0, "product_docs"),

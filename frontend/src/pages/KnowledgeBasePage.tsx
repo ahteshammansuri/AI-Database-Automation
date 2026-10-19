@@ -19,6 +19,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { useOrbitSurface } from "../hooks/useOrbitSurface";
+import { useRefreshAfterOrbit } from "../hooks/useRefreshAfterOrbit";
 import { useOrbitTarget } from "../hooks/useOrbitTarget";
 import { orbitTargets } from "../services/orbitTargets";
 import { actionTarget, fieldTarget } from "../services/orbitSurfaces";
@@ -29,7 +30,7 @@ import { useToast } from "../context/ToastContext";
 import { pageStateService } from "../services/pageStateService";
 
 export const KnowledgeBasePage: React.FC = () => {
-  const { toast, showAlert } = useToast();
+  const { toast, confirm } = useToast();
   const [docs, setDocs] = useState<KnowledgeDocument[]>([]);
   const [showRagExplainer, setShowRagExplainer] = useState(true);
   const [loading, setLoading] = useState(true);
@@ -70,6 +71,8 @@ export const KnowledgeBasePage: React.FC = () => {
   const searchRef = useOrbitTarget<HTMLInputElement>(fieldTarget("knowledge.page", "search"));
   const dropRef = useOrbitTarget<HTMLDivElement>(actionTarget("knowledge.page", "choose_file"));
 
+  useRefreshAfterOrbit(["remove_knowledge_document"], () => { loadDocs(); });
+
   useOrbitSurface("knowledge.page", () => ({
     target: actionTarget("knowledge.page", "choose_file"),
     describe: () => ({
@@ -82,6 +85,7 @@ export const KnowledgeBasePage: React.FC = () => {
       search: { get: () => searchQuery, set: (v) => { setSearchQuery(String(v ?? "")); return null; } },
     },
     actions: {
+      refresh: { run: async () => { await loadDocs(); return { success: true, message: "Document list reloaded." }; } },
       choose_file: { run: () => { fileInputRef.current?.click(); return { success: true, message: "File picker opened; waiting for the user to choose a .md, .txt or .pdf file." }; } },
       upload: {
         enabled: () => !!uploadFile && !isUploading,
@@ -121,6 +125,7 @@ export const KnowledgeBasePage: React.FC = () => {
         target: (row) => `knowledge.row.${row}`,
         run: async (row) => {
           if (!docs.find((d: any) => String(d.id) === String(row))) return { success: false, message: `No document ${row} in the list.` };
+          if (!(await askRemove(Number(row)))) return { success: false, message: "Removal was not confirmed in the popup; nothing changed." };
           try {
             await api.deleteKnowledge(Number(row));
             loadDocs();
@@ -176,24 +181,26 @@ export const KnowledgeBasePage: React.FC = () => {
     }
   };
 
-  const handleDelete = (id: number) => {
-    showAlert({
+  // Shared by the Remove button and Orbit's remove action, so both see the same popup.
+  function askRemove(id: number) {
+    const title = docs.find((d: any) => d.id === id)?.title;
+    return confirm({
       title: "Remove Knowledge Document?",
-      text: "This document and its vector embeddings will be permanently removed from your FAISS index.",
-      icon: "warning",
-      showCancelButton: true,
+      text: `${title ? `"${title}"` : "This document"} and its vector embeddings will be permanently removed from your knowledge index.`,
       confirmButtonText: "Yes, Remove",
       cancelButtonText: "Cancel",
-      onConfirm: async () => {
-        try {
-          await api.deleteKnowledge(id);
-          toast.success("Document Removed", "Knowledge document removed from FAISS index.");
-          loadDocs();
-        } catch (err: any) {
-          toast.error("Delete Failed", err.message);
-        }
-      },
     });
+  }
+
+  const handleDelete = async (id: number) => {
+    if (!(await askRemove(id))) return;
+    try {
+      await api.deleteKnowledge(id);
+      toast.success("Document Removed", "Knowledge document removed from your index.");
+      loadDocs();
+    } catch (err: any) {
+      toast.error("Delete Failed", err.message);
+    }
   };
 
   const handleTestSearch = async () => {
@@ -488,7 +495,7 @@ export const KnowledgeBasePage: React.FC = () => {
           </div>
 
           <div className="pt-4 mt-4 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500">
-            <span>Local vector embeddings powered by sentence-transformers</span>
+            <span>Local vector embeddings via Ollama (nomic-embed-text)</span>
             <span className="font-mono text-emerald-600 font-medium">100% On-Premise Vector Privacy</span>
           </div>
         </div>
@@ -539,7 +546,7 @@ export const KnowledgeBasePage: React.FC = () => {
                   <Sparkles className="w-4 h-4 text-indigo-600" />
                   Understanding RAG Semantic Retrieval & Diagnostics
                 </span>
-                <span className="text-[10px] text-indigo-600 font-mono font-semibold">Local FAISS + sentence-transformers</span>
+                <span className="text-[10px] text-indigo-600 font-mono font-semibold">Local FAISS + nomic-embed-text</span>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-[11px] text-slate-600">

@@ -32,20 +32,23 @@ import { api } from "./services/api";
 orbitSurfaces.setLoader(() => api.getAgentSurfaces());
 import { useNavigate } from "react-router-dom";
 
-/** Portal routes Orbit may navigate to (mirrors the server allowlist). */
-const ORBIT_ROUTES = new Set([
-  "/dashboard", "/connections", "/explorer", "/automations", "/automations/new", "/approvals",
-  "/executions", "/knowledge", "/ai-providers", "/audit-logs", "/manual-schedule",
-]);
+/**
+ * Portal routes Orbit may navigate to: the pages of the server's surface catalog (the server
+ * already refuses any other route). One source of truth, so a new page cannot be forgotten here.
+ */
+async function orbitRoutes(): Promise<Set<string>> {
+  const catalog = orbitSurfaces.getCatalog() ?? (await orbitSurfaces.loadCatalog());
+  return new Set((catalog?.pages ?? []).map((p) => p.route));
+}
 
 const NavigationBridge: React.FC = () => {
   const navigate = useNavigate();
 
   React.useEffect(() => {
     if (localStorage.getItem("auth_token")) void orbitSurfaces.loadCatalog();
-    const offNav = actionBridge.on("navigation.navigate", (payload: { route?: string }) => {
+    const offNav = actionBridge.on("navigation.navigate", async (payload: { route?: string }) => {
       const route = payload?.route || "";
-      if (!ORBIT_ROUTES.has(route)) return { status: "error", error: `Route '${route}' is not registered.` };
+      if (!(await orbitRoutes()).has(route)) return { status: "error", error: `Route '${route}' is not a portal page.` };
       navigate(route);
       return { status: "ok" };
     });

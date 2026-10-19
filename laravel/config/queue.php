@@ -39,9 +39,20 @@ return [
             'connection' => env('DB_QUEUE_CONNECTION'),
             'table' => env('DB_QUEUE_TABLE', 'jobs'),
             'queue' => env('DB_QUEUE', 'default'),
-            // Must exceed the longest worker timeout (Orbit agent worker: 700s) so a running
-            // job is never handed to a second worker.
+            // Must exceed the default worker's --timeout (120s; job-level timeouts up to 690s)
+            // so a running job is never handed to a second worker. Orbit uses the "agent" connection.
             'retry_after' => (int) env('DB_QUEUE_RETRY_AFTER', 720),
+            'after_commit' => false,
+        ],
+
+        // Orbit agent turns: long multi-step work, so its own retry_after (above the 1600s worker
+        // timeout) without slowing redelivery for automation jobs on the default connection.
+        'agent' => [
+            'driver' => 'database',
+            'connection' => env('DB_QUEUE_CONNECTION'),
+            'table' => env('DB_QUEUE_TABLE', 'jobs'),
+            'queue' => 'agent',
+            'retry_after' => (int) env('AGENT_QUEUE_RETRY_AFTER', 1620),
             'after_commit' => false,
         ],
 

@@ -44,6 +44,10 @@
     {
       "route": "/audit-logs",
       "title": "Audit Logs"
+    },
+    {
+      "route": "/security",
+      "title": "Security & Guardrails"
     }
   ],
   "surfaces": [
@@ -160,7 +164,8 @@
           "label": "Remove this connection profile (does not touch the database)",
           "row": true,
           "consequential": true,
-          "timeout_s": 30
+          "timeout_s": 30,
+          "destructive": true
         }
       ]
     },
@@ -234,7 +239,8 @@
           "label": "Delete this automation",
           "row": true,
           "consequential": true,
-          "timeout_s": 20
+          "timeout_s": 20,
+          "destructive": true
         },
         {
           "id": "new",
@@ -314,9 +320,31 @@
       "id": "builder.mappings",
       "route": "/automations/new",
       "title": "Automation builder, step 2: field mappings",
-      "purpose": "Each column of the target table shows how it is filled (AI, fixed value, linked record, image, slug, publication time, empty or database default) with a plain-English explanation. Safe defaults are pre-selected from the live schema. Then Next.",
+      "purpose": "Each column of the target table and how it is filled. read_screen lists every column with its current choice (how), the allowed choices, what it means in plain English (means) and any problem. Change a column with choose_option on how.<column> (AI, AI_CREATE = AI picks a linked record and creates it if new, AI_REUSE = only existing linked records, FIXED, FIXED_REL = one fixed linked record, SLUG, NOW = publication time, EMPTY, DEFAULT). Set a fixed value or linked record with value.<column> and extra AI guidance (for example which category to prefer) with instructions.<column>. Protected columns cannot be set. Then Next.",
       "openable": false,
-      "fields": [],
+      "fields": [
+        {
+          "name": "how.*",
+          "label": "How a column is filled (how.<column>)",
+          "type": "select",
+          "required": false,
+          "dynamic": true
+        },
+        {
+          "name": "value.*",
+          "label": "Fixed value or linked record for a column (value.<column>)",
+          "type": "text",
+          "required": false,
+          "dynamic": true
+        },
+        {
+          "name": "instructions.*",
+          "label": "Extra AI instructions for one AI-filled column (instructions.<column>)",
+          "type": "textarea",
+          "required": false,
+          "dynamic": true
+        }
+      ],
       "actions": [
         {
           "id": "back",
@@ -360,6 +388,51 @@
         {
           "name": "tone",
           "label": "Editorial tone",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "length",
+          "label": "Body length",
+          "type": "select",
+          "required": false,
+          "enum": [
+            "short",
+            "medium",
+            "long"
+          ]
+        },
+        {
+          "name": "content_format",
+          "label": "Body format",
+          "type": "select",
+          "required": false,
+          "enum": [
+            "markdown",
+            "html"
+          ]
+        },
+        {
+          "name": "image_provider",
+          "label": "Image source for image columns",
+          "type": "select",
+          "required": false,
+          "enum": [
+            "auto",
+            "openai",
+            "gemini",
+            "local"
+          ]
+        },
+        {
+          "name": "image_style",
+          "label": "Optional image style",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "documents",
+          "label": "Knowledge documents to ground the content (comma-separated titles; empty for none)",
           "type": "text",
           "required": false
         }
@@ -448,6 +521,17 @@
           "label": "Timezone (IANA, e.g. Asia/Kolkata)",
           "type": "text",
           "required": true
+        },
+        {
+          "name": "timeout_policy",
+          "label": "If nobody approves by the publication time",
+          "type": "select",
+          "required": false,
+          "enum": [
+            "KEEP_DRAFT",
+            "AUTO_PUBLISH_LATEST",
+            "CANCEL"
+          ]
         }
       ],
       "actions": [
@@ -575,6 +659,12 @@
       ],
       "actions": [
         {
+          "id": "refresh",
+          "label": "Reload the approval queue",
+          "consequential": false,
+          "timeout_s": 20
+        },
+        {
           "id": "open",
           "label": "Open this draft for review",
           "row": true,
@@ -583,7 +673,15 @@
         },
         {
           "id": "approve",
-          "label": "Approve this draft and publish it now",
+          "label": "Approve this draft for its scheduled publication time (publishes right away if that time has passed)",
+          "row": true,
+          "consequential": true,
+          "timeout_s": 45,
+          "verifies": "ContentVersion"
+        },
+        {
+          "id": "approve_publish_now",
+          "label": "Approve this draft and publish it immediately",
           "row": true,
           "consequential": true,
           "timeout_s": 45,
@@ -624,6 +722,12 @@
       ],
       "actions": [
         {
+          "id": "refresh",
+          "label": "Reload the run history",
+          "consequential": false,
+          "timeout_s": 20
+        },
+        {
           "id": "view",
           "label": "Open run details",
           "row": true,
@@ -644,7 +748,8 @@
           "row": true,
           "consequential": true,
           "timeout_s": 30,
-          "verifies": "AutomationExecution"
+          "verifies": "AutomationExecution",
+          "destructive": true
         },
         {
           "id": "pause",
@@ -700,6 +805,12 @@
       ],
       "actions": [
         {
+          "id": "refresh",
+          "label": "Reload the document list",
+          "consequential": false,
+          "timeout_s": 20
+        },
+        {
           "id": "choose_file",
           "label": "Open the file picker for the user",
           "consequential": false,
@@ -723,7 +834,8 @@
           "label": "Remove this document",
           "row": true,
           "consequential": true,
-          "timeout_s": 30
+          "timeout_s": 30,
+          "destructive": true
         }
       ]
     },
@@ -861,7 +973,7 @@
       "id": "audit.page",
       "route": "/audit-logs",
       "title": "Audit logs",
-      "purpose": "Security-relevant actions in this workspace.",
+      "purpose": "Security-relevant actions in this workspace (latest entries). Filter by category, open an entry with inspect. For counts, date ranges or older entries use the list_audit_logs and get_audit_log_entry tools.",
       "openable": false,
       "fields": [
         {
@@ -878,6 +990,29 @@
           ]
         }
       ],
+      "actions": [
+        {
+          "id": "refresh",
+          "label": "Reload the audit log",
+          "consequential": false,
+          "timeout_s": 20
+        },
+        {
+          "id": "inspect",
+          "label": "Open one entry's details (row = entry id)",
+          "row": true,
+          "consequential": false,
+          "timeout_s": 10
+        }
+      ]
+    },
+    {
+      "id": "security.page",
+      "route": "/security",
+      "title": "Security & Guardrails",
+      "purpose": "What the backend enforces for connected databases: never-allowed operations, how reads, automations, data changes and row deletes are guarded, sensitive tables and columns, secret storage, approval links and Orbit's own limits. read_screen returns the exact rules shown.",
+      "openable": false,
+      "fields": [],
       "actions": []
     }
   ]

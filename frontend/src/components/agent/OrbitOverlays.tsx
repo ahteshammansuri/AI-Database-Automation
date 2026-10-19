@@ -1,23 +1,46 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { CornerDownLeft } from "lucide-react";
+import { CornerDownLeft, X } from "lucide-react";
+import { useAssistant } from "../../context/AssistantContext";
+import { BubbleKind, pickBubble } from "../../services/orbitBubble";
 import { orbitStage } from "../../services/orbitStage";
 import { orbitTargets } from "../../services/orbitTargets";
 import { api } from "../../services/api";
 import { pageStateService } from "../../services/pageStateService";
 
-/** Caption bubble shown above Orbit while it guides the user (show_me). */
-export const OrbitCaption: React.FC = () => {
-  const [text, setText] = useState<string | null>(null);
+const KIND_STYLE: Record<BubbleKind, { label?: string; ring: string; dot?: string }> = {
+  caption: { ring: "border-indigo-100" },
+  confirm: { label: "Needs your OK", ring: "border-amber-300", dot: "bg-amber-500" },
+  question: { label: "Your turn", ring: "border-cyan-300", dot: "bg-cyan-500" },
+  working: { ring: "border-indigo-100", dot: "bg-indigo-500 animate-pulse" },
+  reply: { ring: "border-emerald-200" },
+  error: { ring: "border-rose-200", dot: "bg-rose-500" },
+};
+
+/**
+ * Small speech bubble beside Orbit while its panel is closed: what it is doing right now, the question
+ * it is waiting on, a pending confirmation, or a short version of its reply. Every word comes from the
+ * server (model speech, narration, step labels); nothing here is canned or invented.
+ */
+export const OrbitSpeechBubble: React.FC<{ align: "left" | "right"; below: boolean }> = ({ align, below }) => {
+  const {
+    isOpen, setIsOpen, activeTask, speech, narration, toolActivity, turnStage, awaitingConfirmation, queueStatus,
+  } = useAssistant();
+  const [caption, setCaption] = useState<{ key: string; text: string } | null>(null);
+  const [dismissed, setDismissed] = useState<Set<string>>(() => new Set());
+  const [expired, setExpired] = useState<Set<string>>(() => new Set());
+  const captionSeq = useRef(0);
+
   useEffect(() => {
-    let timer: any;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const off = orbitStage.subscribe((e) => {
       if (e.type === "caption") {
-        setText(e.text);
+        setCaption({ key: `caption:${++captionSeq.current}`, text: e.text });
         clearTimeout(timer);
-        timer = setTimeout(() => setText(null), 7000);
+        // Clear (not just hide) so lower-priority messages such as current work show again.
+        timer = setTimeout(() => setCaption(null), 7000);
       } else if (e.type === "return") {
-        setText(null);
+        setCaption(null);
       }
     });
     return () => {
@@ -25,17 +48,70 @@ export const OrbitCaption: React.FC = () => {
       clearTimeout(timer);
     };
   }, []);
+
+  const bubble = pickBubble({
+    caption,
+    taskId: activeTask?.id ?? null,
+    status: activeTask?.status ?? null,
+    awaitingConfirmationTool: awaitingConfirmation?.tool ?? null,
+    speech: speech ? { messageId: speech.messageId, text: speech.text, isServiceError: speech.isServiceError } : null,
+    narration,
+    runningStep: toolActivity?.status === "running" ? toolActivity.label : null,
+    queue: turnStage === "QUEUED" ? queueStatus : null,
+  });
+
+  const ttlKey = bubble?.ttlMs ? bubble.key : null;
+  const ttlMs = bubble?.ttlMs;
+  useEffect(() => {
+    if (!ttlKey || !ttlMs) return;
+    const t = setTimeout(() => setExpired((prev) => new Set(prev).add(ttlKey)), ttlMs);
+    return () => clearTimeout(t);
+  }, [ttlKey, ttlMs]);
+
+  const visible = bubble && !isOpen && !dismissed.has(bubble.key) && !expired.has(bubble.key) ? bubble : null;
+  const style = visible ? KIND_STYLE[visible.kind] : null;
+
   return (
     <AnimatePresence>
-      {text && (
+      {visible && style && (
         <motion.div
-          initial={{ opacity: 0, y: 6, scale: 0.95 }}
+          key={visible.kind}
+          initial={{ opacity: 0, y: below ? -6 : 6, scale: 0.95 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}
-          exit={{ opacity: 0, y: 6, scale: 0.95 }}
+          exit={{ opacity: 0, y: below ? -6 : 6, scale: 0.95 }}
+          transition={{ duration: 0.18 }}
           role="status"
-          className="absolute bottom-full mb-2 right-0 w-56 bg-white text-slate-800 text-[11px] leading-snug rounded-2xl rounded-br-sm px-3 py-2 shadow-xl border border-indigo-100"
+          aria-live="polite"
+          className={`absolute ${below ? "top-full mt-2" : "bottom-full mb-2"} ${align === "right" ? "right-0" : "left-0"} w-60 max-w-[calc(100vw-24px)] bg-white text-slate-800 text-[11px] leading-snug rounded-2xl ${
+            below ? (align === "right" ? "rounded-tr-sm" : "rounded-tl-sm") : (align === "right" ? "rounded-br-sm" : "rounded-bl-sm")
+          } px-3 py-2 shadow-xl border ${style.ring}`}
         >
-          {text}
+          <div className="flex items-start gap-2">
+            {style.dot && <span className={`mt-1 w-1.5 h-1.5 rounded-full shrink-0 ${style.dot}`} />}
+            <div className="flex-1 min-w-0">
+              {style.label && <div className="text-[10px] font-bold uppercase tracking-wide text-slate-500 mb-0.5">{style.label}</div>}
+              <p className="break-words">{visible.text}</p>
+              {visible.action && (
+                <button
+                  type="button"
+                  onClick={() => setIsOpen(true)}
+                  className={`mt-1.5 px-2.5 py-1 rounded-full text-[10px] font-semibold ${
+                    visible.kind === "confirm" ? "bg-amber-500 text-white hover:bg-amber-600" : "bg-indigo-50 text-indigo-700 hover:bg-indigo-100"
+                  }`}
+                >
+                  {visible.action}
+                </button>
+              )}
+            </div>
+            <button
+              type="button"
+              aria-label="Hide this message"
+              onClick={() => setDismissed((prev) => new Set(prev).add(visible.key))}
+              className="-mr-1 -mt-0.5 p-0.5 rounded text-slate-400 hover:text-slate-700"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          </div>
         </motion.div>
       )}
     </AnimatePresence>

@@ -21,6 +21,12 @@ class ColumnClassifier
         '/(^|_)ssn($|_)/i',
         '/aadhaa?r/i',
         '/(^|_)pan($|_|no|num)/i',
+        // One-time, verification, reset and recovery codes; two-factor secrets.
+        '/(^|_)otp($|_)/i',
+        '/verifi\w*code/i',
+        '/(reset|recovery|backup|activation|confirmation|security)[_-]?(code|answer)/i',
+        '/two[_-]?factor|(^|_)(2fa|mfa)($|_)/i',
+        '/(^|_)pin($|_)/i',
     ];
 
     private const PII_PATTERNS = [

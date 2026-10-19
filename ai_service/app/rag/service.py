@@ -133,20 +133,17 @@ class RAGService:
     # Global product knowledge (partition user_0), versioned by content hash
     # ------------------------------------------------------------------
 
-    PRODUCT_DOC_ID = 999999
-    PRODUCT_DOC_CANDIDATES = [
-        "docs/orbit-agent/product_context_rag.md",
-        "docs/agentic-upgrade/PRODUCT_CONTEXT_RAG.md",
-    ]
+    PRODUCT_DOC_BASE_ID = 999000
+    PRODUCT_DOC_DIR = "docs/orbit-agent"
 
-    def _product_doc_path(self) -> Optional[str]:
+    def _product_doc_paths(self) -> List[str]:
+        """Every Markdown guide in docs/orbit-agent (product overview, automations, security, tour)."""
         repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
-        for rel in self.PRODUCT_DOC_CANDIDATES:
-            for base in (repo_root, os.getcwd()):
-                path = os.path.join(base, rel)
-                if os.path.exists(path):
-                    return path
-        return None
+        for base in (repo_root, os.getcwd()):
+            folder = os.path.join(base, self.PRODUCT_DOC_DIR)
+            if os.path.isdir(folder):
+                return sorted(os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".md"))
+        return []
 
     def _manifest_path(self, user_id: int) -> str:
         return os.path.join(settings.INDEX_DIR, f"user_{user_id}", "manifest.json")
@@ -158,19 +155,29 @@ class RAGService:
         except (OSError, ValueError):
             return {}
 
-    def ensure_product_context_indexed(self, doc_path: str = None) -> int:
+    def ensure_product_context_indexed(self, doc_paths: Optional[List[str]] = None) -> int:
         """
-        Index the product knowledge document into the user_0 partition. Re-indexes when the
-        document content, embedding backend, or dimension changes. Returns total vectors.
+        Index the product guides into the user_0 partition. Re-indexes when any guide's content,
+        the set of guides, the embedding backend or the dimension changes. Returns total vectors.
         """
-        doc_path = doc_path or self._product_doc_path()
-        if not doc_path or not os.path.exists(doc_path):
-            logger.warning("Product context document not found; product RAG is empty.")
+        if isinstance(doc_paths, str):
+            doc_paths = [doc_paths]
+        paths = [p for p in (doc_paths or self._product_doc_paths()) if os.path.exists(p)]
+        if not paths:
+            logger.warning("Product guides not found; product RAG is empty.")
             return 0
 
-        with open(doc_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        docs = []
+        digest = hashlib.sha256()
+        for path in paths:
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+            name = os.path.splitext(os.path.basename(path))[0]
+            digest.update(name.encode("utf-8") + b"\0" + content.encode("utf-8") + b"\0")
+            title = next((ln[2:].strip() for ln in content.splitlines() if ln.startswith("# ")), name)
+            docs.append((path, name, title, content))
+        sha = digest.hexdigest()
+
         # Probe first so backend/dimension reflect what this query will use.
         self.embedder._ensure_ollama_ready()
         backend, dim = self.embedder.backend, self.embedder.dimension
@@ -185,7 +192,12 @@ class RAGService:
         ):
             return user_index.index.ntotal
 
-        chunks = chunk_markdown_by_heading(content, document_id=self.PRODUCT_DOC_ID)
+        chunks: List[Dict[str, Any]] = []
+        for i, (_, name, title, content) in enumerate(docs):
+            for c in chunk_markdown_by_heading(content, document_id=self.PRODUCT_DOC_BASE_ID + i):
+                c["source"] = name
+                c["heading"] = f"{title} › {c['heading']}" if c.get("heading") and c["heading"] != title else title
+                chunks.append(c)
         vectors = self.embedder.encode_batch([c["text"] for c in chunks])
         actual_dim = vectors.shape[1] if vectors.ndim == 2 and vectors.shape[0] else dim
 
@@ -197,7 +209,7 @@ class RAGService:
         version = sha[:12]
         with open(self._manifest_path(0), "w", encoding="utf-8") as f:
             json.dump({
-                "source": os.path.relpath(doc_path),
+                "sources": [os.path.relpath(p) for p, *_ in docs],
                 "sha256": sha,
                 "version": version,
                 "embedding_backend": self.embedder.backend,
@@ -205,7 +217,8 @@ class RAGService:
                 "chunks": len(chunks),
                 "indexed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }, f, indent=2)
-        logger.info("Product context indexed: %d chunks, version=%s, backend=%s", len(chunks), version, self.embedder.backend)
+        logger.info("Product guides indexed: %d files, %d chunks, version=%s, backend=%s",
+                    len(docs), len(chunks), version, self.embedder.backend)
         return fresh.index.ntotal
 
     def query_product_context(self, query_text: str, top_k: int = 3) -> List[Dict[str, Any]]:
@@ -245,7 +258,7 @@ class RAGService:
         self,
         user_id: int,
         query_text: str,
-        product_k: int = 3,
+        product_k: int = 4,
         user_k: int = 2,
         min_vector: float = 0.45,
         min_lexical: float = 0.2,
@@ -267,9 +280,12 @@ class RAGService:
                 if not ((semantic and r["vector"] >= min_vector) or r["lexical"] >= min_lexical):
                     continue
                 meta = r["meta"]
-                prefix = "product" if scope == "product" else f"kb:{meta.get('document_id', 0)}"
+                if scope == "product":
+                    source_id = f"product:{meta.get('source', 'guide')}:{meta.get('chunk_index', 0)}"
+                else:
+                    source_id = f"kb:{meta.get('document_id', 0)}:{meta.get('chunk_id', '')}"
                 chunks.append({
-                    "source_id": f"{prefix}:{meta.get('chunk_id', '')}",
+                    "source_id": source_id,
                     "scope": scope,
                     "text": meta.get("text", ""),
                     "score": round(r["score"], 4),
