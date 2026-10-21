@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 import { useAssistant } from "../../context/AssistantContext";
 import { OrbitMascotCharacter, CharacterState } from "./OrbitMascotCharacter";
@@ -9,6 +9,8 @@ import { usePressAndHold } from "../../hooks/usePressAndHold";
 import { Mic, MicOff } from "lucide-react";
 import { OrbitSpeechBubble, OrbitSecretChip } from "./OrbitOverlays";
 import { orbitStage } from "../../services/orbitStage";
+import { orbitPresence } from "../../services/orbitPresence";
+import { useOrbitRemote } from "../../context/OrbitRemoteContext";
 
 const GESTURE_STATE: Record<string, CharacterState> = {
   tap: "clicking",
@@ -29,6 +31,8 @@ export const FloatingMascot: React.FC = () => {
   } = useAssistant();
   const reduceMotion = useReducedMotion();
   const placement = useMascotTravel();
+  // Holding Orbit's face on a paired phone counts as holding Orbit here.
+  const { phoneListening } = useOrbitRemote();
 
   const onTranscript = useCallback((t: string) => {
     void handleVoiceTranscript(t);
@@ -64,14 +68,29 @@ export const FloatingMascot: React.FC = () => {
     holdThresholdMs: 220,
   });
 
-  // Precedence: the user (listening) > real UI activity (travel/gesture) > runtime state.
+  // Precedence: the user (listening, here or on a paired phone) > real UI activity (travel/gesture) > runtime state.
   const effectiveState: CharacterState = (() => {
-    if (voice.isListening) return "listening";
+    if (voice.isListening || phoneListening) return "listening";
     if (placement.inTransit && !placement.isDocked) return "moving";
     if (placement.gesture) return GESTURE_STATE[placement.gesture] ?? characterState;
     if (isSpeaking && !["needs_confirmation", "waiting_for_user"].includes(characterState)) return "speaking";
     return characterState;
   })();
+
+  // Share what Orbit visibly shows (and where) with Orbit Remote, so a paired phone can mirror it.
+  const bodyRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    orbitPresence.set({ el: bodyRef.current });
+    return () => orbitPresence.set({ el: null });
+  }, []);
+  useEffect(() => {
+    orbitPresence.set({
+      state: String(effectiveState).toLowerCase(),
+      emotion: isSpeaking ? speech?.emotion ?? null : null,
+      docked: placement.isDocked,
+      moving: placement.inTransit,
+    });
+  }, [effectiveState, isSpeaking, speech?.emotion, placement.isDocked, placement.inTransit]);
 
   // When the panel opens, docked Orbit glances up at it for a moment (idle personality only).
   const [glancingAtPanel, setGlancingAtPanel] = useState(false);
@@ -97,6 +116,7 @@ export const FloatingMascot: React.FC = () => {
   return (
     <>
       <motion.div
+        ref={bodyRef}
         initial={false}
         animate={{ x: placement.x, y: placement.y }}
         transition={transition}

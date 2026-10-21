@@ -23,6 +23,9 @@ use App\Http\Controllers\TemplateController;
 use App\Http\Controllers\DatabaseInsightsController;
 use App\Http\Controllers\CalendarController;
 use App\Http\Controllers\Api\DataAgentController;
+use App\Http\Controllers\Api\OrbitRemoteController;
+use App\Http\Controllers\Api\OrbitRemoteDeviceController;
+use App\Http\Middleware\AuthenticateOrbitRemoteDevice;
 
 // Public Health Check
 Route::get('/health', fn () => response()->json(['status' => 'healthy', 'service' => 'laravel-control-plane']));
@@ -41,6 +44,16 @@ Route::post('/approvals/{token}/reject', [ApprovalController::class, 'reject']);
 Route::get('/live/stream', [LiveEventController::class, 'stream']);
 
 // Protected Application Routes (Scoped by Authenticated User)
+// Orbit Remote, phone side: the single-use QR code is the credential for claiming; afterwards the phone's own
+// device token (not a Sanctum token) is accepted on these endpoints only.
+Route::post('/orbit-remote/claim', [OrbitRemoteDeviceController::class, 'claim'])->middleware('throttle:12,1');
+Route::middleware([AuthenticateOrbitRemoteDevice::class, 'throttle:180,1'])->prefix('orbit-remote/device')->group(function () {
+    Route::get('/session', [OrbitRemoteDeviceController::class, 'show']);
+    Route::post('/commands', [OrbitRemoteDeviceController::class, 'command']);
+    Route::post('/broadcasting/auth', [OrbitRemoteDeviceController::class, 'broadcastingAuth']);
+    Route::post('/end', [OrbitRemoteDeviceController::class, 'end']);
+});
+
 Route::middleware('auth:sanctum')->group(function () {
     // Current user & session
     Route::get('/auth/me', [AuthController::class, 'me']);
@@ -161,4 +174,12 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/connections/{id}/insights', [DatabaseInsightsController::class, 'insights']);
     Route::get('/calendar/events', [CalendarController::class, 'events']);
     Route::post('/calendar/reschedule/{automationId}', [CalendarController::class, 'reschedule']);
+
+    // Orbit Remote, computer side
+    Route::post('/orbit-remote/sessions', [OrbitRemoteController::class, 'store'])->middleware('throttle:20,1');
+    Route::get('/orbit-remote/sessions/current', [OrbitRemoteController::class, 'current']);
+    Route::post('/orbit-remote/sessions/{publicId}/attach', [OrbitRemoteController::class, 'attach']);
+    Route::post('/orbit-remote/sessions/{publicId}/state', [OrbitRemoteController::class, 'state'])->middleware('throttle:240,1');
+    Route::post('/orbit-remote/sessions/{publicId}/commands/{commandId}/ack', [OrbitRemoteController::class, 'acknowledge'])->whereNumber('commandId');
+    Route::delete('/orbit-remote/sessions/{publicId}', [OrbitRemoteController::class, 'destroy']);
 });

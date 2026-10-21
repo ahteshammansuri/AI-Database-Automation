@@ -7,6 +7,7 @@ import { AssistantProvider } from "./context/AssistantContext";
 import { ProtectedRoute } from "./components/common/ProtectedRoute";
 import { ErrorBoundary } from "./components/common/ErrorBoundary";
 import { Layout } from "./components/layout/Layout";
+import { OrbitRemotePage } from "./pages/OrbitRemotePage";
 import { LandingPage } from "./pages/LandingPage";
 import { LoginPage } from "./pages/LoginPage";
 import { RegisterPage } from "./pages/RegisterPage";
@@ -68,14 +69,17 @@ const NavigationBridge: React.FC = () => {
   return null;
 };
 
-export const App: React.FC = () => {
+/**
+ * The portal and its public pages, with the signed-in providers (live events, Orbit). Orbit Remote's phone page is
+ * routed outside them: a phone must never run Orbit's on-screen actions or heartbeat as a portal tab, even when the
+ * same browser is also signed in to the portal.
+ */
+const PortalApp: React.FC = () => {
   return (
-    <ErrorBoundary>
       <AuthProvider>
         <ToastProvider>
           <LiveEventsProvider>
             <AssistantProvider>
-              <BrowserRouter>
                 <NavigationBridge />
                 <Routes>
             {/* Public Routes */}
@@ -111,11 +115,23 @@ export const App: React.FC = () => {
 
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
-        </BrowserRouter>
             </AssistantProvider>
           </LiveEventsProvider>
         </ToastProvider>
       </AuthProvider>
+  );
+};
+
+export const App: React.FC = () => {
+  return (
+    <ErrorBoundary>
+      <BrowserRouter>
+        <Routes>
+          {/* Orbit Remote on a paired phone (opened from the QR code) */}
+          <Route path="/orbit/remote" element={<OrbitRemotePage />} />
+          <Route path="*" element={<PortalApp />} />
+        </Routes>
+      </BrowserRouter>
     </ErrorBoundary>
   );
 };

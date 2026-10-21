@@ -10,3 +10,6 @@ Artisan::command('inspire', function () {
 
 Schedule::command('automations:check-schedule')->everyMinute();
 
+
+// Orbit Remote: remove ended phone sessions (and unscanned codes) after a week.
+Schedule::command('model:prune', ['--model' => [\App\Models\OrbitRemoteSession::class]])->daily();

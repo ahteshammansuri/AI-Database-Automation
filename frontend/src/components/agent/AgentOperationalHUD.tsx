@@ -2,12 +2,13 @@ import React, { useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   AlertTriangle, CheckCircle2, ChevronDown, Circle, History, Keyboard, Loader2, Mic, MicOff, Pause, Play,
-  RotateCcw, Shield, Sparkles, Square, Volume2, VolumeX, XCircle,
+  RotateCcw, Shield, Smartphone, Sparkles, Square, Volume2, VolumeX, XCircle,
 } from "lucide-react";
+import { useOrbitRemote } from "../../context/OrbitRemoteContext";
 import { OrbitMascotCharacter, CharacterState } from "./OrbitMascotCharacter";
 import { SecureCredentialCard } from "./SecureCredentialCard";
 import { useAssistant, ACTIVE_TASK_STATUSES } from "../../context/AssistantContext";
-import { collapseTimeline } from "../../services/orbitBehavior";
+import { collapseTimeline, stageText } from "../../services/orbitBehavior";
 import { usePressAndHold } from "../../hooks/usePressAndHold";
 import { dockClearance } from "../../hooks/useMascotTravel";
 import soundManager from "../../services/soundEffects";
@@ -37,45 +38,6 @@ const PREVIEW_STATES: CharacterState[] = [
 
 const DISCLOSURE_KEY = "orbit_stt_disclosure_ack";
 
-function stageText(stage: string | null, tool: string | null | undefined, status: string | undefined,
-  queue?: { ahead: number; worker_alive: boolean } | null): string {
-  if (status === "QUEUED" && queue) {
-    if (!queue.worker_alive) return "Waiting — no Orbit worker is running";
-    if (queue.ahead > 0) return `Waiting behind ${queue.ahead} other Orbit task${queue.ahead > 1 ? "s" : ""}`;
-    return "Starting now";
-  }
-  switch (stage) {
-    case "QUEUED":
-      return "Queued";
-    case "UNDERSTANDING":
-      return "Reading your request";
-    case "THINKING":
-      return "Thinking";
-    case "CALLING_TOOL":
-      return tool ? `Working: ${tool}` : "Working";
-  }
-  switch (status) {
-    case "WAITING_FOR_INPUT":
-      return "Waiting for your answer";
-    case "WAITING_FOR_APPROVAL":
-      return "Waiting for your confirmation";
-    case "PAUSED":
-      return "Paused";
-    case "SUCCEEDED":
-      return "Done — verified";
-    case "PARTIAL_SUCCESS":
-      return "Partly done";
-    case "FAILED":
-      return "Could not finish";
-    case "CANCELLED":
-      return "Stopped";
-    case "INTERRUPT_REQUESTED":
-      return "Stopping at the next safe step";
-    case "PAUSE_REQUESTED":
-      return "Pausing at the next safe step";
-  }
-  return "Ready";
-}
 
 const TimelineIcon: React.FC<{ status: string }> = ({ status }) => {
   if (status === "succeeded") return <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />;
@@ -96,6 +58,7 @@ export const AgentOperationalHUD: React.FC<AgentOperationalHUDProps> = ({
     awaitingConfirmation, voiceResponsesEnabled, toggleVoiceResponses, interruptTask, confirmTask,
     submitSecureCredentials, sendMessage, isLoading, startNewConversation,
   } = useAssistant();
+  const remote = useOrbitRemote();
 
   const [showTyping, setShowTyping] = useState(!voiceSupported);
   const [typed, setTyped] = useState("");
@@ -174,6 +137,13 @@ export const AgentOperationalHUD: React.FC<AgentOperationalHUDProps> = ({
               </div>
             </div>
             <div className="flex items-center gap-1.5">
+              <button type="button" onClick={remote.openModal}
+                title={remote.phase === "connected" ? `Phone connected: ${remote.session?.device_label || "your phone"}` : "Use Orbit from your phone"}
+                aria-label={remote.phase === "connected" ? "Phone connected (manage)" : "Use Orbit from your phone"}
+                className={`relative p-1.5 rounded-xl border ${remote.phase === "connected" ? "bg-emerald-500/15 text-emerald-300 border-emerald-400/40" : "bg-slate-800 text-slate-400 border-slate-700 hover:text-white"}`}>
+                <Smartphone className="w-3.5 h-3.5" />
+                {remote.phase === "connected" && <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-emerald-400 ring-2 ring-slate-950" />}
+              </button>
               <button type="button" onClick={toggleVoiceResponses}
                 title={voiceResponsesEnabled ? "Orbit speaks replies (click to mute voice)" : "Voice replies off (click to enable)"}
                 className={`p-1.5 rounded-xl border ${voiceResponsesEnabled ? "bg-slate-800 text-cyan-300 border-cyan-500/30" : "bg-rose-500/15 text-rose-300 border-rose-500/40"}`}>

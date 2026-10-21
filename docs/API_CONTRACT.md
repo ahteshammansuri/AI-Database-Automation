@@ -331,3 +331,34 @@ the field it is about (never only as a banner or toast, and never as a 500):
 
 The frontend mirrors these rules in `frontend/src/lib/validation.ts` (forms use `noValidate`; `FieldError` renders
 the message under the input with `aria-invalid`/`aria-describedby`), then places any server 422 under the same field.
+
+## Orbit Remote (2026-10-21)
+
+A phone paired by QR code sends requests to the signed-in tab, which runs them through the normal Orbit pipeline.
+
+**Computer (Sanctum token)**
+| Endpoint | Body | Result |
+| --- | --- | --- |
+| `POST /api/orbit-remote/sessions` | `instance` (this tab's id) | **201** `{session, code, pairing_ttl_seconds, lan_addresses, public_url}`. The code is returned only here; a new code replaces any earlier code or phone. |
+| `GET /api/orbit-remote/sessions/current?instance=` | | `{session|null, lan_addresses, public_url}` |
+| `POST /api/orbit-remote/sessions/{id}/attach` | `instance` | Move the phone to this tab. **409** while another tab still reports. **410** if ended. |
+| `POST /api/orbit-remote/sessions/{id}/state` | `instance`, `state` (`face, emotion, status, caption, caption_kind, speaking, working, needs, task, page`) | Heartbeat + snapshot. **409** other tab, **410** ended. |
+| `POST /api/orbit-remote/sessions/{id}/commands/{commandId}/ack` | `instance`, `status` (`received`/`rejected`), `reason?` | `{command: {status}}`: `received` (run it), `rejected` (`too_old`: older than 30 s by the server's clock), `duplicate` (already taken). |
+| `DELETE /api/orbit-remote/sessions/{id}` | | Ends it (`disconnected_from_computer`). |
+
+**Phone**
+| Endpoint | Auth | Result |
+| --- | --- | --- |
+| `POST /api/orbit-remote/claim` | none (the code; 12/min per IP) | **201** `{device_token, session, desktop, commands, limits}`; **422** `errors.code` (used / expired / invalid). |
+| `GET /api/orbit-remote/device/session` | device token | `{session, desktop: {online, state}, commands, limits}` |
+| `POST /api/orbit-remote/device/commands` | device token | `kind` (`say`/`stop`), `text` (max 1000). **201** `{command}`; **422** `errors.text` (empty, secret, computer offline); **429** (20/min). |
+| `POST /api/orbit-remote/device/broadcasting/auth` | device token | Socket auth for `private-orbit-remote.{id}` only (else **422**). |
+| `POST /api/orbit-remote/device/end` | device token | Ends it (`disconnected_from_phone`). |
+
+Device token failures: **401** `{message, reason}` with reason `not_connected`, `expired`, `replaced`,
+`disconnected_from_computer`, `disconnected_from_phone` or `signed_out`.
+
+**Live events**: workspace events `orbit.remote_paired`, `orbit.remote_command` (`session, instance, command_id, kind,
+text, sent_at`), `orbit.remote_ended`. Channel `private-orbit-remote.{id}`: server event `.remote.signal`
+(`paired` / `command` / `ended`); client events `state`, `gaze`, `speech` (tab → phone) and `listening`, `hello`
+(phone → tab). See `frontend/src/services/orbitRemoteProtocol.ts`.

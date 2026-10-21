@@ -34,7 +34,7 @@ interface RequestOptions extends RequestInit {
 }
 
 // Live state must never be served from the memory cache (event polling, Orbit task state).
-const UNCACHED_PREFIXES = ["/live/", "/agent/"];
+const UNCACHED_PREFIXES = ["/live/", "/agent/", "/orbit-remote/"];
 
 async function request<T>(endpoint: string, options?: RequestOptions): Promise<T> {
   const isRead = !options?.method || options.method.toUpperCase() === "GET";
@@ -419,6 +419,23 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ status, result }),
     }),
+  // ---- Orbit Remote (computer side): pair a phone by QR code and relay Orbit to it ----
+  orbitRemoteStart: (instance: string) =>
+    request<any>("/orbit-remote/sessions", { method: "POST", body: JSON.stringify({ instance }) }),
+  orbitRemoteCurrent: (instance: string) =>
+    request<any>(`/orbit-remote/sessions/current?instance=${encodeURIComponent(instance)}`),
+  orbitRemoteAttach: (id: string, instance: string) =>
+    request<any>(`/orbit-remote/sessions/${encodeURIComponent(id)}/attach`, { method: "POST", body: JSON.stringify({ instance }) }),
+  orbitRemoteState: (id: string, instance: string, state: Record<string, any> | null) =>
+    request<any>(`/orbit-remote/sessions/${encodeURIComponent(id)}/state`, { method: "POST", body: JSON.stringify({ instance, state }) }),
+  orbitRemoteAck: (id: string, commandId: number, instance: string, status: "received" | "rejected", reason?: string) =>
+    request<any>(`/orbit-remote/sessions/${encodeURIComponent(id)}/commands/${commandId}/ack`, {
+      method: "POST",
+      body: JSON.stringify({ instance, status, reason }),
+    }),
+  orbitRemoteEnd: (id: string) =>
+    request<any>(`/orbit-remote/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
   agentHeartbeat: () => {
     const now = Date.now();
     if (lastHeartbeatPromise && now - lastHeartbeatTime < 10000) {

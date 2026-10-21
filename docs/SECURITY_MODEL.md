@@ -117,3 +117,15 @@ The backend enforces the access mode regardless of the database user's privilege
 - **Review links** are single-use, bound to one version, refused once the run has finished, and never written to logs or the audit trail. Approval tokens are no longer returned by the executions API. Email delivery failures are recorded as `APPROVAL_EMAIL_FAILED`, never reported as sent.
 - **Publishing** is idempotent per execution (`publish_exec_{id}`), never acts on a finished run, and can never publish a rejected or invalid version ("Publish now" refuses them).
 - **Rendered previews** never use `innerHTML`: Markdown is parsed into React elements, and HTML is rebuilt from an allowlist (links limited to http/https/mailto).
+
+## Orbit Remote (phone pairing), 2026-10-21
+
+| Threat | Control |
+| --- | --- |
+| QR code photographed or leaked | Single use, valid 3 minutes, stored as SHA-256; carried in the URL `#fragment` (not sent in request lines, not in server or proxy logs); the address bar is cleared after claiming. |
+| Phone token stolen | Hashed at rest; accepted only by `/api/orbit-remote/device/*` (not Sanctum, no portal API); ends on disconnect from either side, a new pairing, sign-out of the pairing tab, 2 h idle, 12 h total. |
+| Acting as another user / tab | Every computer endpoint and the `orbit-remote.{id}` channel check ownership; the phone's socket auth only signs its own channel; requests carry the target tab instance and the server lets one tab take them (late or duplicate acknowledgements are refused). |
+| Secrets via voice | Passwords/API keys are refused on the phone and on the server; the secure field stays on the computer. Live "listening" words are redacted before they are shown. |
+| Unwanted actions | The phone sends a request; the computer runs it through Orbit's normal gate (permissions, confirmations by the panel Confirm button). Requests are refused when the computer is offline or when they reach it more than 30 s late (server clock). Rate limits: claim 12/min per IP, requests 20/min per phone. |
+| Phone page running portal actions | `/orbit/remote` is routed outside the portal providers, so it never heartbeats or runs Orbit UI actions even if the same browser is signed in. |
+| Audit | `ORBIT_REMOTE_PAIRING_CREATED`, `ORBIT_REMOTE_PAIRED`, `ORBIT_REMOTE_COMMAND` (id, kind, length), `ORBIT_REMOTE_ENDED`. |

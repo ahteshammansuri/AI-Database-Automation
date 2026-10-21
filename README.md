@@ -297,6 +297,28 @@ Orbit's turns run on a dedicated `agent` queue connection (long multi-step turns
 php artisan queue:work agent --queue=agent --sleep=1 --tries=1 --timeout=1600
 ```
 
+### Orbit Remote: talk to Orbit from your phone
+On the dashboard choose **Connect your phone** (also in the Orbit panel and the navbar phone icon) and scan the QR
+code with the phone's camera. The phone shows only Orbit's face. **Hold the face and speak; let go to send.** The
+request goes to the open DataAuto tab and the web Orbit does it there, exactly as if you had spoken to it on the
+computer. The phone mirrors the web Orbit live: thinking, speaking (lips follow the real voice), listening, done or
+stuck, and its eyes follow the web Orbit as it moves around the page. Tap **Type** to type instead, **Stop** to stop
+the current task.
+
+- **Safety**: the code works once, for 3 minutes, and is only in the link's `#fragment`. The phone gets its own token
+  that works only for Orbit Remote (not for the portal API). One phone per account. It disconnects when either side
+  disconnects, when that tab signs out, after 2 hours idle or 12 hours. Passwords and API keys are never sent from the
+  phone; confirmations and secure fields stay on the computer. Pairing, requests and disconnects are in the audit log.
+- **Same Wi-Fi**: when the computer uses `localhost`, the QR code uses this machine's Wi-Fi address instead (pick one if
+  there are several). For a public deployment set `ORBIT_REMOTE_PUBLIC_URL`.
+- **Voice needs https on phones** (browsers only allow the microphone on secure pages). For local development run the
+  frontend over https and open DataAuto from it:
+  ```bash
+  cd frontend && npm run dev:https      # https://localhost:5174 (self-signed; accept it once on the computer and the phone)
+  ```
+  Reverb is reached through the same origin there (`/app` is proxied), so the live link works over https too. Over
+  plain http the phone still works, with typed requests.
+
 ---
 
 ## 6. Core Security & Guardrails
@@ -382,6 +404,7 @@ npm test
 | `VITE_BACKEND_URL` | `http://localhost:8000` | `http://laravel:8000` | Target URL for Vite `/api` reverse proxy |
 | `MEDIA_PUBLIC_URL` | `http://127.0.0.1:8000` (set by `run_all.sh`) | your public API host | Base URL for generated/uploaded images stored in `storage/app/public` (`php artisan storage:link`) |
 | `FRONTEND_URL` | `http://localhost:5173` | your portal URL | Used for the review links in approval emails |
+| `ORBIT_REMOTE_PUBLIC_URL` | *(empty)* | your portal URL | Address phones open from the Orbit Remote QR code (empty: the computer's address, or its Wi-Fi address instead of `localhost`) |
 
 ---
 

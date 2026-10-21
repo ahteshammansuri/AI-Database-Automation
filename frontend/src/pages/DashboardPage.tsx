@@ -12,6 +12,8 @@ import { useAuth } from "../context/AuthContext";
 import { useLiveEvents } from "../context/LiveEventsContext";
 import { useToast } from "../context/ToastContext";
 import { useOrbitSurface } from "../hooks/useOrbitSurface";
+import { OrbitRemoteCard } from "../components/remote/OrbitRemoteCard";
+import { pageStateService } from "../services/pageStateService";
 
 export const DashboardPage: React.FC = () => {
   const [stats, setStats] = useState<any | null>(null);
@@ -50,6 +52,10 @@ export const DashboardPage: React.FC = () => {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    pageStateService.setRoute("/dashboard", "Dashboard");
+  }, []);
 
   useEffect(() => {
     loadData(false, selectedRange);
@@ -284,6 +290,9 @@ export const DashboardPage: React.FC = () => {
           </div>
         </div>
       </motion.section>
+
+      {/* Orbit Remote: talk to Orbit from a phone */}
+      <OrbitRemoteCard />
 
       {/* Getting started */}
       {showOnboarding && (

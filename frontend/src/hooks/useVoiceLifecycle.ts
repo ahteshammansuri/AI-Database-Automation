@@ -5,6 +5,11 @@ export interface VoiceLifecycleOptions {
   onTranscript: (transcript: string) => void;
   onListeningChange?: (isListening: boolean) => void;
   voiceResponsesEnabled?: boolean;
+  /**
+   * Measure the microphone level for the listening glow (opens a second audio stream). Off on phones, where two
+   * streams at once can stop speech recognition from hearing anything.
+   */
+  measureLevel?: boolean;
 }
 
 export interface VoiceLifecycleReturn {
@@ -36,6 +41,7 @@ export const useVoiceLifecycle = ({
   onTranscript,
   onListeningChange,
   voiceResponsesEnabled = true,
+  measureLevel = true,
 }: VoiceLifecycleOptions): VoiceLifecycleReturn => {
   const [isSupported, setIsSupported] = useState<boolean>(true);
   const [isListening, setIsListening] = useState<boolean>(false);
@@ -264,9 +270,9 @@ export const useVoiceLifecycle = ({
         return;
       }
     }
-    void startAudioAnalysis();
+    if (measureLevel) void startAudioAnalysis();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [measureLevel]);
 
   const stopListening = useCallback(() => {
     clearSilenceTimer();

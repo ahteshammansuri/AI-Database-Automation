@@ -30,7 +30,16 @@ export interface OrbitRigProps {
   followPointer?: boolean;
   reducedMotion?: boolean;
   label?: string;
+  /** "head" crops to the face (head, eyes, face screen, mouth, ears, antenna), e.g. for Orbit Remote on a phone. */
+  framing?: "full" | "head";
+  /** Gaze as a direction (-1..1 on each axis), used instead of `lookAt` (e.g. towards the web Orbit). */
+  gaze?: { x: number; y: number } | null;
+  /** Speech playback events to lip-sync to; defaults to this browser's own speech (ttsAdapter). */
+  speechSource?: (listener: (e: any) => void) => () => void;
 }
+
+/** Visible area per framing (SVG units). The head spans x 23..177 and y -1..147 at rest; "head" ends at its chin. */
+const VIEWBOX = { full: { x: 0, y: 0, w: 200, h: 232 }, head: { x: 12, y: -12, w: 176, h: 161 } };
 
 // Chibi proportions from the sheet: a big round head, a small rounded body, stubby limbs.
 const SHOULDER_L = { x: 69, y: 163 };
@@ -126,7 +135,7 @@ function useAnimatedRig(target: OrbitPose, reduced: boolean, calm: boolean) {
  * Mouth shape from real speech playback. The speech subscription lives in an effect (not in
  * useMemo), so React StrictMode's mount/unmount/mount cycle cannot leave it disconnected.
  */
-function useLipSync() {
+function useLipSync(source?: (listener: (e: any) => void) => () => void) {
   const [relay] = useState(() => {
     const box: { sink: ((e: any) => void) | null } = { sink: null };
     const lip = createLipSync((fn) => {
@@ -137,7 +146,7 @@ function useLipSync() {
     });
     return { lip, push: (e: unknown) => box.sink?.(e) };
   });
-  useEffect(() => ttsAdapter.subscribe(relay.push as any), [relay]);
+  useEffect(() => (source ? source(relay.push) : ttsAdapter.subscribe(relay.push as any)), [relay, source]);
   return relay.lip;
 }
 
@@ -325,6 +334,7 @@ function Mouth({ shape, open, round, uid }: { shape: MouthShape; open: number; r
 
 export const OrbitRig: React.FC<OrbitRigProps> = ({
   state, width, emotion, lookAt, facing = "right", audioLevel = 0, followPointer = true, reducedMotion = false, label,
+  framing = "full", gaze: gazeOverride = null, speechSource,
 }) => {
   const uid = useId().replace(/:/g, "");
   const svgRef = useRef<SVGSVGElement>(null);
@@ -335,7 +345,9 @@ export const OrbitRig: React.FC<OrbitRigProps> = ({
   const blinker = useMemo(() => createBlinker(), []);
   const personality = useMemo(() => createIdlePersonality(), []);
   const saccades = useMemo(() => createSaccades(), []);
-  const lip = useLipSync();
+  const lip = useLipSync(speechSource);
+  // A real target (a page element, or the web Orbit for a phone) wins over idle glances and pointer following.
+  const hasTarget = !!lookAt || !!gazeOverride;
   const live = !reducedMotion;
 
   // Being "petted": the pointer resting on Orbit while it is calm makes it happy (personality only).
@@ -347,7 +359,7 @@ export const OrbitRig: React.FC<OrbitRigProps> = ({
   }
   // Idle personality (glances, tilts, an occasional smile), only when calm and not looking at anything.
   const pointerFresh = !!pointer.current && now - pointer.current.at < 2500;
-  const beat = personality.sample(now, live && PERSONALITY_STATES.has(state) && !lookAt && !pointerFresh);
+  const beat = personality.sample(now, live && PERSONALITY_STATES.has(state) && !hasTarget && !pointerFresh);
   const smiling = beat.smile > 0.45;
   const pose = useMemo(() => {
     const base = applyEmotion(poseFor(state), state === "speaking" ? emotion : null);
@@ -369,8 +381,8 @@ export const OrbitRig: React.FC<OrbitRigProps> = ({
 
   // ---- Gaze: real target first, pointer only when calm and recently moved -----------
   const gazePoint = lookAt ?? (["idle", "listening", "curious"].includes(state) && pointerFresh ? pointer.current : null);
-  let gaze: { x: number; y: number } | null = null;
-  if (gazePoint && svgRef.current) {
+  let gaze: { x: number; y: number } | null = gazeOverride ? { x: clamp(gazeOverride.x, -1, 1), y: clamp(gazeOverride.y, -1, 1) } : null;
+  if (!gaze && gazePoint && svgRef.current) {
     const r = svgRef.current.getBoundingClientRect();
     const dx = (gazePoint.x - (r.left + r.width / 2)) / 260;
     const dy = (gazePoint.y - (r.top + r.height * 0.35)) / 260;
@@ -383,7 +395,7 @@ export const OrbitRig: React.FC<OrbitRigProps> = ({
   const { bodyRot, lElbow, rElbow, breathe } = layers;
 
   // Glances, plus tiny micro-saccades while calm so the eyes never look frozen.
-  const sacc = saccades.sample(now, live && CALM_STATES.has(state) && !lookAt);
+  const sacc = saccades.sample(now, live && CALM_STATES.has(state) && !hasTarget);
   lookX = clamp(lookX + beat.lookX + sacc.x, -1, 1);
   lookY = clamp(lookY + beat.lookY + sacc.y, -1, 1);
   headRot += beat.headRot;
@@ -430,7 +442,8 @@ export const OrbitRig: React.FC<OrbitRigProps> = ({
     limb: `url(#limb-${uid})`,
     sole: `url(#sole-${uid})`,
   };
-  const height = Math.round(width * 1.16);
+  const view = VIEWBOX[framing];
+  const height = Math.round((width * view.h) / view.w);
   const browBase = EYE_L.y - EYE_R0 - 6.5 + cur.browY - browLift;
   const winkLeft = pose.eyes === "wink";
 
@@ -439,10 +452,10 @@ export const OrbitRig: React.FC<OrbitRigProps> = ({
       ref={svgRef}
       width={width}
       height={height}
-      viewBox="0 0 200 232"
+      viewBox={`${view.x} ${view.y} ${view.w} ${view.h}`}
       role="img"
       aria-label={label ?? `Orbit (${state.replace(/_/g, " ")})`}
-      style={{ overflow: "visible", display: "block" }}
+      style={{ overflow: framing === "head" ? "hidden" : "visible", display: "block" }}
     >
       <defs>
         {/* Glossy white shell: lit from the upper left, soft lavender shade toward the lower right */}

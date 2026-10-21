@@ -6,6 +6,9 @@ import { Navbar } from "./Navbar";
 import { api } from "../../services/api";
 import { ActiveTaskGuardBanner } from "../agent/ActiveTaskGuardBanner";
 import { FloatingMascot } from "../agent/FloatingMascot";
+import { OrbitRemoteProvider } from "../../context/OrbitRemoteContext";
+import { OrbitRemoteModal } from "../remote/OrbitRemoteModal";
+import { PhoneListeningPill } from "../remote/PhoneListeningPill";
 
 export const Layout: React.FC = () => {
   const location = useLocation();
@@ -43,6 +46,7 @@ export const Layout: React.FC = () => {
   }, []);
 
   return (
+    <OrbitRemoteProvider>
     <div className="flex h-screen bg-canvas text-slate-800 overflow-hidden font-sans relative">
       <Sidebar pendingApprovalsCount={pendingCount} mobileOpen={mobileNavOpen} onClose={() => setMobileNavOpen(false)} />
       <div className="relative flex-1 flex flex-col min-w-0 overflow-hidden">
@@ -72,6 +76,11 @@ export const Layout: React.FC = () => {
 
       {/* Voice-First Floating Autonomous Mascot AI Agent */}
       <FloatingMascot />
+
+      {/* Orbit Remote: pair a phone, and show when it is listening */}
+      <OrbitRemoteModal />
+      <PhoneListeningPill />
     </div>
+    </OrbitRemoteProvider>
   );
 };

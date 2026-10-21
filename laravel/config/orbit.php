@@ -25,4 +25,8 @@ return [
 
     // Secure inputs (passwords/API keys) expire if not used.
     'secure_input_ttl_minutes' => (int) env('ORBIT_SECURE_INPUT_TTL', 30),
+
+    // Orbit Remote: the address phones open from the pairing QR code (e.g. https://app.example.com). Leave empty to
+    // use the address the computer has open (or this machine's Wi-Fi address when that is "localhost").
+    'remote_public_url' => env('ORBIT_REMOTE_PUBLIC_URL'),
 ];

@@ -6,6 +6,7 @@ import { useAuth } from "../../context/AuthContext";
 import { useLiveEvents } from "../../context/LiveEventsContext";
 import { api } from "../../services/api";
 import { navFor } from "./navConfig";
+import { RemoteNavButton } from "../remote/RemoteNavButton";
 
 interface NavbarProps {
   onRefresh?: () => void;
@@ -112,6 +113,8 @@ export const Navbar: React.FC<NavbarProps> = ({ onRefresh, isRefreshing = false,
             <RefreshCw className={`h-4 w-4 ${isRefreshing ? "animate-spin text-indigo-600" : ""}`} />
           </button>
         )}
+
+        <RemoteNavButton />
 
         <Link to="/automations/new" className="da-btn da-btn-primary px-3 sm:px-4" aria-label="Create automation">
           <Plus className="h-4 w-4" />

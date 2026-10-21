@@ -75,3 +75,44 @@ export function collapseTimeline(rows: TimelineRow[], taskActive: boolean): Time
   }
   return taskActive ? out : out.map((r) => (r.status === "running" ? { ...r, status: "stopped" } : r));
 }
+
+/** One short line describing what Orbit is doing (Orbit panel header, and the phone in Orbit Remote). */
+export function stageText(stage: string | null, tool: string | null | undefined, status: string | undefined,
+  queue?: { ahead: number; worker_alive: boolean } | null): string {
+  if (status === "QUEUED" && queue) {
+    if (!queue.worker_alive) return "Waiting — no Orbit worker is running";
+    if (queue.ahead > 0) return `Waiting behind ${queue.ahead} other Orbit task${queue.ahead > 1 ? "s" : ""}`;
+    return "Starting now";
+  }
+  switch (stage) {
+    case "QUEUED":
+      return "Queued";
+    case "UNDERSTANDING":
+      return "Reading your request";
+    case "THINKING":
+      return "Thinking";
+    case "CALLING_TOOL":
+      return tool ? `Working: ${tool}` : "Working";
+  }
+  switch (status) {
+    case "WAITING_FOR_INPUT":
+      return "Waiting for your answer";
+    case "WAITING_FOR_APPROVAL":
+      return "Waiting for your confirmation";
+    case "PAUSED":
+      return "Paused";
+    case "SUCCEEDED":
+      return "Done — verified";
+    case "PARTIAL_SUCCESS":
+      return "Partly done";
+    case "FAILED":
+      return "Could not finish";
+    case "CANCELLED":
+      return "Stopped";
+    case "INTERRUPT_REQUESTED":
+      return "Stopping at the next safe step";
+    case "PAUSE_REQUESTED":
+      return "Pausing at the next safe step";
+  }
+  return "Ready";
+}

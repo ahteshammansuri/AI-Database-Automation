@@ -85,6 +85,11 @@ class AuthController extends Controller
 
     public function logout(Request $request)
     {
+        // A phone paired with this tab must not keep acting after the sign-out.
+        $token = $request->user()->currentAccessToken();
+        if ($token instanceof \Laravel\Sanctum\PersonalAccessToken) {
+            app(\App\Services\Orbit\OrbitRemoteService::class)->endForToken($request->user()->id, (int) $token->id, 'signed_out');
+        }
         $request->user()->currentAccessToken()->delete();
 
         return response()->json([
