@@ -82,54 +82,6 @@ export function motionLayers(
   return f;
 }
 
-/**
- * Mouth openness from real TTS playback events (word boundaries; articulation only while audio
- * plays). The level follows a soft attack/decay envelope so the lips move smoothly, and `round`
- * varies slowly so the mouth alternates between wider and rounder shapes like real vowels.
- */
-export function createLipSync(subscribe: (fn: (e: { type: string }) => void) => () => void) {
-  let level = 0;
-  let target = 0;
-  let playing = false;
-  let lastBoundary = 0;
-  let lastSample = 0;
-  const unsubscribe = subscribe((e) => {
-    if (e.type === "start") {
-      playing = true;
-      lastBoundary = 0;
-    } else if (e.type === "boundary") {
-      target = 0.75 + Math.random() * 0.25;
-      lastBoundary = performance.now();
-    } else {
-      playing = false;
-    }
-  });
-  return {
-    sample(time: number, active: boolean): number {
-      const now = performance.now();
-      const dt = Math.min(0.1, lastSample ? (now - lastSample) / 1000 : 0.033);
-      lastSample = now;
-      if (!active || !playing) {
-        target = 0;
-      } else if (lastBoundary && now - lastBoundary < 260) {
-        target = Math.max(target * Math.exp(-dt * 6), 0.3);
-      } else if (!lastBoundary) {
-        // Voice without word-boundary events: a syllable-like rhythm while audio is really playing.
-        target = 0.25 + 0.5 * Math.abs(Math.sin(time * 11)) * (0.6 + 0.4 * Math.abs(Math.sin(time * 3.1)));
-      } else {
-        target = Math.max(target * Math.exp(-dt * 8), 0.2);
-      }
-      const rate = target > level ? 28 : 14; // open fast, close a bit slower
-      level += (target - level) * (1 - Math.exp(-dt * rate));
-      return level;
-    },
-    /** 0 = wide ("ee"), 1 = round ("oo"); only meaningful while talking. */
-    round(time: number): number {
-      return 0.5 + 0.5 * Math.sin(time * 4.3) * Math.sin(time * 1.7 + 0.6);
-    },
-    dispose: unsubscribe,
-  };
-}
-
+export { createLipSync, speechTimeline, mouthAt } from "./lipSync";
 export { createBlinker, createIdlePersonality } from "./rigPersonality";
 export type { IdleBeat } from "./rigPersonality";

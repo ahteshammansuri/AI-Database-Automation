@@ -7,6 +7,8 @@ export type OrbitGesture = "tap" | "type" | "point" | "inspect" | "wave";
 
 export type OrbitBodyEvent =
   | { type: "travel"; target: string }
+  /** Orbit has really reached the target (its flight animation finished), so the action may start. */
+  | { type: "arrived"; target: string | null }
   | { type: "gesture"; gesture: OrbitGesture; target?: string }
   | { type: "return" }
   /** Short caption bubble next to Orbit (show_me guidance). */
@@ -33,6 +35,23 @@ class OrbitStage {
   subscribe(l: Listener): () => void {
     this.listeners.add(l);
     return () => this.listeners.delete(l);
+  }
+
+  /** Resolve with the first event matching `match`, or null after `timeoutMs`. */
+  waitFor(match: (e: OrbitBodyEvent) => boolean, timeoutMs: number): Promise<OrbitBodyEvent | null> {
+    return new Promise((resolve) => {
+      const off = this.subscribe((e) => {
+        if (match(e)) {
+          clearTimeout(timer);
+          off();
+          resolve(e);
+        }
+      });
+      const timer = setTimeout(() => {
+        off();
+        resolve(null);
+      }, timeoutMs);
+    });
   }
 }
 

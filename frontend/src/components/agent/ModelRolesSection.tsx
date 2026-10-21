@@ -14,6 +14,8 @@ import {
   Sparkles,
 } from "lucide-react";
 import { api } from "../../services/api";
+import { FieldError } from "../ui/kit";
+import { invalid, rules, serverFieldErrors, validateField } from "../../lib/validation";
 
 interface ModelRoleItem {
   role: string;
@@ -44,6 +46,8 @@ export const ModelRolesSection: React.FC = () => {
   const [savingRole, setSavingRole] = useState<string | null>(null);
   const [probingRole, setProbingRole] = useState<string | null>(null);
   const [probeResults, setProbeResults] = useState<Record<string, { available: boolean; latency_ms?: number; message?: string }>>({});
+  // Message under each role's model input (keyed by role).
+  const [modelErrors, setModelErrors] = useState<Record<string, string>>({});
   const [statusFeedback, setStatusFeedback] = useState<Record<string, { type: "success" | "error"; text: string }>>({});
 
   const loadRoles = async () => {
@@ -135,6 +139,7 @@ export const ModelRolesSection: React.FC = () => {
   });
 
   const handleFieldChange = (roleKey: string, field: keyof ModelRoleItem, value: any) => {
+    if (field === "model_name") setModelErrors((prev) => (prev[roleKey] ? { ...prev, [roleKey]: "" } : prev));
     setRoles((prev) =>
       prev.map((r) => (r.role === roleKey ? { ...r, [field]: value } : r))
     );
@@ -163,6 +168,7 @@ export const ModelRolesSection: React.FC = () => {
       nextModel = "mock-llama3-synthetic";
     }
 
+    setModelErrors((prev) => (prev[roleKey] ? { ...prev, [roleKey]: "" } : prev));
     setRoles((prev) =>
       prev.map((r) =>
         r.role === roleKey ? { ...r, provider: newProvider, model_name: nextModel } : r
@@ -170,7 +176,15 @@ export const ModelRolesSection: React.FC = () => {
     );
   };
 
+  const MODEL_RULES = { model_name: [rules.required("Model", "Choose or type the model for this role."), rules.maxLength(64, "Model")] };
+
   const handleSaveRole = async (roleItem: ModelRoleItem) => {
+    const problem = validateField("model_name", { model_name: roleItem.model_name }, MODEL_RULES);
+    if (problem) {
+      setModelErrors((prev) => ({ ...prev, [roleItem.role]: problem }));
+      document.getElementById(`role-model-${roleItem.role}`)?.focus();
+      return;
+    }
     try {
       setSavingRole(roleItem.role);
       setStatusFeedback((prev) => ({ ...prev, [roleItem.role]: undefined as any }));
@@ -193,16 +207,26 @@ export const ModelRolesSection: React.FC = () => {
         setStatusFeedback((prev) => ({ ...prev, [roleItem.role]: undefined as any }));
       }, 3500);
     } catch (err: any) {
-      setStatusFeedback((prev) => ({
-        ...prev,
-        [roleItem.role]: { type: "error", text: err.message || "Failed to update role." },
-      }));
+      const fieldMsg = serverFieldErrors(err).model_name;
+      if (fieldMsg) {
+        setModelErrors((prev) => ({ ...prev, [roleItem.role]: fieldMsg }));
+      } else {
+        setStatusFeedback((prev) => ({
+          ...prev,
+          [roleItem.role]: { type: "error", text: err.message || "Failed to update role." },
+        }));
+      }
     } finally {
       setSavingRole(null);
     }
   };
 
   const handleProbeRole = async (roleItem: ModelRoleItem) => {
+    const problem = validateField("model_name", { model_name: roleItem.model_name }, MODEL_RULES);
+    if (problem) {
+      setModelErrors((prev) => ({ ...prev, [roleItem.role]: problem }));
+      return;
+    }
     try {
       setProbingRole(roleItem.role);
       const res = await api.probeModelRole({
@@ -264,12 +288,13 @@ export const ModelRolesSection: React.FC = () => {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-            <Sparkles className="w-5 h-5 text-indigo-600" />
-            Model Roles & Task Delegation
+          <span className="da-eyebrow"><span className="h-px w-5 bg-indigo-500/50" /> Model roles</span>
+          <h3 className="mt-2 flex items-center gap-2 text-[20px] font-bold tracking-[-0.02em] text-slate-950">
+            <Sparkles className="h-5 w-5 text-indigo-600" />
+            Which model does which job
           </h3>
-          <p className="text-xs text-slate-500 mt-0.5">
-            Assign specialized AI models to dedicated operational roles (Planner, Content Generator, Schema Classifier, Voice Summarizer).
+          <p className="mt-1 text-[13.5px] text-slate-500">
+            Give each job its own model: Orbit's planner, content writing, schema classification and voice summaries.
           </p>
         </div>
       </div>
@@ -290,12 +315,12 @@ export const ModelRolesSection: React.FC = () => {
               }
               key={r.role}
               whileHover={{ y: -2 }}
-              className="bg-white rounded-2xl border border-slate-200 p-5 shadow-2xs space-y-4 flex flex-col justify-between"
+              className="da-card da-card-hover flex flex-col justify-between space-y-4 p-5"
             >
               <div className="space-y-3">
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-xl bg-slate-50 border border-slate-100 flex items-center justify-center">
+                    <div className="grid h-11 w-11 place-items-center rounded-2xl border border-indigo-100 bg-indigo-50">
                       {getRoleIcon(r.role)}
                     </div>
                     <div>
@@ -318,13 +343,13 @@ export const ModelRolesSection: React.FC = () => {
 
                 <div className="grid grid-cols-2 gap-3 pt-1">
                   <div>
-                    <label className="block text-[11px] font-semibold text-slate-500 mb-1">
+                    <label className="mb-1.5 block text-[12px] font-semibold text-slate-600">
                       Provider
                     </label>
                     <select
                       value={r.provider}
                       onChange={(e) => handleProviderChange(r.role, e.target.value)}
-                      className="w-full text-xs bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 font-medium text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer"
+                      className="da-input cursor-pointer py-2 text-[12.5px] font-medium"
                     >
                       <option value="ollama">Ollama (Local)</option>
                       <option value="mock">Local Mock (Test)</option>
@@ -336,7 +361,7 @@ export const ModelRolesSection: React.FC = () => {
 
                   <div>
                     <div className="flex items-center justify-between mb-1">
-                      <label className="block text-[11px] font-semibold text-slate-500">
+                      <label className="block text-[12px] font-semibold text-slate-600">
                         Model Identifier
                       </label>
                       <button
@@ -351,15 +376,21 @@ export const ModelRolesSection: React.FC = () => {
 
                     {isCustomMode ? (
                       <input
+                        id={`role-model-${r.role}`}
                         type="text"
                         value={r.model_name}
                         onChange={(e) => handleFieldChange(r.role, "model_name", e.target.value)}
                         placeholder="e.g. gemini-3.5-flash-lite"
-                        className="w-full text-xs bg-white border border-indigo-300 rounded-lg px-2.5 py-1.5 font-mono text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                        aria-invalid={!!modelErrors[r.role]}
+                        aria-describedby={modelErrors[r.role] ? `role-model-${r.role}-error` : undefined}
+                        className={`da-input py-2 font-mono text-[12.5px]${invalid(modelErrors[r.role])}`}
                       />
                     ) : (
                       <select
+                        id={`role-model-${r.role}`}
                         value={r.model_name}
+                        aria-invalid={!!modelErrors[r.role]}
+                        aria-describedby={modelErrors[r.role] ? `role-model-${r.role}-error` : undefined}
                         onChange={(e) => {
                           if (e.target.value === "__CUSTOM__") {
                             setCustomInputRoles((prev) => ({ ...prev, [r.role]: true }));
@@ -367,7 +398,7 @@ export const ModelRolesSection: React.FC = () => {
                             handleFieldChange(r.role, "model_name", e.target.value);
                           }
                         }}
-                        className="w-full text-xs bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 font-mono text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer"
+                        className={`da-input cursor-pointer py-2 font-mono text-[12.5px]${invalid(modelErrors[r.role])}`}
                       >
                         {availableModels.length === 0 && (
                           <option value={r.model_name}>{r.model_name || "Select model"}</option>
@@ -383,6 +414,7 @@ export const ModelRolesSection: React.FC = () => {
                         <option value="__CUSTOM__">✍️ Custom model name...</option>
                       </select>
                     )}
+                    <FieldError id={`role-model-${r.role}`} message={modelErrors[r.role]} />
                   </div>
                 </div>
 
@@ -437,7 +469,7 @@ export const ModelRolesSection: React.FC = () => {
                     type="button"
                     onClick={() => handleProbeRole(r)}
                     disabled={isProbing}
-                    className="flex-1 flex items-center justify-center gap-1.5 py-1.5 bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200 rounded-xl text-xs font-semibold transition"
+                    className="da-btn da-btn-secondary flex-1"
                   >
                     <Activity className={`w-3.5 h-3.5 ${isProbing ? "animate-spin text-indigo-600" : ""}`} />
                     {isProbing ? "Probing..." : "Probe Model"}
@@ -447,7 +479,7 @@ export const ModelRolesSection: React.FC = () => {
                     type="button"
                     onClick={() => handleSaveRole(r)}
                     disabled={isSaving}
-                    className="flex-1 flex items-center justify-center gap-1.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold shadow-2xs transition"
+                    className="da-btn da-btn-primary flex-1"
                   >
                     <Save className="w-3.5 h-3.5" />
                     {isSaving ? "Saving..." : "Save Role"}

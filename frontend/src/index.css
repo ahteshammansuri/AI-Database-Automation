@@ -7,7 +7,7 @@
 @layer base {
   body {
     font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    @apply bg-slate-50 text-slate-800 antialiased min-h-screen selection:bg-indigo-600 selection:text-white;
+    @apply bg-canvas text-slate-800 antialiased min-h-screen selection:bg-indigo-600 selection:text-white;
   }
 
   code, pre, .font-mono {
@@ -74,18 +74,156 @@
   background: #94a3b8;
 }
 
-/* Button & Micro-Interactions */
+/* Button & Micro-Interactions (accent gradient, shared with the landing page palette) */
 .btn-primary-gradient {
-  background: linear-gradient(135deg, #4f46e5 0%, #6366f1 100%);
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  background: linear-gradient(120deg, #4f46e5 0%, #7c3aed 100%);
+  box-shadow: 0 10px 28px -14px rgba(79, 70, 229, 0.85);
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s ease, filter 0.2s ease;
 }
 
 .btn-primary-gradient:hover {
-  background: linear-gradient(135deg, #4338ca 0%, #4f46e5 100%);
+  filter: brightness(1.08);
   transform: translateY(-1px);
-  box-shadow: 0 4px 14px 0 rgba(79, 70, 229, 0.3);
+  box-shadow: 0 16px 36px -14px rgba(99, 102, 241, 0.9);
 }
 
 .btn-primary-gradient:active {
   transform: translateY(0);
+}
+
+/* ---- Design tokens shared by the landing page and the portal ---------------------------- */
+@layer utilities {
+  .bg-ink { background-color: #060914; }
+  .bg-ink-800 { background-color: #0B1022; }
+  .bg-canvas { background-color: #F7F8FC; }
+  /* shadow-xs / shadow-2xs were already used across the portal but are not part of Tailwind 3 */
+  .shadow-2xs { box-shadow: 0 1px 2px 0 rgba(15, 23, 42, 0.04); }
+  .shadow-xs { box-shadow: 0 1px 2px 0 rgba(15, 23, 42, 0.05), 0 1px 3px -1px rgba(15, 23, 42, 0.04); }
+  .shadow-soft { box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 12px 32px -20px rgba(30, 27, 75, 0.28); }
+  .shadow-lift { box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 30px 70px -35px rgba(79, 70, 229, 0.38); }
+  .shadow-glow { box-shadow: 0 18px 50px -12px rgba(129, 140, 248, 0.75); }
+  .shadow-ink { box-shadow: 0 40px 100px -40px rgba(30, 27, 75, 0.45); }
+}
+
+/* ---- Portal design system (same language as the landing page) -------------------------- */
+@layer components {
+  /* Surfaces */
+  .da-card { @apply rounded-3xl border border-slate-200/80 bg-white shadow-soft; }
+  .da-card-hover { @apply transition-[transform,box-shadow,border-color] duration-300 ease-out hover:-translate-y-0.5 hover:border-indigo-200 hover:shadow-lift; }
+  .da-panel { @apply rounded-2xl border border-slate-200/70 bg-slate-50/70; }
+  .da-ink { @apply relative overflow-hidden rounded-3xl bg-ink text-white shadow-ink; }
+  .da-divider { @apply border-t border-slate-100; }
+
+  /* Type */
+  .da-eyebrow { @apply inline-flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-indigo-600; }
+  .da-card-title { @apply text-[15px] font-bold tracking-[-0.01em] text-slate-950; }
+  .da-muted { @apply text-[13px] leading-relaxed text-slate-500; }
+
+  /* Buttons (pills) */
+  .da-btn {
+    @apply inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-full px-4 py-2 text-[13px] font-semibold
+      transition-all duration-200 ease-out select-none
+      focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-indigo-500/20
+      disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none disabled:translate-y-0;
+  }
+  .da-btn-sm { @apply px-3 py-1.5 text-[12px] gap-1.5; }
+  .da-btn-lg { @apply px-6 py-3 text-[14px]; }
+  .da-btn-primary { @apply bg-slate-950 text-white shadow-[0_10px_28px_-14px_rgba(15,23,42,0.7)] hover:bg-indigo-600 hover:-translate-y-px hover:shadow-[0_16px_36px_-14px_rgba(79,70,229,0.8)] active:translate-y-0; }
+  .da-btn-accent { @apply text-white bg-gradient-to-r from-indigo-600 to-violet-600 shadow-[0_10px_28px_-14px_rgba(79,70,229,0.85)] hover:brightness-110 hover:-translate-y-px active:translate-y-0; }
+  .da-btn-secondary { @apply border border-slate-200 bg-white text-slate-800 shadow-2xs hover:border-slate-300 hover:bg-slate-50; }
+  .da-btn-ghost { @apply text-slate-600 hover:bg-slate-100 hover:text-slate-950; }
+  .da-btn-danger { @apply bg-rose-600 text-white shadow-[0_10px_28px_-14px_rgba(225,29,72,0.8)] hover:bg-rose-500 hover:-translate-y-px; }
+  .da-btn-danger-soft { @apply border border-rose-100 bg-rose-50 text-rose-700 hover:border-rose-200 hover:bg-rose-100; }
+  .da-btn-success { @apply bg-emerald-600 text-white shadow-[0_10px_28px_-14px_rgba(5,150,105,0.8)] hover:bg-emerald-500 hover:-translate-y-px; }
+  .da-icon-btn { @apply grid h-9 w-9 shrink-0 place-items-center rounded-full text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-indigo-500/20 disabled:opacity-40; }
+
+  /* Forms */
+  .da-label { @apply mb-1.5 block text-[12.5px] font-semibold text-slate-700; }
+  .da-help { @apply mt-1.5 text-[12px] leading-relaxed text-slate-500; }
+  .da-input {
+    @apply block w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-[13.5px] text-slate-900 shadow-2xs
+      placeholder:text-slate-400 transition focus:border-indigo-500 focus:outline-none focus:ring-4 focus:ring-indigo-500/10
+      disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-500;
+  }
+  .da-check { @apply h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500/30; }
+  .da-input-invalid { @apply border-rose-400 bg-rose-50/40 focus:border-rose-500 focus:ring-rose-500/15; }
+
+  /* Chips */
+  .da-chip { @apply inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 py-0.5 text-[11.5px] font-semibold; }
+  .da-chip-slate { @apply border-slate-200 bg-slate-50 text-slate-600; }
+  .da-chip-indigo { @apply border-indigo-200 bg-indigo-50 text-indigo-700; }
+  .da-chip-emerald { @apply border-emerald-200 bg-emerald-50 text-emerald-700; }
+  .da-chip-amber { @apply border-amber-200 bg-amber-50 text-amber-700; }
+  .da-chip-rose { @apply border-rose-200 bg-rose-50 text-rose-700; }
+  .da-chip-sky { @apply border-sky-200 bg-sky-50 text-sky-700; }
+  .da-chip-violet { @apply border-violet-200 bg-violet-50 text-violet-700; }
+
+  /* Tabs (segmented) */
+  .da-tabs { @apply inline-flex flex-wrap gap-1 rounded-2xl bg-slate-100/90 p-1; }
+  .da-tab { @apply relative inline-flex items-center gap-2 rounded-xl px-3.5 py-2 text-[13px] font-semibold text-slate-500 transition-colors hover:text-slate-900; }
+  .da-tab-active { @apply bg-white text-slate-950 shadow-xs; }
+
+  /* Tables */
+  .da-table { @apply w-full text-left text-[13px]; }
+  .da-table thead th { @apply bg-slate-50/80 px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500; }
+  .da-table tbody td { @apply border-t border-slate-100 px-4 py-3 text-slate-700 align-middle; }
+  .da-table tbody tr { @apply transition-colors hover:bg-indigo-50/30; }
+
+  /* Modals */
+  .da-backdrop { @apply fixed inset-0 z-50 bg-slate-950/50 backdrop-blur-[6px]; }
+  .da-modal { @apply relative w-full overflow-hidden rounded-3xl border border-slate-200/70 bg-white shadow-[0_40px_120px_-30px_rgba(15,23,42,0.55)]; }
+}
+
+/* Light grid behind the top of the portal canvas */
+.portal-canvas-grid {
+  background-image:
+    linear-gradient(to right, rgba(99, 102, 241, 0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(99, 102, 241, 0.05) 1px, transparent 1px);
+  background-size: 44px 44px;
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 0%, transparent 100%);
+}
+
+/* ---- Landing page ---------------------------------------------------------------------- */
+.landing-grid {
+  background-image:
+    linear-gradient(to right, rgba(148, 163, 184, 0.07) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(148, 163, 184, 0.07) 1px, transparent 1px);
+  background-size: 56px 56px;
+  -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 30%, #000 35%, transparent 100%);
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 30%, #000 35%, transparent 100%);
+}
+.landing-grid-light {
+  background-image:
+    linear-gradient(to right, rgba(99, 102, 241, 0.06) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(99, 102, 241, 0.06) 1px, transparent 1px);
+  background-size: 48px 48px;
+  -webkit-mask-image: radial-gradient(ellipse 60% 55% at 50% 0%, #000 30%, transparent 100%);
+  mask-image: radial-gradient(ellipse 60% 55% at 50% 0%, #000 30%, transparent 100%);
+}
+@keyframes landing-marquee { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+.landing-marquee { animation: landing-marquee 40s linear infinite; }
+.landing-marquee-wrap:hover .landing-marquee { animation-play-state: paused; }
+.landing-fade-x {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 10%, #000 90%, transparent);
+  mask-image: linear-gradient(to right, transparent, #000 10%, #000 90%, transparent);
+}
+@keyframes landing-drift {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+  50% { transform: translate3d(5%, -4%, 0) scale(1.08); }
+}
+.landing-blob { filter: blur(72px); animation: landing-drift 18s ease-in-out infinite; will-change: transform; }
+@keyframes landing-dash { to { stroke-dashoffset: -24; } }
+.landing-flow { stroke-dasharray: 6 6; animation: landing-dash 1.1s linear infinite; }
+@keyframes landing-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+.landing-shimmer-text {
+  background: linear-gradient(110deg, #a5b4fc 15%, #ffffff 35%, #67e8f9 55%, #c4b5fd 75%, #a5b4fc 95%);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: landing-shimmer 7s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .landing-marquee, .landing-blob, .landing-flow, .landing-shimmer-text { animation: none; }
 }

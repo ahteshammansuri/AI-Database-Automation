@@ -1,13 +1,14 @@
-import React, { useCallback, useEffect } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 import { useAssistant } from "../../context/AssistantContext";
 import { OrbitMascotCharacter, CharacterState } from "./OrbitMascotCharacter";
 import { AgentOperationalHUD } from "./AgentOperationalHUD";
 import { useVoiceLifecycle } from "../../hooks/useVoiceLifecycle";
-import { useMascotTravel, MASCOT_BOX } from "../../hooks/useMascotTravel";
+import { useMascotTravel, MASCOT_BOX, dockClearance } from "../../hooks/useMascotTravel";
 import { usePressAndHold } from "../../hooks/usePressAndHold";
 import { Mic, MicOff } from "lucide-react";
 import { OrbitSpeechBubble, OrbitSecretChip } from "./OrbitOverlays";
+import { orbitStage } from "../../services/orbitStage";
 
 const GESTURE_STATE: Record<string, CharacterState> = {
   tap: "clicking",
@@ -72,9 +73,26 @@ export const FloatingMascot: React.FC = () => {
     return characterState;
   })();
 
+  // When the panel opens, docked Orbit glances up at it for a moment (idle personality only).
+  const [glancingAtPanel, setGlancingAtPanel] = useState(false);
+  const [wasOpen, setWasOpen] = useState(isOpen);
+  if (wasOpen !== isOpen) {
+    setWasOpen(isOpen);
+    setGlancingAtPanel(isOpen);
+  }
+  useEffect(() => {
+    if (!glancingAtPanel) return;
+    const t = setTimeout(() => setGlancingAtPanel(false), 2200);
+    return () => clearTimeout(t);
+  }, [glancingAtPanel]);
+  const panelGlance = isOpen && glancingAtPanel && placement.isDocked
+    ? { x: window.innerWidth - 240, y: window.innerHeight - dockClearance() - 140 }
+    : null;
+
+  // A soft, slightly floaty flight that settles without overshooting into the target.
   const transition = reduceMotion
     ? { duration: 0 }
-    : { type: "spring" as const, damping: 22, stiffness: 140, mass: 0.9 };
+    : { type: "spring" as const, damping: 26, stiffness: 90, mass: 1, restDelta: 0.5, restSpeed: 2 };
 
   return (
     <>
@@ -82,6 +100,7 @@ export const FloatingMascot: React.FC = () => {
         initial={false}
         animate={{ x: placement.x, y: placement.y }}
         transition={transition}
+        onAnimationComplete={() => orbitStage.emit({ type: "arrived", target: placement.targetKey })}
         className="fixed top-0 left-0 z-[70] select-none pointer-events-none"
         style={{ width: MASCOT_BOX.width, height: MASCOT_BOX.height }}
       >
@@ -102,7 +121,7 @@ export const FloatingMascot: React.FC = () => {
               size="md"
               audioLevel={voice.audioLevel ?? 0}
               facing={placement.facing}
-              lookAt={placement.lookAt}
+              lookAt={placement.lookAt ?? panelGlance}
               emotion={speech?.emotion}
               playSoundOnChange
             />

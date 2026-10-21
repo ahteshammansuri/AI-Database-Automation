@@ -41,7 +41,8 @@ const ColumnRow: React.FC<{ col: PlanColumn } & Omit<Props, "plan" | "problems">
   return (
     <div
       ref={(el) => (el ? orbitTargets.register(`builder.col.${col.name}`, el) : orbitTargets.unregister(`builder.col.${col.name}`))}
-      className={`rounded-xl border p-3 sm:p-4 transition ${problem ? "border-rose-300 bg-rose-50/40" : "border-slate-200 bg-white hover:border-slate-300"}`}
+      data-invalid={problem ? "true" : undefined}
+      className={`rounded-2xl border p-4 sm:p-5 transition-all ${problem ? "border-rose-300 bg-rose-50/40" : "border-slate-200 bg-white hover:border-indigo-200 hover:shadow-soft"}`}
     >
       <div className="grid gap-3 md:grid-cols-[minmax(0,13rem)_minmax(0,1fr)] md:gap-4">
         <div className="min-w-0">
@@ -75,7 +76,7 @@ const ColumnRow: React.FC<{ col: PlanColumn } & Omit<Props, "plan" | "problems">
               <ValueEditor col={col} mode={mode} value={m?.fixed_value} onChange={setValue} connectionId={connectionId} timezone={timezone} />
             )}
           </div>
-          <p className={`flex items-start gap-1.5 text-[11px] leading-relaxed ${problem ? "text-rose-700" : "text-slate-500"}`}>
+          <p role={problem ? "alert" : undefined} className={`flex items-start gap-1.5 leading-relaxed ${problem ? "text-[12px] font-medium text-rose-600" : "text-[11px] text-slate-500"}`}>
             {problem ? <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" /> : <Sparkles className="mt-0.5 h-3 w-3 shrink-0 text-indigo-400" />}
             <span>{problem ?? explain(col, m, { titleColumn, length, format, manual })}</span>
           </p>
@@ -152,7 +153,7 @@ const ValueEditor: React.FC<{ col: PlanColumn; mode: Mode; value: any; onChange:
         maxLength={col.max_length ?? undefined}
         placeholder={col.kind === "image" ? "https://…" : "Value"}
         aria-label={`${col.name} value`}
-        className="w-full min-w-0 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs text-slate-900 focus:border-indigo-600 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+        className="da-input min-w-0"
       />
       {col.kind === "image" && /^https?:\/\//.test(String(value || "")) && (
         <img src={String(value)} alt="" className="h-9 w-14 shrink-0 rounded-lg border border-slate-200 object-cover" />

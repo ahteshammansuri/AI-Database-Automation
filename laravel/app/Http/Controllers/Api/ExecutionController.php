@@ -7,6 +7,7 @@ use App\Models\AutomationExecution;
 use App\Models\ContentVersion;
 use App\Jobs\GenerateAutomationContentJob;
 use App\Jobs\PublishAutomationContentJob;
+use App\Services\Automation\DraftPayloadValidator;
 use App\Services\LiveEventService;
 use App\Services\SafeDatabaseExecutor;
 use App\Models\AuditLog;
@@ -287,6 +288,15 @@ class ExecutionController extends Controller
 
         if (empty($cleanPayload)) {
             return response()->json(['message' => 'No eligible fields provided for update.'], 422);
+        }
+
+        // Check every edited value before the UPDATE runs; problems come back under each field. Values are written
+        // as-is here (no name-to-id lookup), so linked id columns must hold numbers too.
+        $current = $execution->versions->sortBy('version_number')->last()?->payload ?? [];
+        $meta = DraftPayloadValidator::metaFor($execution->versions->sortBy('version_number')->all());
+        $fieldErrors = DraftPayloadValidator::errors($cleanPayload, is_array($current) ? $current : [], $meta['write_plan']['columns'] ?? []);
+        if ($fieldErrors) {
+            return response()->json(['message' => reset($fieldErrors)[0], 'errors' => $fieldErrors], 422);
         }
 
         $result = $executor->executeScopedUpdate(

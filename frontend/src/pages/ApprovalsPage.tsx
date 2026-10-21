@@ -1,31 +1,16 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { motion, AnimatePresence } from "framer-motion";
-import {
-  CheckCircle2,
-  Clock,
-  Eye,
-  ArrowRight,
-  ShieldCheck,
-  Edit3,
-  Send,
-  RotateCcw,
-  Save,
-  Check,
-  X,
-  FileText,
-  Calendar,
-  Layers,
-  Sparkles,
-  AlertCircle,
-  Database,
-  ExternalLink,
-  RefreshCw
-} from "lucide-react";
+import { motion } from "framer-motion";
+import { CheckCircle2, Clock, Eye, ArrowRight, Edit3, Send, RotateCcw, Save, FileText, Calendar, Database, RefreshCw, Workflow } from "lucide-react";
 import { api } from "../services/api";
 import { ContentPreview } from "../components/content/ContentPreview";
 import { formatInstant } from "../lib/schedule";
-import { StatusPill } from "../components/common/StatusPill";
+import { Card, EmptyState, FieldError, Loading, ModalShell, PageHeader } from "../components/ui/kit";
+import { draftPayloadErrors, draftRelationColumns, focusFirstError, invalid, rules, serverFieldErrors, validateField, type FieldErrors } from "../lib/validation";
+
+/** Input id for an edited draft column, so its message sits under it. */
+const draftFieldId = (key: string) => `approval-field-${key}`;
+import { SpotlightCard } from "../components/landing/primitives";
 import { useToast } from "../context/ToastContext";
 import { useOrbitSurface } from "../hooks/useOrbitSurface";
 import { useRefreshAfterOrbit } from "../hooks/useRefreshAfterOrbit";
@@ -69,6 +54,9 @@ export const ApprovalsPage: React.FC = () => {
   const [showRejectModal, setShowRejectModal] = useState(false);
   const [rejectFeedback, setRejectFeedback] = useState("");
   const [isRejecting, setIsRejecting] = useState(false);
+  // Messages under each edited column, and under the "send back" notes.
+  const [editErrors, setEditErrors] = useState<FieldErrors>({});
+  const [rejectError, setRejectError] = useState<string | null>(null);
 
   const loadData = async () => {
     try {
@@ -184,10 +172,39 @@ export const ApprovalsPage: React.FC = () => {
   const openReviewModal = (item: PendingApprovalItem) => {
     setSelectedItem(item);
     setEditPayload({ ...(item.payload || {}) });
+    setEditErrors({});
     setActiveTab("preview");
   };
 
+  /** Same checks the server applies to an edited draft; problems are shown under their fields on the Edit tab. */
+  const checkDraft = (): boolean => {
+    const meta = (selectedItem as any)?.meta;
+    const found = draftPayloadErrors(editPayload, meta?.write_plan?.columns, draftRelationColumns(meta));
+    return showDraftErrors(found);
+  };
+  const showDraftErrors = (found: FieldErrors): boolean => {
+    setEditErrors(found);
+    if (!Object.keys(found).length) return true;
+    setActiveTab("edit");
+    setTimeout(() => focusFirstError(found, draftFieldId), 60);
+    return false;
+  };
+  /** A 422 for the draft ("payload.<column>") placed under the columns; other failures go to a toast. */
+  const draftServerErrors = (err: any): boolean => {
+    const fields = serverFieldErrors(err, {}, Object.keys(editPayload));
+    const placed = Object.fromEntries(Object.entries(fields).filter(([k]) => k in editPayload));
+    if (!Object.keys(placed).length) return false;
+    showDraftErrors(placed);
+    return true;
+  };
+
   const handleFieldChange = (field: string, value: any) => {
+    setEditErrors((prev) => {
+      if (!(field in prev)) return prev;
+      const next = { ...prev };
+      delete next[field];
+      return next;
+    });
     setEditPayload((prev) => ({
       ...prev,
       [field]: value,
@@ -195,7 +212,7 @@ export const ApprovalsPage: React.FC = () => {
   };
 
   const handleSaveEdits = async () => {
-    if (!selectedItem) return;
+    if (!selectedItem || !checkDraft()) return;
     try {
       setIsSaving(true);
       await api.updateApprovalPayload(selectedItem.id, editPayload);
@@ -206,14 +223,14 @@ export const ApprovalsPage: React.FC = () => {
       );
       setSelectedItem((prev) => (prev ? { ...prev, payload: editPayload } : null));
     } catch (err: any) {
-      toast.error("Failed to save changes", err.message);
+      if (!draftServerErrors(err)) toast.error("Failed to save changes", err.message);
     } finally {
       setIsSaving(false);
     }
   };
 
   const handleApprove = async (publishNow: boolean) => {
-    if (!selectedItem) return;
+    if (!selectedItem || !checkDraft()) return;
     try {
       setIsPublishing(true);
       const res = await api.portalApprove(selectedItem.id, {
@@ -227,7 +244,7 @@ export const ApprovalsPage: React.FC = () => {
       setSelectedItem(null);
       loadData();
     } catch (err: any) {
-      toast.error("Approval Failed", err.message);
+      if (!draftServerErrors(err)) toast.error("Approval Failed", err.message);
     } finally {
       setIsPublishing(false);
     }
@@ -235,80 +252,61 @@ export const ApprovalsPage: React.FC = () => {
 
   const handleReject = async () => {
     if (!selectedItem) return;
+    const problem = validateField("feedback", { feedback: rejectFeedback }, { feedback: [rules.maxLength(2000, "Notes")] });
+    setRejectError(problem);
+    if (problem) {
+      document.getElementById("reject-notes")?.focus();
+      return;
+    }
     try {
       setIsRejecting(true);
-      const res = await api.portalReject(selectedItem.id, rejectFeedback || undefined);
+      const res = await api.portalReject(selectedItem.id, rejectFeedback.trim() || undefined);
       toast.info("Regeneration Dispatched", res.message || "AI is generating a revised version.");
       setShowRejectModal(false);
       setRejectFeedback("");
       setSelectedItem(null);
       loadData();
     } catch (err: any) {
-      toast.error("Rejection Failed", err.message);
+      const msg = serverFieldErrors(err).feedback;
+      if (msg) setRejectError(msg);
+      else toast.error("Rejection Failed", err.message);
     } finally {
       setIsRejecting(false);
     }
   };
 
   return (
-    <div id="approvals-list-anchor" className="space-y-6 max-w-7xl mx-auto">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-slate-200">
-        <div>
-          <div className="flex items-center gap-2 mb-1">
-            <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200">
-              Human-In-The-Loop Editorial Control
-            </span>
-            <span className="text-xs text-slate-500">• Live Pre-Publication Inspection</span>
-          </div>
-          <h2 className="text-xl font-bold text-slate-900 tracking-tight">Review & Approval Queue</h2>
-          <p className="text-xs text-slate-500 mt-0.5">
-            Inspect, modify, and sign off on AI-generated content before scheduled database publication.
-          </p>
-        </div>
-
-        <button
-          onClick={loadData}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 hover:border-slate-300 rounded-xl text-xs font-medium text-slate-700 transition shadow-2xs self-start sm:self-auto"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 text-slate-500 ${loading ? "animate-spin" : ""}`} />
-          <span>Refresh Queue</span>
-        </button>
-      </div>
+    <div id="approvals-list-anchor" className="mx-auto max-w-7xl space-y-6">
+      <PageHeader
+        eyebrow="Automate"
+        title="Approvals"
+        description="Drafts waiting for a person's OK. Edit them, approve them for their scheduled time, publish now, or send them back with notes."
+        actions={
+          <>
+            {approvals.length > 0 && <span className="da-chip da-chip-amber px-3 py-1 text-[12px]">{approvals.length} waiting</span>}
+            <button type="button" onClick={loadData} className="da-btn da-btn-secondary">
+              <RefreshCw className={`h-4 w-4 text-slate-500 ${loading ? "animate-spin" : ""}`} /> Refresh
+            </button>
+          </>
+        }
+      />
 
       {loading ? (
-        <div className="py-20 text-center bg-white border border-slate-200/90 rounded-2xl shadow-xs">
-          <div className="w-8 h-8 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-          <p className="text-slate-500 text-sm font-medium">Checking pending editorial approvals...</p>
-        </div>
+        <Card><Loading label="Checking for drafts to review…" /></Card>
       ) : approvals.length === 0 ? (
-        <motion.div
-          initial={{ opacity: 0, scale: 0.98 }}
-          animate={{ opacity: 1, scale: 1 }}
-          className="py-16 text-center bg-white border border-slate-200/90 rounded-2xl shadow-xs p-8"
-        >
-          <div className="w-12 h-12 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto mb-3 shadow-2xs">
-            <CheckCircle2 className="w-6 h-6" />
-          </div>
-          <h3 className="text-base font-bold text-slate-900 mb-1">Queue is Clear</h3>
-          <p className="text-xs text-slate-500 max-w-sm mx-auto leading-relaxed">
-            All generated database mutations have either been approved, published, or handled.
-          </p>
-          <Link
-            to="/automations"
-            className="inline-flex items-center gap-1.5 px-4 py-2 mt-4 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 rounded-xl text-xs font-bold transition"
-          >
-            <span>View Active Automations</span>
-            <ArrowRight className="w-3.5 h-3.5" />
-          </Link>
-        </motion.div>
+        <EmptyState
+          icon={CheckCircle2}
+          title="All caught up"
+          description="Every draft has been approved, published or handled. New drafts appear here as soon as an automation writes them."
+          action={<Link to="/automations" className="da-btn da-btn-secondary">View automations <ArrowRight className="h-3.5 w-3.5" /></Link>}
+        />
       ) : (
         <div className="space-y-4">
-          {approvals.map((item) => {
+          {approvals.map((item, idx) => {
             const execution = item.execution;
             const payload = item.payload || {};
-            const title = payload.title || payload.name || `Generated Run #${execution?.id || item.id}`;
-            const excerpt = payload.excerpt || payload.description || "Structured payload pending editorial confirmation.";
+            const title = payload.title || payload.name || `Generated run #${execution?.id || item.id}`;
+            const excerpt = payload.excerpt || payload.description || "Structured content waiting for a reviewer.";
             const targetTable = execution?.automation?.target_table || "target table";
             const pubTime = execution?.publication_time ? new Date(execution.publication_time) : null;
             const fieldCount = Object.keys(payload).length;
@@ -316,465 +314,296 @@ export const ApprovalsPage: React.FC = () => {
             return (
               <motion.div
                 key={item.id}
+                initial={{ opacity: 0, y: 14 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.45, delay: Math.min(idx, 8) * 0.05, ease: [0.16, 1, 0.3, 1] }}
                 ref={(el: HTMLDivElement | null) =>
                   el ? orbitTargets.register(`approvals.row.${item.id}`, el) : orbitTargets.unregister(`approvals.row.${item.id}`)
                 }
-                whileHover={{ y: -2, transition: { duration: 0.2 } }}
-                className="bg-white border border-amber-200 hover:border-amber-300 rounded-2xl p-5 shadow-xs space-y-4 transition-all"
               >
-                {/* Header Strip */}
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-3">
-                  <div className="flex items-center gap-2.5 flex-wrap">
-                    <span className="font-bold text-slate-900 text-sm">
-                      Run #{execution?.id || item.id}
-                    </span>
-                    <span className="px-2 py-0.5 rounded text-[11px] bg-amber-50 text-amber-800 border border-amber-200 font-bold">
-                      Version #{item.version_number}
-                    </span>
-                    <span className="text-xs text-slate-500 font-medium">
-                      Pipeline: <span className="font-semibold text-slate-800">{execution?.automation?.name || "Content Pipeline"}</span>
-                    </span>
-                    <span className="text-xs text-indigo-700 font-mono bg-indigo-50 px-2 py-0.5 rounded border border-indigo-100">
-                      Table: {targetTable}
-                    </span>
-                  </div>
-
-                  <div className="flex items-center gap-2 text-xs font-mono text-slate-500">
-                    <Clock className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-                    <span>
-                      Target Publication:{" "}
-                      <strong className="text-slate-800">
-                        {pubTime ? pubTime.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) + " (" + pubTime.toLocaleDateString() + ")" : "Immediate"}
-                      </strong>
-                    </span>
-                  </div>
-                </div>
-
-                {/* Content Summary Card */}
-                <div className="space-y-2 bg-slate-50/60 p-4 rounded-xl border border-slate-200/80">
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-sm font-bold text-slate-900 tracking-tight flex items-center gap-2">
-                      <FileText className="w-4 h-4 text-indigo-600" />
-                      <span>{title}</span>
-                    </h3>
-                    <span className="text-[11px] text-slate-400 font-mono">
-                      {fieldCount} fields ready to write
-                    </span>
-                  </div>
-
-                  <p className="text-xs text-slate-600 leading-relaxed font-sans line-clamp-2">
-                    {excerpt}
-                  </p>
-
-                  {/* Badges for payload keys */}
-                  <div className="flex flex-wrap gap-1.5 pt-1">
-                    {Object.keys(payload)
-                      .slice(0, 5)
-                      .map((k) => (
-                        <span key={k} className="px-2 py-0.5 bg-white text-slate-600 text-[10px] rounded border border-slate-200 font-mono">
-                          {k}: {String(payload[k]).slice(0, 20)}
+                <SpotlightCard className="shadow-soft">
+                  <div className="flex flex-col gap-5 p-5 sm:p-6 md:flex-row">
+                    <div className="relative hidden h-28 w-40 shrink-0 overflow-hidden rounded-2xl bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-400 md:block">
+                      <div className="absolute inset-0 landing-grid opacity-40" />
+                      <FileText className="absolute bottom-3 left-3 h-6 w-6 text-white/90" />
+                      <span className="absolute right-2 top-2 rounded-full bg-black/25 px-2 py-0.5 text-[10.5px] font-semibold text-white">v{item.version_number}</span>
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="da-chip da-chip-amber">Needs review</span>
+                        <span className="da-chip da-chip-slate">Run #{execution?.id || item.id}</span>
+                        <span className="da-chip da-chip-slate">Version {item.version_number}</span>
+                        <span className="da-chip da-chip-indigo font-mono">{targetTable}</span>
+                      </div>
+                      <h3 className="mt-3 text-[17px] font-bold tracking-[-0.02em] text-slate-950">{title}</h3>
+                      <p className="mt-1.5 line-clamp-2 text-[13.5px] leading-relaxed text-slate-600">{excerpt}</p>
+                      <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[12.5px] text-slate-500">
+                        <span className="flex items-center gap-1.5"><Workflow className="h-3.5 w-3.5 text-slate-400" /> {execution?.automation?.name || "Content pipeline"}</span>
+                        <span className="flex items-center gap-1.5">
+                          <Clock className="h-3.5 w-3.5 text-amber-500" />
+                          Publishes <strong className="font-semibold text-slate-800">{pubTime ? `${pubTime.toLocaleDateString()} · ${pubTime.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "right after approval"}</strong>
                         </span>
-                      ))}
-                    {fieldCount > 5 && (
-                      <span className="px-1.5 py-0.5 text-slate-400 text-[10px] font-mono">
-                        +{fieldCount - 5} more
-                      </span>
-                    )}
+                        <span>{fieldCount} fields ready</span>
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-1.5">
+                        {Object.keys(payload).slice(0, 5).map((k) => (
+                          <span key={k} className="max-w-[220px] truncate rounded-lg border border-slate-200 bg-slate-50 px-2 py-0.5 font-mono text-[11px] text-slate-600">
+                            {k}: {String(payload[k]).slice(0, 24)}
+                          </span>
+                        ))}
+                        {fieldCount > 5 && <span className="px-1.5 py-0.5 font-mono text-[11px] text-slate-400">+{fieldCount - 5} more</span>}
+                      </div>
+                      <div className="mt-5 flex flex-wrap items-center gap-2">
+                        <button type="button" onClick={() => openReviewModal(item)} className="da-btn da-btn-secondary">
+                          <Edit3 className="h-3.5 w-3.5 text-indigo-600" /> Review & edit
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { setSelectedItem(item); handleApprove(false); }}
+                          className="da-btn border border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100"
+                        >
+                          <Calendar className="h-3.5 w-3.5" /> Approve for schedule
+                        </button>
+                        <button type="button" onClick={() => { setSelectedItem(item); handleApprove(true); }} className="da-btn da-btn-primary">
+                          <Send className="h-3.5 w-3.5" /> Publish now
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { setSelectedItem(item); setShowRejectModal(true); }}
+                          className="da-btn da-btn-ghost text-rose-600 hover:bg-rose-50 hover:text-rose-700"
+                        >
+                          <RotateCcw className="h-3.5 w-3.5" /> Send back
+                        </button>
+                        <span className="ml-auto hidden truncate font-mono text-[11px] text-slate-400 lg:inline">
+                          {execution?.idempotency_key ? `key ${String(execution.idempotency_key).slice(0, 18)}…` : ""}
+                        </span>
+                      </div>
+                    </div>
                   </div>
-                </div>
-
-                {/* Action Buttons */}
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
-                  <div className="text-[11px] text-slate-400 font-mono truncate">
-                    Idempotency: {execution?.idempotency_key || "auto-managed"}
-                  </div>
-
-                  <div className="flex items-center gap-2 flex-wrap">
-                    {/* Review & Edit */}
-                    <button
-                      type="button"
-                      onClick={() => openReviewModal(item)}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-white border border-slate-300 hover:border-indigo-400 hover:text-indigo-700 text-slate-700 rounded-xl text-xs font-semibold transition shadow-2xs"
-                    >
-                      <Edit3 className="w-3.5 h-3.5 text-indigo-600" />
-                      <span>Review & Edit Live Content</span>
-                    </button>
-
-                    {/* Quick Approve for Schedule */}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSelectedItem(item);
-                        handleApprove(false);
-                      }}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 rounded-xl text-xs font-bold transition shadow-2xs"
-                    >
-                      <Calendar className="w-3.5 h-3.5" />
-                      <span>Approve for Schedule</span>
-                    </button>
-
-                    {/* Publish Now Immediately */}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSelectedItem(item);
-                        handleApprove(true);
-                      }}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition shadow-xs"
-                    >
-                      <Send className="w-3.5 h-3.5" />
-                      <span>Publish Now</span>
-                    </button>
-
-                    {/* Reject & Regenerate */}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSelectedItem(item);
-                        setShowRejectModal(true);
-                      }}
-                      className="inline-flex items-center gap-1 px-2.5 py-2 text-rose-600 hover:bg-rose-50 rounded-xl text-xs font-semibold transition"
-                    >
-                      <RotateCcw className="w-3.5 h-3.5" />
-                      <span>Reject</span>
-                    </button>
-                  </div>
-                </div>
+                </SpotlightCard>
               </motion.div>
             );
           })}
         </div>
       )}
 
-      {/* Live Editorial Review & In-Place Editor Modal */}
-      <AnimatePresence>
-        {selectedItem && !showRejectModal && (
-          <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 10 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 10 }}
-              transition={{ duration: 0.2 }}
-              className="bg-white border border-slate-200 rounded-t-2xl sm:rounded-2xl max-w-4xl w-full p-4 sm:p-6 shadow-2xl space-y-4 max-h-[94vh] sm:max-h-[90vh] flex flex-col"
-            >
-              {/* Modal Header */}
-              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-                <div>
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-200">
-                      Live Editorial Studio
-                    </span>
-                    <span className="text-xs font-mono text-slate-500">
-                      Version #{selectedItem.version_number} • Target: {selectedItem.execution?.automation?.target_table || "blogs"}
-                    </span>
-                  </div>
-                  <h3 className="text-base font-bold text-slate-900">
-                    Review & Edit Content Before Publication
-                  </h3>
-                </div>
-                <button
-                  onClick={() => setSelectedItem(null)}
-                  className="p-1 text-slate-400 hover:text-slate-700 rounded-lg text-sm font-bold"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-
-              {/* Publication Schedule Notice */}
-              <div className="p-3 bg-indigo-50/70 border border-indigo-200/80 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-indigo-900">
-                <div className="flex items-center gap-2">
-                  <Clock className="w-4 h-4 text-indigo-600 shrink-0" />
-                  <span>
-                    <strong>Scheduled Publication:</strong>{" "}
-                    {selectedItem.execution?.publication_time
-                      ? formatInstant(selectedItem.execution.publication_time, (selectedItem.execution?.automation as any)?.timezone || "UTC", { withZone: true })
-                      : "Immediately after approval"}
-                  </span>
-                </div>
-                <span className="text-[11px] font-medium text-indigo-700 bg-white px-2 py-0.5 rounded border border-indigo-100">
-                  Edits change this draft only; nothing is written until it is published
+      {/* Review & edit */}
+      <ModalShell
+        open={!!selectedItem && !showRejectModal}
+        onClose={() => setSelectedItem(null)}
+        size="xl"
+        icon={Edit3}
+        title="Review & edit before publishing"
+        description={selectedItem ? `Version ${selectedItem.version_number} · writes into ${selectedItem.execution?.automation?.target_table || "the target table"}` : undefined}
+        footer={
+          <>
+            <button type="button" onClick={handleSaveEdits} disabled={isSaving} className="da-btn da-btn-secondary mr-auto">
+              <Save className="h-3.5 w-3.5 text-slate-500" /> {isSaving ? "Saving…" : "Save edits"}
+            </button>
+            <button type="button" onClick={() => handleApprove(false)} disabled={isPublishing} className="da-btn border border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100">
+              <Calendar className="h-3.5 w-3.5" /> Approve for schedule
+            </button>
+            <button type="button" onClick={() => handleApprove(true)} disabled={isPublishing} className="da-btn da-btn-primary">
+              <Send className="h-3.5 w-3.5" /> {isPublishing ? "Publishing…" : "Publish now"}
+            </button>
+          </>
+        }
+      >
+        {selectedItem && (
+          <div className="space-y-5">
+            <div className="flex flex-col gap-2 rounded-2xl border border-indigo-100 bg-indigo-50/60 px-4 py-3 text-[13px] text-indigo-900 sm:flex-row sm:items-center sm:justify-between">
+              <span className="flex items-center gap-2">
+                <Clock className="h-4 w-4 shrink-0 text-indigo-600" />
+                <span>
+                  <strong>Publishes</strong>{" "}
+                  {selectedItem.execution?.publication_time
+                    ? formatInstant(selectedItem.execution.publication_time, (selectedItem.execution?.automation as any)?.timezone || "UTC", { withZone: true })
+                    : "right after approval"}
                 </span>
-              </div>
+              </span>
+              <span className="text-[12px] text-indigo-700">Edits change this draft only; nothing is written until it is published.</span>
+            </div>
 
-              {/* Tabs */}
-              <div className="flex items-center gap-1 border-b border-slate-200 pb-2 overflow-x-auto">
-                <button
-                  type="button"
-                  onClick={() => setActiveTab("edit")}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
-                    activeTab === "edit"
-                      ? "bg-indigo-600 text-white shadow-2xs"
-                      : "text-slate-600 hover:bg-slate-100"
-                  }`}
-                >
-                  <Edit3 className="w-3.5 h-3.5 inline mr-1" />
-                  Edit fields
+            <div className="da-tabs" role="tablist">
+              {([["edit", "Edit fields", Edit3], ["preview", "Preview", Eye], ["json", "Database payload", Database]] as const).map(([id, label, Icon]) => (
+                <button key={id} type="button" role="tab" aria-selected={activeTab === id} onClick={() => setActiveTab(id as any)}
+                  className={`da-tab ${activeTab === id ? "da-tab-active" : ""}`}>
+                  <Icon className="h-3.5 w-3.5" /> {label}
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab("preview")}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
-                    activeTab === "preview"
-                      ? "bg-indigo-600 text-white shadow-2xs"
-                      : "text-slate-600 hover:bg-slate-100"
-                  }`}
-                >
-                  <Eye className="w-3.5 h-3.5 inline mr-1" />
-                  Preview
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab("json")}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
-                    activeTab === "json"
-                      ? "bg-indigo-600 text-white shadow-2xs"
-                      : "text-slate-600 hover:bg-slate-100"
-                  }`}
-                >
-                  <Database className="w-3.5 h-3.5 inline mr-1" />
-                  Raw Database Payload
-                </button>
-              </div>
+              ))}
+            </div>
 
-              {/* Tab Content Area */}
-              <div className="overflow-y-auto flex-1 pr-1 space-y-4 text-xs">
-                {activeTab === "edit" && (
-                  <div className="space-y-4">
-                    {/* Primary Title Field */}
-                    {(editPayload.title !== undefined || editPayload.name !== undefined) && (
-                      <div>
-                        <label className="block text-xs font-bold text-slate-800 mb-1">
-                          Article Title / Name
-                        </label>
-                        <input
-                          type="text"
-                          value={editPayload.title !== undefined ? editPayload.title : editPayload.name}
-                          onChange={(e) => {
-                            if (editPayload.title !== undefined) handleFieldChange("title", e.target.value);
-                            else handleFieldChange("name", e.target.value);
-                          }}
-                          className="w-full bg-slate-50/50 border border-slate-300 rounded-xl px-3 py-2 text-xs font-semibold text-slate-900 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 transition"
-                        />
-                      </div>
-                    )}
-
-                    {/* Slug Field */}
-                    {editPayload.slug !== undefined && (
-                      <div>
-                        <div className="flex items-center justify-between mb-1">
-                          <label className="text-xs font-bold text-slate-800">
-                            URL Slug
-                          </label>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const title = editPayload.title || editPayload.name || "";
-                              const slug = title
-                                .toLowerCase()
-                                .replace(/[^a-z0-9]+/g, "-")
-                                .replace(/^-+|-+$/g, "");
-                              handleFieldChange("slug", slug);
-                            }}
-                            className="text-[10px] text-indigo-600 hover:text-indigo-800 font-semibold"
-                          >
-                            Regenerate Slug from Title
-                          </button>
-                        </div>
-                        <input
-                          type="text"
-                          value={editPayload.slug}
-                          onChange={(e) => handleFieldChange("slug", e.target.value)}
-                          className="w-full bg-slate-50/50 border border-slate-300 rounded-xl px-3 py-2 text-xs font-mono text-slate-900 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 transition"
-                        />
-                      </div>
-                    )}
-
-                    {/* Excerpt / Summary Field */}
-                    {(editPayload.excerpt !== undefined || editPayload.description !== undefined) && (
-                      <div>
-                        <label className="block text-xs font-bold text-slate-800 mb-1">
-                          Excerpt / Summary Preview
-                        </label>
-                        <textarea
-                          rows={3}
-                          value={editPayload.excerpt !== undefined ? editPayload.excerpt : editPayload.description}
-                          onChange={(e) => {
-                            if (editPayload.excerpt !== undefined) handleFieldChange("excerpt", e.target.value);
-                            else handleFieldChange("description", e.target.value);
-                          }}
-                          className="w-full bg-slate-50/50 border border-slate-300 rounded-xl p-3 text-xs text-slate-900 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 transition leading-relaxed"
-                        />
-                      </div>
-                    )}
-
-                    {/* Content / Body Field */}
-                    {(editPayload.content !== undefined || editPayload.body !== undefined) && (
-                      <div>
-                        <div className="flex items-center justify-between mb-1">
-                          <label className="text-xs font-bold text-slate-800">
-                            Full Article Content (Markdown or HTML)
-                          </label>
-                          <span className="text-[10px] font-mono text-slate-400">
-                            {(editPayload.content || editPayload.body || "").split(/\s+/).filter(Boolean).length} words
-                          </span>
-                        </div>
-                        <textarea
-                          rows={9}
-                          value={editPayload.content !== undefined ? editPayload.content : editPayload.body}
-                          onChange={(e) => {
-                            if (editPayload.content !== undefined) handleFieldChange("content", e.target.value);
-                            else handleFieldChange("body", e.target.value);
-                          }}
-                          className="w-full bg-slate-50/50 border border-slate-300 rounded-xl p-3 text-xs font-sans text-slate-900 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 transition leading-relaxed"
-                        />
-                      </div>
-                    )}
-
-                    {/* Dynamic Remaining Target Fields */}
-                    <div className="pt-2 border-t border-slate-100">
-                      <label className="block text-xs font-bold text-slate-800 mb-2">
-                        Target Columns & Relational Metadata
-                      </label>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        {Object.keys(editPayload)
-                          .filter(
-                            (k) =>
-                              !["title", "name", "slug", "excerpt", "description", "content", "body"].includes(k)
-                          )
-                          .map((key) => (
-                            <div key={key}>
-                              <label className="block text-[11px] font-semibold text-slate-600 font-mono mb-1">
-                                {key}
-                              </label>
-                              <input
-                                type="text"
-                                value={
-                                  typeof editPayload[key] === "object"
-                                    ? JSON.stringify(editPayload[key])
-                                    : String(editPayload[key] ?? "")
-                                }
-                                onChange={(e) => handleFieldChange(key, e.target.value)}
-                                className="w-full bg-slate-50/50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs text-slate-900 focus:bg-white focus:ring-1 focus:ring-indigo-500"
-                              />
-                            </div>
-                          ))}
-                      </div>
-                    </div>
+            {activeTab === "edit" && (
+              <div className="space-y-4">
+                {(editPayload.title !== undefined || editPayload.name !== undefined) && (
+                  <div>
+                    {(() => {
+                      const key = editPayload.title !== undefined ? "title" : "name";
+                      return (
+                        <>
+                          <label className="da-label" htmlFor={draftFieldId(key)}>Title</label>
+                          <input
+                            id={draftFieldId(key)}
+                            type="text"
+                            value={editPayload[key] ?? ""}
+                            onChange={(e) => handleFieldChange(key, e.target.value)}
+                            aria-invalid={!!editErrors[key]}
+                            aria-describedby={editErrors[key] ? `${draftFieldId(key)}-error` : undefined}
+                            className={`da-input font-semibold${invalid(editErrors[key])}`}
+                          />
+                          <FieldError id={draftFieldId(key)} message={editErrors[key]} />
+                        </>
+                      );
+                    })()}
                   </div>
                 )}
-
-                {activeTab === "preview" && (
-                  <ContentPreview
-                    payload={editPayload}
-                    meta={(selectedItem as any).meta}
-                    targetTable={selectedItem.execution?.automation?.target_table}
-                    timezone={(selectedItem.execution?.automation as any)?.timezone || "UTC"}
-                    publicationTime={selectedItem.execution?.publication_time}
-                  />
+                {editPayload.slug !== undefined && (
+                  <div>
+                    <div className="mb-1.5 flex items-center justify-between">
+                      <label className="text-[12.5px] font-semibold text-slate-700" htmlFor={draftFieldId("slug")}>URL slug</label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const t = editPayload.title || editPayload.name || "";
+                          handleFieldChange("slug", t.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, ""));
+                        }}
+                        className="text-[12px] font-semibold text-indigo-600 hover:text-indigo-800"
+                      >
+                        Regenerate from title
+                      </button>
+                    </div>
+                    <input id={draftFieldId("slug")} type="text" value={editPayload.slug ?? ""} onChange={(e) => handleFieldChange("slug", e.target.value)}
+                      aria-invalid={!!editErrors.slug} aria-describedby={editErrors.slug ? `${draftFieldId("slug")}-error` : undefined}
+                      className={`da-input font-mono${invalid(editErrors.slug)}`} />
+                    <FieldError id={draftFieldId("slug")} message={editErrors.slug} />
+                  </div>
                 )}
-
-                {activeTab === "json" && (
-                  <pre className="bg-slate-900 text-slate-100 p-4 rounded-xl font-mono text-[11px] overflow-x-auto max-h-80">
-                    {JSON.stringify(editPayload, null, 2)}
-                  </pre>
+                {(editPayload.excerpt !== undefined || editPayload.description !== undefined) && (
+                  <div>
+                    {(() => {
+                      const key = editPayload.excerpt !== undefined ? "excerpt" : "description";
+                      return (
+                        <>
+                          <label className="da-label" htmlFor={draftFieldId(key)}>Summary</label>
+                          <textarea
+                            id={draftFieldId(key)}
+                            rows={3}
+                            value={editPayload[key] ?? ""}
+                            onChange={(e) => handleFieldChange(key, e.target.value)}
+                            aria-invalid={!!editErrors[key]}
+                            aria-describedby={editErrors[key] ? `${draftFieldId(key)}-error` : undefined}
+                            className={`da-input leading-relaxed${invalid(editErrors[key])}`}
+                          />
+                          <FieldError id={draftFieldId(key)} message={editErrors[key]} />
+                        </>
+                      );
+                    })()}
+                  </div>
                 )}
-              </div>
-
-              {/* Action Buttons Footer */}
-              <div className="pt-3 border-t border-slate-100 flex flex-col sm:flex-row items-center justify-between gap-3">
-                <button
-                  type="button"
-                  onClick={handleSaveEdits}
-                  disabled={isSaving}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-semibold transition"
-                >
-                  <Save className="w-3.5 h-3.5 text-slate-600" />
-                  <span>{isSaving ? "Saving..." : "Save Edits"}</span>
-                </button>
-
-                <div className="flex flex-wrap items-center justify-center gap-2">
-                  {/* Approve for Scheduled Publication */}
-                  <button
-                    type="button"
-                    onClick={() => handleApprove(false)}
-                    disabled={isPublishing}
-                    className="inline-flex items-center gap-1.5 px-4 py-2 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-xl text-xs font-bold transition shadow-2xs"
-                  >
-                    <Calendar className="w-3.5 h-3.5" />
-                    <span>Approve for Schedule</span>
-                  </button>
-
-                  {/* Publish Immediately */}
-                  <button
-                    type="button"
-                    onClick={() => handleApprove(true)}
-                    disabled={isPublishing}
-                    className="inline-flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition shadow-xs"
-                  >
-                    <Send className="w-3.5 h-3.5" />
-                    <span>{isPublishing ? "Publishing..." : "Publish Immediately"}</span>
-                  </button>
+                {(editPayload.content !== undefined || editPayload.body !== undefined) && (
+                  <div>
+                    <div className="mb-1.5 flex items-center justify-between">
+                      <label className="text-[12.5px] font-semibold text-slate-700">Content (Markdown or HTML)</label>
+                      <span className="font-mono text-[11.5px] text-slate-400">
+                        {(editPayload.content || editPayload.body || "").split(/\s+/).filter(Boolean).length} words
+                      </span>
+                    </div>
+                    {(() => {
+                      const key = editPayload.content !== undefined ? "content" : "body";
+                      return (
+                        <>
+                          <textarea
+                            id={draftFieldId(key)}
+                            rows={10}
+                            aria-label="Content"
+                            value={editPayload[key] ?? ""}
+                            onChange={(e) => handleFieldChange(key, e.target.value)}
+                            aria-invalid={!!editErrors[key]}
+                            aria-describedby={editErrors[key] ? `${draftFieldId(key)}-error` : undefined}
+                            className={`da-input leading-relaxed${invalid(editErrors[key])}`}
+                          />
+                          <FieldError id={draftFieldId(key)} message={editErrors[key]} />
+                        </>
+                      );
+                    })()}
+                  </div>
+                )}
+                <div className="border-t border-slate-100 pt-4">
+                  <div className="da-eyebrow mb-3">Other columns</div>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    {Object.keys(editPayload)
+                      .filter((k) => !["title", "name", "slug", "excerpt", "description", "content", "body"].includes(k))
+                      .map((key) => (
+                        <div key={key}>
+                          <label className="mb-1 block font-mono text-[12px] font-semibold text-slate-600" htmlFor={draftFieldId(key)}>{key}</label>
+                          <input
+                            id={draftFieldId(key)}
+                            type="text"
+                            value={typeof editPayload[key] === "object" && editPayload[key] !== null ? JSON.stringify(editPayload[key]) : String(editPayload[key] ?? "")}
+                            onChange={(e) => handleFieldChange(key, e.target.value)}
+                            aria-invalid={!!editErrors[key]}
+                            aria-describedby={editErrors[key] ? `${draftFieldId(key)}-error` : undefined}
+                            className={`da-input py-2${invalid(editErrors[key])}`}
+                          />
+                          <FieldError id={draftFieldId(key)} message={editErrors[key]} />
+                        </div>
+                      ))}
+                  </div>
                 </div>
               </div>
-            </motion.div>
+            )}
+
+            {activeTab === "preview" && (
+              <ContentPreview
+                payload={editPayload}
+                meta={(selectedItem as any).meta}
+                targetTable={selectedItem.execution?.automation?.target_table}
+                timezone={(selectedItem.execution?.automation as any)?.timezone || "UTC"}
+                publicationTime={selectedItem.execution?.publication_time}
+              />
+            )}
+
+            {activeTab === "json" && (
+              <pre className="max-h-96 overflow-auto rounded-2xl bg-ink p-5 font-mono text-[12px] leading-relaxed text-slate-200">
+                {JSON.stringify(editPayload, null, 2)}
+              </pre>
+            )}
           </div>
         )}
-      </AnimatePresence>
+      </ModalShell>
 
-      {/* Reject with Feedback Modal */}
-      <AnimatePresence>
-        {showRejectModal && selectedItem && (
-          <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="bg-white border border-slate-200 rounded-2xl max-w-md w-full p-6 shadow-xl space-y-4"
-            >
-              <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-                <h3 className="font-bold text-slate-900 text-sm flex items-center gap-2">
-                  <RotateCcw className="w-4 h-4 text-rose-600" />
-                  Reject & Regenerate Version #{selectedItem.version_number}
-                </h3>
-                <button onClick={() => setShowRejectModal(false)} className="text-slate-400 font-bold">
-                  ✕
-                </button>
-              </div>
-
-              <div className="space-y-2 text-xs">
-                <p className="text-slate-600">
-                  Provide editorial feedback or specific revision instructions for the local AI model:
-                </p>
-                <textarea
-                  rows={4}
-                  placeholder="e.g. Please make the tone more technical and elaborate on database indexing strategies..."
-                  value={rejectFeedback}
-                  onChange={(e) => setRejectFeedback(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-300 rounded-xl p-3 text-xs text-slate-900 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600"
-                />
-              </div>
-
-              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={() => setShowRejectModal(false)}
-                  className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={handleReject}
-                  disabled={isRejecting}
-                  className="px-4 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold transition shadow-xs"
-                >
-                  {isRejecting ? "Dispatching..." : "Submit & Regenerate"}
-                </button>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
+      {/* Send back with notes */}
+      <ModalShell
+        open={showRejectModal && !!selectedItem}
+        onClose={() => { setShowRejectModal(false); setRejectError(null); }}
+        size="sm"
+        icon={RotateCcw}
+        tone="rose"
+        title="Send back with notes"
+        description={selectedItem ? `Version ${selectedItem.version_number} will be rewritten using your notes.` : undefined}
+        footer={
+          <>
+            <button type="button" onClick={() => { setShowRejectModal(false); setRejectError(null); }} className="da-btn da-btn-ghost">Cancel</button>
+            <button type="button" onClick={handleReject} disabled={isRejecting} className="da-btn da-btn-danger">
+              {isRejecting ? "Sending…" : "Send back and rewrite"}
+            </button>
+          </>
+        }
+      >
+        <label className="da-label" htmlFor="reject-notes">What should change?</label>
+        <textarea
+          id="reject-notes"
+          rows={5}
+          placeholder="e.g. Make the tone more technical and go deeper on indexing strategies."
+          value={rejectFeedback}
+          onChange={(e) => { setRejectFeedback(e.target.value); setRejectError(null); }}
+          aria-invalid={!!rejectError}
+          aria-describedby={rejectError ? "reject-notes-error" : undefined}
+          className={`da-input${invalid(rejectError)}`}
+        />
+        <FieldError id="reject-notes" message={rejectError} />
+        {!rejectError && <p className="da-help">Optional, up to 2,000 characters. Leave empty to ask for a general rewrite.</p>}
+      </ModalShell>
     </div>
   );
 };

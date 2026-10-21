@@ -105,10 +105,22 @@ class AiProviderController extends Controller
     {
         $validated = $request->validate([
             'provider_type' => 'required|string|in:ollama,mock,openai,gemini,anthropic',
-            'model_name' => 'required|string',
-            'api_key' => 'nullable|string',
-            'base_url' => 'nullable|string',
+            'model_name' => 'required|string|max:120',
+            'api_key' => 'nullable|string|max:500',
+            'base_url' => 'nullable|string|max:255|url:http,https',
         ]);
+
+        // Cloud providers need a key: either one saved before or a new one now.
+        if (in_array($validated['provider_type'], ['openai', 'gemini', 'anthropic'], true) && empty($validated['api_key'])) {
+            $hasKey = AiProvider::where('user_id', $request->user()->id)
+                ->where('provider_type', $validated['provider_type'])
+                ->whereNotNull('encrypted_api_key')
+                ->exists();
+            if (!$hasKey) {
+                $msg = 'Paste your API key for this provider. It is stored encrypted.';
+                return response()->json(['message' => $msg, 'errors' => ['api_key' => [$msg]]], 422);
+            }
+        }
 
         $provider = AiProvider::updateOrCreate(
             [

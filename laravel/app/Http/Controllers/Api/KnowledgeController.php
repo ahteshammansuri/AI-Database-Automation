@@ -28,7 +28,7 @@ class KnowledgeController extends Controller
     public function upload(Request $request)
     {
         $request->validate([
-            'file' => 'required|file|max:10240', // 10MB max
+            'file' => 'required|file|max:10240|extensions:md,markdown,txt,pdf', // 10MB max
             'title' => 'nullable|string|max:255',
         ]);
 
@@ -36,9 +36,8 @@ class KnowledgeController extends Controller
         $extension = strtolower($file->getClientOriginalExtension());
 
         if (!in_array($extension, ['md', 'markdown', 'txt', 'pdf'], true)) {
-            return response()->json([
-                'message' => 'Unsupported format. Allowed formats: .md, .txt, .pdf',
-            ], 422);
+            $msg = 'Upload a Markdown (.md), text (.txt) or PDF (.pdf) file.';
+            return response()->json(['message' => $msg, 'errors' => ['file' => [$msg]]], 422);
         }
 
         $title = $request->input('title') ?: pathinfo($file->getClientOriginalName(), PATHINFO_FILENAME);

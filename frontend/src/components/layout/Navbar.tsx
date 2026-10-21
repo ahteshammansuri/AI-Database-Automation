@@ -1,9 +1,11 @@
-import React from "react";
-import { Link, useNavigate } from "react-router-dom";
-import { PlusCircle, RefreshCw, LogOut, Menu } from "lucide-react";
+import React, { useEffect, useRef, useState } from "react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
+import { AnimatePresence, motion } from "framer-motion";
+import { ChevronDown, ChevronRight, Home, LogOut, Menu, Plus, RefreshCw, ShieldCheck } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
 import { useLiveEvents } from "../../context/LiveEventsContext";
 import { api } from "../../services/api";
+import { navFor } from "./navConfig";
 
 interface NavbarProps {
   onRefresh?: () => void;
@@ -12,98 +14,160 @@ interface NavbarProps {
   menuOpen?: boolean;
 }
 
+/** Glass top bar: where you are, live status, refresh, create, and your account. */
 export const Navbar: React.FC<NavbarProps> = ({ onRefresh, isRefreshing = false, onOpenMenu, menuOpen = false }) => {
   const { user, logout } = useAuth();
   const { status: liveStatus } = useLiveEvents();
   const navigate = useNavigate();
+  const location = useLocation();
+  const here = navFor(location.pathname);
+  const [accountOpen, setAccountOpen] = useState(false);
+  const accountRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!accountOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (accountRef.current && !accountRef.current.contains(e.target as Node)) setAccountOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setAccountOpen(false);
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [accountOpen]);
 
   const handleLogout = () => {
     logout();
     navigate("/login");
   };
 
+  const live =
+    liveStatus === "connected"
+      ? { label: "Live", tone: "border-emerald-200 bg-emerald-50 text-emerald-700", dot: "bg-emerald-500", ping: true }
+      : liveStatus === "reconnecting" || liveStatus === "connecting"
+        ? { label: "Reconnecting", tone: "border-amber-200 bg-amber-50 text-amber-700", dot: "bg-amber-500", ping: true }
+        : { label: "Offline", tone: "border-slate-200 bg-slate-50 text-slate-500", dot: "bg-slate-400", ping: false };
+
+  const initials = (user?.name || user?.email || "?")
+    .split(/\s+/)
+    .map((p) => p.charAt(0))
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+
   return (
-    <header className="h-16 bg-white border-b border-slate-200 px-3 sm:px-6 flex items-center justify-between gap-2 shrink-0 shadow-xs">
-      <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+    <header className="relative z-20 flex h-16 shrink-0 items-center justify-between gap-2 border-b border-slate-200/70 bg-white/75 px-3 backdrop-blur-xl sm:px-6">
+      <div className="flex min-w-0 items-center gap-2 sm:gap-3">
         <button
           type="button"
           onClick={onOpenMenu}
-          className="p-2 -ml-1 rounded-lg text-slate-600 hover:bg-slate-100 lg:hidden"
+          className="da-icon-btn -ml-1 lg:hidden"
           aria-label="Open menu"
           aria-controls="portal-sidebar"
           aria-expanded={menuOpen}
         >
-          <Menu className="w-5 h-5" />
+          <Menu className="h-5 w-5" />
         </button>
-        <span className="hidden xl:inline-flex px-2.5 py-1 text-xs font-medium rounded-full bg-slate-100 text-slate-700 border border-slate-200">
-          Control Plane: Laravel 11
-        </span>
-        <span className="hidden md:flex px-2.5 py-1 text-xs font-medium rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200 items-center gap-1.5">
-          <span className="w-1.5 h-1.5 rounded-full bg-indigo-600 animate-pulse" />
-          AI Microservice: Python / Ollama
-        </span>
-        <span
-          className={`px-2.5 py-1 text-xs font-medium rounded-full border flex items-center gap-1.5 whitespace-nowrap ${
-            liveStatus === "connected"
-              ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-              : liveStatus === "reconnecting" || liveStatus === "connecting"
-              ? "bg-amber-50 text-amber-700 border-amber-200"
-              : "bg-slate-100 text-slate-500 border-slate-200"
-          }`}
-          title={`SSE Live Stream: ${liveStatus}`}
-        >
-          <span
-            className={`w-1.5 h-1.5 rounded-full ${
-              liveStatus === "connected"
-                ? "bg-emerald-500 animate-pulse"
-                : liveStatus === "reconnecting" || liveStatus === "connecting"
-                ? "bg-amber-500 animate-ping"
-                : "bg-slate-400"
-            }`}
-          />
-          {liveStatus === "connected" ? "Live Stream" : liveStatus === "reconnecting" ? "Reconnecting" : "Offline"}
-        </span>
+        <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-[13px]">
+          <Link to="/dashboard" className="hidden sm:grid h-7 w-7 place-items-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700" aria-label="Dashboard">
+            <Home className="h-4 w-4" />
+          </Link>
+          {here && (
+            <>
+              <ChevronRight className="hidden sm:block h-3.5 w-3.5 shrink-0 text-slate-300" />
+              <span className="hidden md:inline text-slate-400">{here.group.label}</span>
+              <ChevronRight className="hidden md:block h-3.5 w-3.5 shrink-0 text-slate-300" />
+              <span className="truncate font-semibold text-slate-900">{here.item.label}</span>
+            </>
+          )}
+        </nav>
       </div>
 
-      <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
+      <div className="flex shrink-0 items-center gap-1.5 sm:gap-2.5">
+        <span
+          className={`hidden sm:inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11.5px] font-semibold ${live.tone}`}
+          title={`Live updates: ${liveStatus}`}
+        >
+          <span className="relative flex h-1.5 w-1.5">
+            {live.ping && <span className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-60 ${live.dot}`} />}
+            <span className={`relative inline-flex h-1.5 w-1.5 rounded-full ${live.dot}`} />
+          </span>
+          {live.label}
+        </span>
+
         {onRefresh && (
           <button
+            type="button"
             onClick={() => {
               api.clearCache();
               onRefresh();
             }}
             disabled={isRefreshing}
-            className="p-2 text-slate-500 hover:text-slate-800 rounded-lg hover:bg-slate-100 transition"
-            title="Refresh Data (Bypass Cache)"
+            className="da-icon-btn"
+            title="Refresh data"
+            aria-label="Refresh data"
           >
-            <RefreshCw className={`w-4 h-4 ${isRefreshing ? "animate-spin text-indigo-600" : ""}`} />
+            <RefreshCw className={`h-4 w-4 ${isRefreshing ? "animate-spin text-indigo-600" : ""}`} />
           </button>
         )}
 
-        <Link
-          to="/automations/new"
-          className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold px-2.5 sm:px-3.5 py-2 rounded-lg shadow-sm transition"
-          aria-label="Create automation"
-        >
-          <PlusCircle className="w-4 h-4" />
-          <span className="hidden sm:inline">Create Automation</span>
+        <Link to="/automations/new" className="da-btn da-btn-primary px-3 sm:px-4" aria-label="Create automation">
+          <Plus className="h-4 w-4" />
+          <span className="hidden sm:inline">New automation</span>
         </Link>
 
         {user && (
-          <div className="flex items-center space-x-2 sm:space-x-3 pl-2 sm:pl-3 border-l border-slate-200">
-            <div className="flex items-center space-x-2 text-xs text-slate-700">
-              <div className="w-7 h-7 rounded-full bg-indigo-100 text-indigo-700 border border-indigo-200 flex items-center justify-center font-bold text-xs">
-                {user.name.charAt(0).toUpperCase()}
-              </div>
-              <span className="hidden sm:inline font-semibold">{user.name}</span>
-            </div>
+          <div ref={accountRef} className="relative pl-1 sm:pl-2">
             <button
-              onClick={handleLogout}
-              className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg hover:bg-rose-50 transition"
-              title="Sign Out"
+              type="button"
+              onClick={() => setAccountOpen((o) => !o)}
+              className="flex items-center gap-2 rounded-full border border-transparent p-0.5 pr-1.5 transition-colors hover:border-slate-200 hover:bg-white"
+              aria-haspopup="menu"
+              aria-expanded={accountOpen}
             >
-              <LogOut className="w-4 h-4" />
+              <span className="grid h-8 w-8 place-items-center rounded-full bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-400 text-[12px] font-bold text-white shadow-[0_6px_16px_-6px_rgba(99,102,241,0.8)]">
+                {initials}
+              </span>
+              <span className="hidden max-w-[140px] truncate text-[13px] font-semibold text-slate-800 md:inline">{user.name}</span>
+              <ChevronDown className={`hidden h-3.5 w-3.5 text-slate-400 transition-transform md:block ${accountOpen ? "rotate-180" : ""}`} />
             </button>
+            <AnimatePresence>
+              {accountOpen && (
+                <motion.div
+                  role="menu"
+                  initial={{ opacity: 0, y: -6, scale: 0.98 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: -6, scale: 0.98 }}
+                  transition={{ duration: 0.18 }}
+                  className="absolute right-0 top-full mt-2 w-64 overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-lift"
+                >
+                  <div className="border-b border-slate-100 px-4 py-3">
+                    <div className="truncate text-[13.5px] font-semibold text-slate-900">{user.name}</div>
+                    <div className="truncate text-[12px] text-slate-500">{user.email}</div>
+                  </div>
+                  <div className="p-1.5">
+                    <Link
+                      to="/security"
+                      role="menuitem"
+                      onClick={() => setAccountOpen(false)}
+                      className="flex items-center gap-2.5 rounded-xl px-3 py-2 text-[13px] font-medium text-slate-700 hover:bg-slate-50"
+                    >
+                      <ShieldCheck className="h-4 w-4 text-slate-400" /> Security & guardrails
+                    </Link>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={handleLogout}
+                      className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-[13px] font-medium text-rose-600 hover:bg-rose-50"
+                    >
+                      <LogOut className="h-4 w-4" /> Sign out
+                    </button>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
           </div>
         )}
       </div>

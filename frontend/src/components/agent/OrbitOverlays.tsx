@@ -38,7 +38,7 @@ export const OrbitSpeechBubble: React.FC<{ align: "left" | "right"; below: boole
         setCaption({ key: `caption:${++captionSeq.current}`, text: e.text });
         clearTimeout(timer);
         // Clear (not just hide) so lower-priority messages such as current work show again.
-        timer = setTimeout(() => setCaption(null), 7000);
+        timer = setTimeout(() => setCaption(null), Math.min(11000, Math.max(4000, 3000 + e.text.length * 55)));
       } else if (e.type === "return") {
         setCaption(null);
       }

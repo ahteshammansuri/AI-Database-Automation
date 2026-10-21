@@ -1,32 +1,7 @@
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
-import {
-  FileEdit,
-  Send,
-  CheckCircle2,
-  AlertCircle,
-  Database,
-  TableProperties,
-  Cpu,
-  Image as ImageIcon,
-  Calendar,
-  Layers,
-  ArrowRight,
-  Info,
-  Clock,
-  RefreshCw,
-  ExternalLink,
-  Upload,
-  X,
-  Check,
-  Tag,
-  Wand2,
-  Plus,
-  Loader2,
-  Eye,
-  ShieldCheck,
-} from "lucide-react";
+import { Send, CheckCircle2, AlertCircle, Database, TableProperties, Cpu, Image as ImageIcon, Layers, Clock, Upload, X, Wand2, Plus, Loader2, Eye, ShieldCheck } from "lucide-react";
 import { api } from "../services/api";
 import { DatePicker } from "../components/ui/DatePicker";
 import { TimePicker } from "../components/ui/TimePicker";
@@ -35,10 +10,20 @@ import { ContentPreview } from "../components/content/ContentPreview";
 import { browserTimeZone, todayIn, nowTimeIn, addMinutesHHMM, zonedIso, formatInstant, relativeFromNow } from "../lib/schedule";
 import { ConnectionProfile, SchemaResponse, SchemaTable, SchemaColumn } from "../types";
 import { SearchableSelect } from "../components/common/SearchableSelect";
+import { EmptyState, FieldError, Loading, ModalShell, PageHeader } from "../components/ui/kit";
+import { SchemaFieldControl, isNumericType } from "../components/common/SchemaFieldControl";
+import { clearError, focusFirstError, invalid, serverFieldErrors, type FieldErrors } from "../lib/validation";
 import { InlineAiFieldAssist } from "../components/common/InlineAiFieldAssist";
-import { SchemaFieldControl } from "../components/common/SchemaFieldControl";
 import { useOrbitSurface } from "../hooks/useOrbitSurface";
 import { orbitTargets } from "../services/orbitTargets";
+
+/** Input id for a column (or custom field, schedule, target picker) so its message sits under it. */
+const manualFieldId = (field: string) =>
+  field.startsWith("cf:") ? `manual-cf-${field.slice(3)}` : field.startsWith("$") ? `manual-${field.slice(1)}` : `manual-col-${field}`;
+
+/** A server plan issue reworded for the spot under its field (the column name is already the label). */
+const issueText = (column: string, message: string) =>
+  /is required in/.test(message) ? `${column} is required.` : message.replace(/`/g, "");
 
 export const ManualSchedulePage: React.FC = () => {
   const navigate = useNavigate();
@@ -83,6 +68,8 @@ export const ManualSchedulePage: React.FC = () => {
   const [loadingSchema, setLoadingSchema] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Messages under each column / custom field / schedule input. Keys: column name, "cf:<id>", "$connection", "$table", "$schedule".
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [successResult, setSuccessResult] = useState<any | null>(null);
 
   // AI Content Assistant state
@@ -178,9 +165,11 @@ export const ManualSchedulePage: React.FC = () => {
 
   const handleRemoveCustomField = (id: string) => {
     setCustomFields((prev) => prev.filter((f) => f.id !== id));
+    setFieldErrors((x) => clearError(x, `cf:${id}`));
   };
 
   const handleCustomFieldChange = (id: string, key: string, value: string) => {
+    setFieldErrors((x) => clearError(x, `cf:${id}`));
     setCustomFields((prev) =>
       prev.map((f) => (f.id === id ? { ...f, key, value } : f))
     );
@@ -288,6 +277,11 @@ export const ManualSchedulePage: React.FC = () => {
   };
 
   const handleFieldChange = (colName: string, value: any) => {
+    setFieldErrors((x) => {
+      let next = clearError(x, colName);
+      if (colName === "title" || colName === "name") next = clearError(next, "slug");
+      return next;
+    });
     setFormData((prev) => {
       const updated = { ...prev, [colName]: value };
 
@@ -312,11 +306,12 @@ export const ManualSchedulePage: React.FC = () => {
     if (!file) return;
     try {
       setUploadingCol(colName);
-      setError(null);
+      setFieldErrors((x) => clearError(x, colName));
       const res = await api.uploadMedia(file);
       handleFieldChange(colName, res.url);
     } catch (err: any) {
-      setError(`Image upload failed: ${err.message}`);
+      const msg = serverFieldErrors(err).file ?? err.message;
+      setFieldErrors((x) => ({ ...x, [colName]: `Image upload failed: ${msg}` }));
     } finally {
       setUploadingCol(null);
     }
@@ -338,9 +333,10 @@ export const ManualSchedulePage: React.FC = () => {
   // AI Content Generator: Auto-draft content for the form using Python AI Service
   const handleGenerateAiDraft = async () => {
     if (!aiTopic.trim()) {
-      setError("Please provide a topic or prompt for AI generation.");
+      showFieldErrors({ $aiTopic: "Describe what the draft should be about." });
       return;
     }
+    setFieldErrors((x) => clearError(x, "$aiTopic"));
 
     try {
       setIsGeneratingAi(true);
@@ -493,19 +489,75 @@ export const ManualSchedulePage: React.FC = () => {
   }));
 
   // Step 1 of publishing: a read-only dry run that shows exactly what will be written.
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!selectedConnId || !selectedTable) {
-      setError("Choose a database and a table first.");
-      return;
+  /** Checks that need no database: required columns, lengths, numbers, allowed values, custom fields, time. */
+  const checkForm = (): FieldErrors => {
+    const out: FieldErrors = {};
+    if (!selectedConnId) out["$connection"] = "Choose a database connection.";
+    if (!selectedTable) {
+      out["$table"] = "Choose the table to write into.";
+      return out;
+    }
+    for (const col of editableColumns) {
+      const v = formData[col.name];
+      const blank = v === undefined || v === null || (typeof v === "string" && v.trim() === "");
+      if (blank) {
+        // Same rule as the server: NOT NULL with no default must be filled.
+        if (!col.nullable && (col.default_value === undefined || col.default_value === null)) out[col.name] = `${col.name} is required.`;
+        continue;
+      }
+      if (isNumericType(col) && typeof v !== "number" && !Number.isFinite(Number(v))) out[col.name] = `${col.name} must be a number.`;
+      else if (col.max_length && typeof v === "string" && v.length > col.max_length) out[col.name] = `${col.name} must be ${col.max_length} characters or fewer (now ${v.length}).`;
+      else if (col.enum_values?.length && !col.enum_values.includes(String(v))) out[col.name] = `${col.name} must be one of: ${col.enum_values.join(", ")}.`;
+    }
+    const known = new Set((selectedTable.columns || []).map((c) => c.name));
+    const seen = new Set<string>();
+    for (const cf of customFields) {
+      const key = cf.key.trim();
+      if (!key) {
+        if (cf.value.trim()) out[`cf:${cf.id}`] = "Enter the column name for this value.";
+        continue;
+      }
+      if (!/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(key)) out[`cf:${cf.id}`] = "Column names use letters, numbers and _ (up to 64 characters), starting with a letter or _.";
+      else if (editableColumns.some((c) => c.name === key)) out[`cf:${cf.id}`] = `“${key}” already has a field above. Fill it there instead.`;
+      else if (seen.has(key)) out[`cf:${cf.id}`] = `“${key}” is added twice.`;
+      else if (!known.has(key)) out[`cf:${cf.id}`] = `${selectedTable.name} has no column named “${key}”.`;
+      seen.add(key);
     }
     if (publishMode === "SCHEDULED" && new Date(scheduledAtIso()).getTime() < Date.now() + 60000) {
-      setError("Pick a time at least one minute in the future, or choose “Publish now”.");
+      out["$schedule"] = "That time has already passed. Pick a time at least one minute from now, or choose “Publish Immediately”.";
+    }
+    return out;
+  };
+
+  /** Column problems from the server's dry run or a rejected publish, placed under their fields. */
+  const columnErrorsFrom = (issues: any[]): FieldErrors => {
+    const out: FieldErrors = {};
+    const inForm = new Set(editableColumns.map((c) => c.name));
+    for (const it of issues ?? []) {
+      if (it?.level !== "error" || !it.column) continue;
+      const cf = customFields.find((f) => f.key.trim() === it.column);
+      const key = inForm.has(it.column) ? it.column : cf ? `cf:${cf.id}` : null;
+      if (key && !out[key]) out[key] = issueText(it.column, String(it.message ?? ""));
+    }
+    return out;
+  };
+
+  const showFieldErrors = (found: FieldErrors) => {
+    setFieldErrors(found);
+    setTimeout(() => focusFirstError(found, manualFieldId), 40);
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    const found = checkForm();
+    if (Object.keys(found).length || !selectedConnId || !selectedTable) {
+      showFieldErrors(found);
       return;
     }
+    setFieldErrors({});
     try {
       setIsPlanning(true);
-      setError(null);
       const payload = buildPayload();
       const res = await api.manualPublish({
         connection_id: selectedConnId,
@@ -514,12 +566,42 @@ export const ManualSchedulePage: React.FC = () => {
         dry_run: true,
         relation_policies: relationPolicyPayload(),
       });
+      // Problems with a column the user can fix are shown under that column instead of in the review.
+      const colErrs = columnErrorsFrom(res.plan?.issues);
+      if (Object.keys(colErrs).length) {
+        showFieldErrors(colErrs);
+        return;
+      }
       setReview({ plan: res.plan, payload });
     } catch (err: any) {
-      setError(err.message || "Could not check this record.");
+      const colErrs = { ...columnErrorsFrom(err.data?.plan?.issues), ...payloadErrors(err) };
+      if (Object.keys(colErrs).length) showFieldErrors(colErrs);
+      else setError(err.message || "Could not check this record.");
     } finally {
       setIsPlanning(false);
     }
+  };
+
+  /** A 422 keyed "payload.<column>" (or a scheduling field) mapped to the form. */
+  const payloadErrors = (err: any): FieldErrors => {
+    const out: FieldErrors = {};
+    const raw = err?.errors ?? {};
+    for (const [k, v] of Object.entries(raw)) {
+      const msg = String(Array.isArray(v) ? v[0] : v);
+      if (k.startsWith("payload.")) {
+        const col = k.slice(8);
+        const cf = customFields.find((f) => f.key.trim() === col);
+        const key = editableColumns.some((c) => c.name === col) ? col : cf ? `cf:${cf.id}` : null;
+        if (key) out[key] = issueText(col, msg);
+      } else if (k === "scheduled_at" || k === "timezone") {
+        out["$schedule"] = msg;
+      } else if (k === "connection_id") {
+        out["$connection"] = msg;
+      } else if (k === "target_table") {
+        out["$table"] = msg;
+      }
+    }
+    return out;
   };
 
   // Step 2: the user confirmed the reviewed plan.
@@ -540,8 +622,15 @@ export const ManualSchedulePage: React.FC = () => {
       setReview(null);
       setSuccessResult(res);
     } catch (err: any) {
-      setError(err.message || "Publishing failed.");
-      if (err.data?.plan) setReview((r) => (r ? { ...r, plan: err.data.plan } : r));
+      const colErrs = { ...columnErrorsFrom(err.data?.plan?.issues), ...payloadErrors(err) };
+      if (Object.keys(colErrs).length) {
+        // Close the review so the messages under the fields are visible.
+        setReview(null);
+        showFieldErrors(colErrs);
+      } else {
+        setError(err.message || "Publishing failed.");
+        if (err.data?.plan) setReview((r) => (r ? { ...r, plan: err.data.plan } : r));
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -580,33 +669,18 @@ export const ManualSchedulePage: React.FC = () => {
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3 }}
-      className="max-w-4xl mx-auto space-y-6"
+      className="max-w-5xl mx-auto space-y-6"
     >
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-slate-200">
-        <div>
-          <div className="flex items-center gap-2 mb-1">
-            <span className="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
-              Direct Target Database Writer
-            </span>
-            <span className="text-xs text-slate-400">• Parameterized Safe Writes</span>
-          </div>
-          <h2 className="text-2xl font-extrabold text-slate-900 tracking-tight">Manual Content Publishing</h2>
-          <p className="text-xs text-slate-500 mt-0.5">
-            Select any connected MySQL database, inspect real relational lookup options, upload images, and publish schema-validated records.
-          </p>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <Link
-            to="/executions"
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-xl text-xs font-semibold shadow-2xs transition"
-          >
-            <Layers className="w-3.5 h-3.5 text-slate-500" />
-            <span>Execution Log</span>
+      <PageHeader
+        eyebrow="Automate"
+        title="Manual publishing"
+        description="Write or paste content yourself and publish it into any eligible table, now or at a time you choose. Every row is checked against your live schema before it is written."
+        actions={
+          <Link to="/executions" className="da-btn da-btn-secondary">
+            <Layers className="h-4 w-4 text-slate-500" /> Execution history
           </Link>
-        </div>
-      </div>
+        }
+      />
 
       {/* Error alert */}
       <AnimatePresence>
@@ -615,7 +689,7 @@ export const ManualSchedulePage: React.FC = () => {
             initial={{ opacity: 0, y: -6 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -6 }}
-            className="p-4 bg-rose-50 border border-rose-200 rounded-2xl text-rose-800 text-xs flex items-start justify-between shadow-2xs"
+            className="flex items-start justify-between rounded-2xl border border-rose-200 bg-rose-50 p-4 text-[13px] text-rose-800"
           >
             <div className="flex items-start gap-2.5">
               <AlertCircle className="w-4 h-4 shrink-0 text-rose-600 mt-0.5" />
@@ -631,37 +705,26 @@ export const ManualSchedulePage: React.FC = () => {
 
       {/* Loading Skeleton Guard - NEVER flash "no connection" prematurely */}
       {isInitializing || loadingSchema ? (
-        <div className="py-20 text-center bg-white border border-slate-200/90 rounded-2xl shadow-xs space-y-3">
-          <div className="w-8 h-8 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mx-auto" />
-          <h3 className="text-sm font-bold text-slate-800">
-            {isInitializing ? "Connecting to Database Workspace..." : "Introspecting Database Schema..."}
-          </h3>
-          <p className="text-slate-500 text-xs">Loading authorized connection profiles and schema models</p>
+        <div className="da-card">
+          <Loading label={isInitializing ? "Opening your workspace…" : "Reading the table schema…"} className="py-20" />
         </div>
       ) : connections.length === 0 ? (
-        <div className="bg-white border border-slate-200/90 rounded-2xl p-8 text-center text-slate-500 text-xs shadow-xs space-y-3">
-          <Database className="w-10 h-10 text-slate-400 mx-auto" />
-          <h3 className="text-base font-bold text-slate-900">No database connections found</h3>
-          <p className="max-w-md mx-auto">
-            You must connect at least one target MySQL database to enable manual publishing.
-          </p>
-          <Link
-            to="/connections"
-            className="btn-primary-gradient inline-block px-4 py-2 text-white rounded-xl font-semibold shadow-xs"
-          >
-            Connect Database
-          </Link>
-        </div>
+        <EmptyState
+          icon={Database}
+          title="No databases connected"
+          description="Connect at least one database to publish content manually."
+          action={<Link to="/connections" className="da-btn da-btn-primary">Connect a database</Link>}
+        />
       ) : successResult ? (
         <motion.div
           initial={{ opacity: 0, scale: 0.98 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={{ duration: 0.3 }}
-          className="bg-white border border-emerald-200 rounded-2xl p-8 shadow-sm space-y-6"
+          className="da-card border-emerald-200 p-7 sm:p-8 space-y-6"
         >
           {/* Celebratory header */}
           <div className="flex flex-col sm:flex-row items-center gap-4 pb-6 border-b border-slate-100">
-            <div className="w-16 h-16 rounded-2xl bg-emerald-50 text-emerald-600 border border-emerald-200 flex items-center justify-center shrink-0 shadow-xs">
+            <div className="grid h-16 w-16 shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-emerald-400 to-teal-500 text-white shadow-[0_14px_34px_-14px_rgba(16,185,129,0.9)]">
               <CheckCircle2 className="w-8 h-8" />
             </div>
             <div className="flex-1 min-w-0 text-center sm:text-left">
@@ -671,7 +734,7 @@ export const ManualSchedulePage: React.FC = () => {
                 </span>
                 <span className="text-xs text-slate-400 font-medium">• Target MySQL Safe Execution</span>
               </div>
-              <h3 className="text-xl font-extrabold text-slate-900 tracking-tight">
+              <h3 className="text-[22px] font-extrabold tracking-[-0.03em] text-slate-950">
                 {successResult.status === "SCHEDULED" ? "Manual Publishing Job Scheduled!" : "Manual Automation Completed Successfully!"}
               </h3>
               <p className="text-xs text-slate-500 mt-0.5">
@@ -682,15 +745,15 @@ export const ManualSchedulePage: React.FC = () => {
 
           {/* Details breakdown */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <div className="bg-slate-50 border border-slate-200/80 rounded-xl p-3.5 text-xs">
+            <div className="da-panel p-4 text-xs">
               <span className="text-slate-400 text-[11px] block font-medium">Target Table</span>
               <span className="font-mono font-bold text-slate-900 text-sm">{selectedTable?.name || successResult.result?.table}</span>
             </div>
-            <div className="bg-slate-50 border border-slate-200/80 rounded-xl p-3.5 text-xs">
+            <div className="da-panel p-4 text-xs">
               <span className="text-slate-400 text-[11px] block font-medium">Generated Primary Key</span>
               <span className="font-mono font-bold text-emerald-700 text-sm">#{successResult.result?.record_id ?? "N/A"}</span>
             </div>
-            <div className="bg-slate-50 border border-slate-200/80 rounded-xl p-3.5 text-xs">
+            <div className="da-panel p-4 text-xs">
               <span className="text-slate-400 text-[11px] block font-medium">Columns Written</span>
               <span className="font-mono font-bold text-slate-900 text-sm">
                 {successResult.result?.columns_written?.length ?? Object.keys(formData).length} columns
@@ -728,7 +791,7 @@ export const ManualSchedulePage: React.FC = () => {
                 if (selectedTable) initializeFormData(selectedTable, schema);
                 setCustomFields([]);
               }}
-              className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-xs transition inline-flex items-center gap-2"
+              className="da-btn da-btn-primary"
             >
               <Plus className="w-4 h-4" />
               <span>Publish Another Record</span>
@@ -736,7 +799,7 @@ export const ManualSchedulePage: React.FC = () => {
             <button
               type="button"
               onClick={() => navigate("/executions")}
-              className="px-5 py-2.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-xl text-xs font-semibold shadow-2xs transition inline-flex items-center gap-2"
+              className="da-btn da-btn-secondary"
             >
               <Layers className="w-4 h-4 text-slate-500" />
               <span>View Execution Logs</span>
@@ -744,7 +807,7 @@ export const ManualSchedulePage: React.FC = () => {
             <button
               type="button"
               onClick={() => navigate(`/schema?connectionId=${selectedConnId}&table=${selectedTable?.name}`)}
-              className="px-4 py-2.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 rounded-xl text-xs font-semibold shadow-2xs transition inline-flex items-center gap-1.5"
+              className="da-btn da-btn-secondary"
             >
               <TableProperties className="w-4 h-4 text-slate-500" />
               <span>Inspect in Schema Explorer</span>
@@ -752,24 +815,24 @@ export const ManualSchedulePage: React.FC = () => {
           </div>
         </motion.div>
       ) : (
-        <form onSubmit={handleSubmit} className="space-y-6">
+        <form onSubmit={handleSubmit} noValidate className="space-y-6">
           {/* Step 1: Target Database & Target Table Selection */}
           <motion.div
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
-            className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs space-y-4"
+            className="da-card p-6 sm:p-7 space-y-5"
           >
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-              <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+              <h3 className="flex items-center gap-2.5 text-[17px] font-bold tracking-[-0.02em] text-slate-950">
                 <Database className="w-3.5 h-3.5 text-indigo-600" />
-                1. Database Connection & Target Table
+                Where should it go?
               </h3>
 
               {/* AI Assistant Quick Toggle */}
               <button
                 type="button"
                 onClick={() => setShowAiHelper(!showAiHelper)}
-                className="inline-flex items-center gap-1.5 px-3 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-lg text-xs font-bold transition shadow-2xs"
+                className="da-btn da-btn-sm border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100"
               >
                 <Cpu className="w-3.5 h-3.5" />
                 <span>AI Draft Assistant</span>
@@ -783,7 +846,7 @@ export const ManualSchedulePage: React.FC = () => {
                   initial={{ opacity: 0, height: 0 }}
                   animate={{ opacity: 1, height: "auto" }}
                   exit={{ opacity: 0, height: 0 }}
-                  className="p-4 bg-indigo-50/60 border border-indigo-200 rounded-xl space-y-3 overflow-hidden"
+                  className="space-y-3 overflow-hidden rounded-2xl border border-indigo-100 bg-gradient-to-br from-indigo-50/80 via-white to-violet-50/60 p-4"
                 >
                   <div className="flex items-center justify-between text-xs">
                     <span className="font-bold text-indigo-950 flex items-center gap-1.5">
@@ -794,18 +857,21 @@ export const ManualSchedulePage: React.FC = () => {
                   </div>
                   <div className="flex gap-2">
                     <input
+                      id="manual-aiTopic"
                       type="text"
                       value={aiTopic}
-                      onChange={(e) => setAiTopic(e.target.value)}
+                      onChange={(e) => { setAiTopic(e.target.value); setFieldErrors((x) => clearError(x, "$aiTopic")); }}
                       placeholder="e.g. Scaling Relational MySQL with Read Replicas & Connection Pooling"
-                      className="flex-1 bg-white border border-slate-300 rounded-xl px-3 py-2 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600"
+                      aria-invalid={!!fieldErrors["$aiTopic"]}
+                      aria-describedby={fieldErrors["$aiTopic"] ? "manual-aiTopic-error" : undefined}
+                      className={`da-input flex-1${invalid(fieldErrors["$aiTopic"])}`}
                       onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), handleGenerateAiDraft())}
                     />
                     <button
                       type="button"
                       onClick={handleGenerateAiDraft}
                       disabled={isGeneratingAi}
-                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-xs"
+                      className="da-btn da-btn-accent shrink-0"
                     >
                       {isGeneratingAi ? (
                         <>
@@ -820,18 +886,21 @@ export const ManualSchedulePage: React.FC = () => {
                       )}
                     </button>
                   </div>
+                  <FieldError id="manual-aiTopic" message={fieldErrors["$aiTopic"]} className="-mt-2" />
                 </motion.div>
               )}
             </AnimatePresence>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                <label className="da-label">
                   Target Database Connection
                 </label>
                 <SearchableSelect
+                  id="manual-connection"
+                  invalid={!!fieldErrors["$connection"]}
                   value={selectedConnId}
-                  onChange={(val) => handleConnectionChange(Number(val))}
+                  onChange={(val) => { setFieldErrors((x) => clearError(x, "$connection")); handleConnectionChange(Number(val)); }}
                   placeholder="Select database connection..."
                   searchPlaceholder="Search database connections..."
                   options={connections.map((c) => ({
@@ -840,15 +909,18 @@ export const ManualSchedulePage: React.FC = () => {
                     badge: (c as any).driver || "mysql",
                   }))}
                 />
+                <FieldError id="manual-connection" message={fieldErrors["$connection"]} />
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                <label className="da-label">
                   Target Table
                 </label>
                 <SearchableSelect
+                  id="manual-table"
+                  invalid={!!fieldErrors["$table"]}
                   value={selectedTable ? selectedTable.name || (selectedTable as any).table_name : ""}
-                  onChange={(val) => handleSelectTable(String(val))}
+                  onChange={(val) => { setFieldErrors({}); handleSelectTable(String(val)); }}
                   disabled={loadingSchema || !schema?.tables}
                   placeholder="Select target table..."
                   searchPlaceholder="Search available tables..."
@@ -867,6 +939,7 @@ export const ManualSchedulePage: React.FC = () => {
                       : []
                   }
                 />
+                <FieldError id="manual-table" message={fieldErrors["$table"]} />
               </div>
             </div>
           </motion.div>
@@ -876,21 +949,21 @@ export const ManualSchedulePage: React.FC = () => {
             <motion.div
               initial={{ opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
-              className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs space-y-6"
+              className="da-card p-6 sm:p-7 space-y-7"
             >
               <div>
-                <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+                <h3 className="flex items-center gap-2.5 text-[17px] font-bold tracking-[-0.02em] text-slate-950">
                   <TableProperties className="w-3.5 h-3.5 text-indigo-600" />
-                  2. Table Schema Form & Record Payload
+                  Write the content
                 </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Real relational data lookups automatically populated from connected tables
+                <p className="mt-1.5 text-[13.5px] text-slate-500">
+                  Options for linked columns come from your real tables.
                 </p>
               </div>
 
               {/* SECTION A: Primary Identifiers & Relational Fields */}
               <div className="space-y-4">
-                <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider text-[11px] pb-1 border-b border-slate-100">
+                <h4 className="da-eyebrow w-full border-b border-slate-100 pb-2">
                   Primary Details & Foreign Keys
                 </h4>
 
@@ -914,6 +987,8 @@ export const ManualSchedulePage: React.FC = () => {
                         </div>
 
                         <SchemaFieldControl
+                          id={manualFieldId(colName)}
+                          invalid={!!fieldErrors[colName]}
                           column={col}
                           value={formData[colName]}
                           onChange={(val) => handleFieldChange(colName, val)}
@@ -924,6 +999,7 @@ export const ManualSchedulePage: React.FC = () => {
                           loadingRelational={loadingLookups[colName]}
                           referencedTable={refTable}
                         />
+                        <FieldError id={manualFieldId(colName)} message={fieldErrors[colName]} />
                         {isRelational && typeof formData[colName] === "string" && formData[colName].trim() !== "" && !/^\d+$/.test(formData[colName].trim()) && (
                           <label className="mt-1.5 flex items-start gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-[11px] text-emerald-900">
                             <input
@@ -944,7 +1020,7 @@ export const ManualSchedulePage: React.FC = () => {
               {/* SECTION B: Content & Text Body */}
               {contentCols.length > 0 && (
                 <div className="space-y-4 pt-2">
-                  <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider text-[11px] pb-1 border-b border-slate-100">
+                  <h4 className="da-eyebrow w-full border-b border-slate-100 pb-2">
                     Content & Descriptive Copy
                   </h4>
 
@@ -973,13 +1049,17 @@ export const ManualSchedulePage: React.FC = () => {
                             </div>
                           </div>
                           <textarea
+                            id={manualFieldId(colName)}
                             rows={isLongText ? 8 : 3}
-                            required={!col.nullable}
+                            aria-required={!col.nullable}
+                            aria-invalid={!!fieldErrors[colName]}
+                            aria-describedby={fieldErrors[colName] ? `${manualFieldId(colName)}-error` : undefined}
                             value={formData[colName] !== undefined ? formData[colName] : ""}
                             onChange={(e) => handleFieldChange(colName, e.target.value)}
                             placeholder={`Enter ${colName}...`}
-                            className="w-full bg-slate-50/50 border border-slate-200 rounded-xl p-3.5 text-xs text-slate-900 font-sans leading-relaxed focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 focus:bg-white transition"
+                            className={`da-input leading-relaxed${invalid(fieldErrors[colName])}`}
                           />
+                          <FieldError id={manualFieldId(colName)} message={fieldErrors[colName]} />
                         </div>
                       );
                     })}
@@ -990,7 +1070,7 @@ export const ManualSchedulePage: React.FC = () => {
               {/* SECTION C: Image & Media Uploader */}
               {mediaCols.length > 0 && (
                 <div className="space-y-4 pt-2">
-                  <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider text-[11px] pb-1 border-b border-slate-100 flex items-center gap-1.5">
+                  <h4 className="da-eyebrow w-full border-b border-slate-100 pb-2">
                     <ImageIcon className="w-3.5 h-3.5 text-indigo-600" />
                     Featured Image & Media Uploader
                   </h4>
@@ -1062,12 +1142,16 @@ export const ManualSchedulePage: React.FC = () => {
                         {/* URL input fallback & Preset chips */}
                         <div className="space-y-1.5">
                           <input
+                            id={manualFieldId(colName)}
                             type="text"
                             value={currentValue || ""}
                             onChange={(e) => handleFieldChange(colName, e.target.value)}
                             placeholder="Or paste external image URL..."
-                            className="w-full bg-slate-50/50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-900 font-mono focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 focus:bg-white transition"
+                            aria-invalid={!!fieldErrors[colName]}
+                            aria-describedby={fieldErrors[colName] ? `${manualFieldId(colName)}-error` : undefined}
+                            className={`da-input font-mono${invalid(fieldErrors[colName])}`}
                           />
+                          <FieldError id={manualFieldId(colName)} message={fieldErrors[colName]} />
 
                         </div>
                       </div>
@@ -1079,7 +1163,7 @@ export const ManualSchedulePage: React.FC = () => {
               {/* SECTION D: SEO, Metadata & Other Columns */}
               {seoAndOtherCols.length > 0 && (
                 <div className="space-y-4 pt-2">
-                  <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider text-[11px] pb-1 border-b border-slate-100">
+                  <h4 className="da-eyebrow w-full border-b border-slate-100 pb-2">
                     SEO & Additional Metadata
                   </h4>
 
@@ -1096,12 +1180,15 @@ export const ManualSchedulePage: React.FC = () => {
                             <span className="text-[10px] text-slate-400 font-mono">{col.data_type}</span>
                           </div>
                           <SchemaFieldControl
+                            id={manualFieldId(colName)}
+                            invalid={!!fieldErrors[colName]}
                             column={col}
                             value={formData[colName]}
                             onChange={(val) => handleFieldChange(colName, val)}
                             targetTable={selectedTable?.name}
                             topic={formData.title || formData.name || aiTopic}
                           />
+                          <FieldError id={manualFieldId(colName)} message={fieldErrors[colName]} />
                         </div>
                       );
                     })}
@@ -1113,7 +1200,7 @@ export const ManualSchedulePage: React.FC = () => {
               <div className="space-y-3 pt-2">
                 <div className="flex items-center justify-between pb-1 border-b border-slate-100">
                   <div>
-                    <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+                    <h4 className="da-eyebrow">
                       <Plus className="w-3.5 h-3.5 text-indigo-600" />
                       Custom Additional Columns & Attributes
                     </h4>
@@ -1132,29 +1219,36 @@ export const ManualSchedulePage: React.FC = () => {
                 {customFields.length > 0 ? (
                   <div className="space-y-2">
                     {customFields.map((cf) => (
-                      <div key={cf.id} className="flex items-center gap-2 bg-slate-50/60 p-2 border border-slate-200 rounded-xl">
+                      <div key={cf.id}>
+                      <div className={`flex items-center gap-2 p-2 border rounded-xl ${fieldErrors[`cf:${cf.id}`] ? "border-rose-300 bg-rose-50/40" : "border-slate-200 bg-slate-50/60"}`}>
                         <input
+                          id={manualFieldId(`cf:${cf.id}`)}
                           type="text"
                           placeholder="Column name (e.g. tags, meta_keywords)"
                           value={cf.key}
                           onChange={(e) => handleCustomFieldChange(cf.id, e.target.value, cf.value)}
-                          className="w-1/3 bg-white border border-slate-300 rounded-lg px-3 py-1.5 text-xs text-slate-900 font-mono focus:ring-1 focus:ring-indigo-500"
+                          aria-invalid={!!fieldErrors[`cf:${cf.id}`]}
+                          aria-describedby={fieldErrors[`cf:${cf.id}`] ? `${manualFieldId(`cf:${cf.id}`)}-error` : undefined}
+                          className={`da-input w-1/3 py-2 font-mono${invalid(fieldErrors[`cf:${cf.id}`])}`}
                         />
                         <input
                           type="text"
                           placeholder="Value..."
                           value={cf.value}
                           onChange={(e) => handleCustomFieldChange(cf.id, cf.key, e.target.value)}
-                          className="flex-1 bg-white border border-slate-300 rounded-lg px-3 py-1.5 text-xs text-slate-900 focus:ring-1 focus:ring-indigo-500"
+                          className="da-input flex-1 py-2"
                         />
                         <button
                           type="button"
                           onClick={() => handleRemoveCustomField(cf.id)}
                           className="p-1.5 text-rose-500 hover:text-rose-700 hover:bg-rose-50 rounded-lg transition"
                           title="Remove custom field"
+                          aria-label="Remove custom field"
                         >
                           <X className="w-4 h-4" />
                         </button>
+                      </div>
+                      <FieldError id={manualFieldId(`cf:${cf.id}`)} message={fieldErrors[`cf:${cf.id}`]} />
                       </div>
                     ))}
                   </div>
@@ -1170,19 +1264,19 @@ export const ManualSchedulePage: React.FC = () => {
             <motion.div
               initial={{ opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
-              className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs space-y-4"
+              className="da-card p-6 sm:p-7 space-y-5"
             >
-              <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+              <h3 className="flex items-center gap-2.5 text-[17px] font-bold tracking-[-0.02em] text-slate-950">
                 <Clock className="w-3.5 h-3.5 text-indigo-600" />
-                3. Dispatch & Publication Schedule
+                When should it publish?
               </h3>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <label
-                  className={`p-4 border rounded-xl flex items-center gap-3 cursor-pointer transition ${
+                  className={`p-4 border rounded-2xl flex items-center gap-3 cursor-pointer transition-all ${
                     publishMode === "NOW"
-                      ? "bg-indigo-50/70 border-indigo-200 text-indigo-950 font-bold"
-                      : "bg-slate-50/50 border-slate-200 text-slate-600 hover:bg-slate-100/50"
+                      ? "border-indigo-500 bg-indigo-50/60 text-indigo-950 font-bold ring-4 ring-indigo-500/10"
+                      : "border-slate-200 bg-white text-slate-600 hover:border-indigo-200 hover:bg-slate-50/60"
                   }`}
                 >
                   <input
@@ -1193,16 +1287,16 @@ export const ManualSchedulePage: React.FC = () => {
                     className="text-indigo-600 focus:ring-indigo-500"
                   />
                   <div>
-                    <span className="text-xs block">Publish Immediately</span>
-                    <span className="text-[11px] text-slate-500 font-normal">Direct parameterized write now</span>
+                    <span className="block text-[14px]">Publish Immediately</span>
+                    <span className="text-[12.5px] font-normal text-slate-500">Direct parameterized write now</span>
                   </div>
                 </label>
 
                 <label
-                  className={`p-4 border rounded-xl flex items-center gap-3 cursor-pointer transition ${
+                  className={`p-4 border rounded-2xl flex items-center gap-3 cursor-pointer transition-all ${
                     publishMode === "SCHEDULED"
-                      ? "bg-indigo-50/70 border-indigo-200 text-indigo-950 font-bold"
-                      : "bg-slate-50/50 border-slate-200 text-slate-600 hover:bg-slate-100/50"
+                      ? "border-indigo-500 bg-indigo-50/60 text-indigo-950 font-bold ring-4 ring-indigo-500/10"
+                      : "border-slate-200 bg-white text-slate-600 hover:border-indigo-200 hover:bg-slate-50/60"
                   }`}
                 >
                   <input
@@ -1213,8 +1307,8 @@ export const ManualSchedulePage: React.FC = () => {
                     className="text-indigo-600 focus:ring-indigo-500"
                   />
                   <div>
-                    <span className="text-xs block">Schedule for Later</span>
-                    <span className="text-[11px] text-slate-500 font-normal">Durable queue worker execution</span>
+                    <span className="block text-[14px]">Schedule for Later</span>
+                    <span className="text-[12.5px] font-normal text-slate-500">Durable queue worker execution</span>
                   </div>
                 </label>
               </div>
@@ -1223,23 +1317,27 @@ export const ManualSchedulePage: React.FC = () => {
                 <div className="space-y-2 pt-2">
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                     <div>
-                      <label className="mb-1.5 block text-xs font-semibold text-slate-700">Date</label>
-                      <DatePicker value={scheduleDate} onChange={(d) => d && setScheduleDate(d)} today={todayIn(scheduleTz)} min={todayIn(scheduleTz)} ariaLabel="Publication date" />
+                      <label className="da-label">Date</label>
+                      <DatePicker value={scheduleDate} onChange={(d) => { if (d) { setScheduleDate(d); setFieldErrors((x) => clearError(x, "$schedule")); } }} today={todayIn(scheduleTz)} min={todayIn(scheduleTz)} invalid={!!fieldErrors["$schedule"]} ariaLabel="Publication date" />
                     </div>
                     <div>
-                      <label className="mb-1.5 block text-xs font-semibold text-slate-700">Time</label>
-                      <TimePicker value={scheduleClock} onChange={setScheduleClock} ariaLabel="Publication time" />
+                      <label className="da-label">Time</label>
+                      <TimePicker value={scheduleClock} onChange={(t) => { setScheduleClock(t); setFieldErrors((x) => clearError(x, "$schedule")); }} invalid={!!fieldErrors["$schedule"]} ariaLabel="Publication time" />
                     </div>
                     <div>
-                      <label className="mb-1.5 block text-xs font-semibold text-slate-700">Timezone</label>
-                      <TimezoneSelect value={scheduleTz} onChange={(tz) => { setScheduleTz(tz); }} />
+                      <label className="da-label">Timezone</label>
+                      <TimezoneSelect value={scheduleTz} onChange={(tz) => { setScheduleTz(tz); setFieldErrors((x) => clearError(x, "$schedule")); }} />
                     </div>
                   </div>
-                  <p className={`text-[11px] ${new Date(scheduledAtIso()).getTime() < Date.now() + 60000 ? "text-rose-600" : "text-slate-500"}`}>
-                    {new Date(scheduledAtIso()).getTime() < Date.now() + 60000
-                      ? "That time has already passed. Pick a later time."
-                      : `Publishes ${formatInstant(scheduledAtIso(), scheduleTz, { withZone: true })} (${relativeFromNow(scheduledAtIso())}). The background worker writes it even if this page is closed.`}
-                  </p>
+                  <div id="manual-schedule" tabIndex={-1}>
+                    {fieldErrors["$schedule"] || new Date(scheduledAtIso()).getTime() < Date.now() + 60000 ? (
+                      <FieldError id="manual-schedule" message={fieldErrors["$schedule"] ?? "That time has already passed. Pick a later time."} />
+                    ) : (
+                      <p className="text-[11px] text-slate-500">
+                        {`Publishes ${formatInstant(scheduledAtIso(), scheduleTz, { withZone: true })} (${relativeFromNow(scheduledAtIso())}). The background worker writes it even if this page is closed.`}
+                      </p>
+                    )}
+                  </div>
                 </div>
               )}
 
@@ -1249,7 +1347,7 @@ export const ManualSchedulePage: React.FC = () => {
                   whileHover={{ scale: 1.02 }}
                   whileTap={{ scale: 0.98 }}
                   disabled={isPlanning || isSubmitting}
-                  className="w-full sm:w-auto justify-center px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white rounded-xl text-xs font-bold transition shadow-xs flex items-center gap-2"
+                  className="da-btn da-btn-primary w-full sm:w-auto px-6"
                 >
                   {isPlanning ? (
                     <>
@@ -1268,56 +1366,37 @@ export const ManualSchedulePage: React.FC = () => {
           )}
         </form>
       )}
-    {/* Review before anything is written */}
-      <AnimatePresence>
+      {/* Review before anything is written */}
+      <ModalShell
+        open={!!review}
+        onClose={() => setReview(null)}
+        size="xl"
+        icon={ShieldCheck}
+        title={`Review before ${publishMode === "NOW" ? "publishing" : "scheduling"}`}
+        description={publishMode === "NOW"
+          ? `This is exactly what will be written to ${selectedTable?.name} when you confirm.`
+          : `This will be written to ${selectedTable?.name} on ${formatInstant(scheduledAtIso(), scheduleTz, { withZone: true })}.`}
+        footer={
+          <>
+            <button type="button" onClick={() => setReview(null)} className="da-btn da-btn-ghost">Go back and edit</button>
+            <button type="button" onClick={confirmPublish} disabled={isSubmitting || !review?.plan?.can_publish} className="da-btn da-btn-primary">
+              {isSubmitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+              {!review?.plan?.can_publish ? "Fix the problems first" : publishMode === "NOW" ? "Confirm and publish now" : "Confirm schedule"}
+            </button>
+          </>
+        }
+      >
         {review && (
-          <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-900/50 p-0 backdrop-blur-xs sm:items-center sm:p-4">
-            <motion.div
-              role="dialog"
-              aria-modal="true"
-              aria-labelledby="manual-review-title"
-              initial={{ opacity: 0, y: 16 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 16 }}
-              className="flex max-h-[94vh] w-full max-w-4xl flex-col space-y-3 rounded-t-2xl border border-slate-200 bg-white p-4 shadow-2xl sm:max-h-[90vh] sm:rounded-2xl sm:p-6"
-            >
-              <div className="flex items-start justify-between gap-3 border-b border-slate-100 pb-3">
-                <div>
-                  <h3 id="manual-review-title" className="flex items-center gap-2 text-sm font-bold text-slate-900"><ShieldCheck className="h-4 w-4 text-indigo-600" /> Review before {publishMode === "NOW" ? "publishing" : "scheduling"}</h3>
-                  <p className="mt-0.5 text-xs text-slate-500">
-                    {publishMode === "NOW"
-                      ? `This is exactly what will be written to ${selectedTable?.name} when you confirm.`
-                      : `This will be written to ${selectedTable?.name} on ${formatInstant(scheduledAtIso(), scheduleTz, { withZone: true })}.`}
-                  </p>
-                </div>
-                <button type="button" onClick={() => setReview(null)} aria-label="Close" className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700"><X className="h-5 w-5" /></button>
-              </div>
-              <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-                <ContentPreview
-                  payload={review.payload}
-                  meta={{ write_plan: review.plan, issues: review.plan?.issues ?? [], manual: true }}
-                  targetTable={selectedTable?.name}
-                  timezone={scheduleTz}
-                  publicationTime={publishMode === "SCHEDULED" ? scheduledAtIso() : null}
-                  defaultTab="database"
-                />
-              </div>
-              <div className="flex flex-col-reverse gap-2 border-t border-slate-100 pt-3 sm:flex-row sm:justify-end">
-                <button type="button" onClick={() => setReview(null)} className="rounded-xl bg-slate-100 px-4 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-200">Go back and edit</button>
-                <button
-                  type="button"
-                  onClick={confirmPublish}
-                  disabled={isSubmitting || !review.plan?.can_publish}
-                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 text-xs font-bold text-white shadow-xs hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {isSubmitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-                  {!review.plan?.can_publish ? "Fix the problems first" : publishMode === "NOW" ? "Confirm and publish now" : "Confirm schedule"}
-                </button>
-              </div>
-            </motion.div>
-          </div>
+          <ContentPreview
+            payload={review.payload}
+            meta={{ write_plan: review.plan, issues: review.plan?.issues ?? [], manual: true }}
+            targetTable={selectedTable?.name}
+            timezone={scheduleTz}
+            publicationTime={publishMode === "SCHEDULED" ? scheduledAtIso() : null}
+            defaultTab="database"
+          />
         )}
-      </AnimatePresence>
+      </ModalShell>
     </motion.div>
   );
 };

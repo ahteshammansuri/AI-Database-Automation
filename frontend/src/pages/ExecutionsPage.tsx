@@ -1,38 +1,13 @@
 import React, { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import {
-  History,
-  Eye,
-  Clock,
-  CheckCircle,
-  AlertCircle,
-  Play,
-  RotateCcw,
-  XCircle,
-  PauseCircle,
-  PlayCircle,
-  Send,
-  Zap,
-  Activity,
-  Layers,
-  ChevronRight,
-  ShieldCheck,
-  FileText,
-  FileEdit,
-  Save,
-  Database,
-  Image as ImageIcon,
-  Cpu,
-  BookOpen,
-  Sparkles,
-  ExternalLink,
-  Tag,
-  Copy,
-  Check,
-  CheckCircle2,
-} from "lucide-react";
+import { History, Eye, Clock, CheckCircle, AlertCircle, RotateCcw, XCircle, PauseCircle, PlayCircle, Zap, Layers, FileText, FileEdit, Save, Database, Cpu, BookOpen, Tag, Copy, Check } from "lucide-react";
 import { api } from "../services/api";
 import { StatusPill } from "../components/common/StatusPill";
+import { Card, EmptyState, FieldError, Loading, PageHeader } from "../components/ui/kit";
+import { draftPayloadErrors, focusFirstError, invalid, serverFieldErrors, type FieldErrors } from "../lib/validation";
+
+const recordFieldId = (key: string) => `record-field-${key}`;
+const sameValue = (a: any, b: any) => (typeof a === "object" || typeof b === "object" ? JSON.stringify(a ?? null) === JSON.stringify(b ?? null) : String(a ?? "") === String(b ?? ""));
 import { SearchableSelect } from "../components/common/SearchableSelect";
 import { useLiveEvents } from "../context/LiveEventsContext";
 import { useToast } from "../context/ToastContext";
@@ -58,6 +33,10 @@ export const ExecutionsPage: React.FC = () => {
   const [actionMsg, setActionMsg] = useState<{ type: "success" | "error" | "info"; text: string } | null>(null);
   const [processingId, setProcessingId] = useState<number | null>(null);
   const [editRecordPayload, setEditRecordPayload] = useState<Record<string, any>>({});
+  // The values the editor started from (only changed fields are sent), and messages under each field.
+  const [editRecordOriginal, setEditRecordOriginal] = useState<Record<string, any>>({});
+  const [recordErrors, setRecordErrors] = useState<FieldErrors>({});
+  const [recordNote, setRecordNote] = useState<string | null>(null);
   const [isUpdatingRecord, setIsUpdatingRecord] = useState(false);
 
   const { addListener } = useLiveEvents();
@@ -165,12 +144,16 @@ export const ExecutionsPage: React.FC = () => {
     setCopiedJson(false);
     const initialPayload = execSummary?.versions?.[0]?.payload || execSummary?.payload || {};
     setEditRecordPayload(initialPayload);
+    setEditRecordOriginal(initialPayload);
+    setRecordErrors({});
+    setRecordNote(null);
     try {
       setLoadingDetail(true);
       const full = await api.getExecution(execSummary.id);
       setSelectedExecution(full);
       const fullPayload = full?.versions?.[0]?.payload || full?.payload || initialPayload;
       setEditRecordPayload(fullPayload);
+      setEditRecordOriginal(fullPayload);
     } catch (err: any) {
       console.error("Failed to load execution details", err);
     } finally {
@@ -178,17 +161,57 @@ export const ExecutionsPage: React.FC = () => {
     }
   };
 
+  const setRecordField = (key: string, value: any) => {
+    setEditRecordPayload((prev) => ({ ...prev, [key]: value }));
+    setRecordNote(null);
+    setRecordErrors((prev) => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  };
+
+  const showRecordErrors = (found: FieldErrors) => {
+    setRecordErrors(found);
+    setTimeout(() => focusFirstError(found, recordFieldId), 40);
+  };
+
   const handleUpdatePublishedRecord = async () => {
     if (!selectedExecution?.id) return;
+    // Only the fields the user changed are written, after the same checks the server runs.
+    const changes = Object.fromEntries(Object.entries(editRecordPayload).filter(([k, v]) => !sameValue(v, editRecordOriginal[k])));
+    if (!Object.keys(changes).length) {
+      setRecordNote("Nothing has changed yet. Edit a field above, then save.");
+      return;
+    }
+    const versions: any[] = selectedExecution.versions ?? [];
+    const columns = [...versions].reverse().find((v) => v?.meta?.write_plan?.columns?.length)?.meta?.write_plan?.columns;
+    const found = draftPayloadErrors(changes, columns);
+    if (Object.keys(found).length) {
+      showRecordErrors(found);
+      return;
+    }
+    const table = selectedExecution.automation?.target_table || "the target table";
+    const ok = await confirm({
+      title: "Update the published record?",
+      text: `Record #${selectedExecution.target_record_id} in ${table} will be updated: ${Object.keys(changes).join(", ")}. Only this row and these columns change.`,
+      confirmButtonText: "Yes, update it",
+      cancelButtonText: "Keep editing",
+    });
+    if (!ok) return;
     try {
       setIsUpdatingRecord(true);
-      toast.info("Updating Record", "Applying parameterized UPDATE to target database...");
-      const res = await api.updatePublishedRecord(selectedExecution.id, editRecordPayload);
+      const res = await api.updatePublishedRecord(selectedExecution.id, changes);
       toast.success("Record Updated", res.message || "Record successfully updated in MySQL!");
       setSelectedExecution(res.execution);
+      setEditRecordOriginal(editRecordPayload);
       loadData(true);
     } catch (err: any) {
-      toast.error("Update Failed", err.message || "Failed to update record in target database.");
+      const fields = serverFieldErrors(err, {}, Object.keys(editRecordPayload));
+      const placed = Object.fromEntries(Object.entries(fields).filter(([k]) => k in editRecordPayload));
+      if (Object.keys(placed).length) showRecordErrors(placed);
+      else toast.error("Update Failed", err.message || "Failed to update record in target database.");
     } finally {
       setIsUpdatingRecord(false);
     }
@@ -275,57 +298,49 @@ export const ExecutionsPage: React.FC = () => {
 
   return (
     <div id="executions-history-anchor" className="space-y-6">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2 mb-1">
-            <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200">
-              Durable Queue Ledger
-            </span>
-            <span className="text-xs text-slate-500">• Equal Priority & Fair Dispatch</span>
-          </div>
-          <h2 className="text-xl font-bold text-slate-900 tracking-tight">Execution history</h2>
-          <p className="text-xs text-slate-500 mt-0.5">
-            Every run: what was generated, when it publishes, and exactly what was written to your database.
-          </p>
-          {automationFilter && (
-            <button
-              type="button"
-              onClick={() => { searchParams.delete("automation"); setSearchParams(searchParams); setPage(1); }}
-              className="mt-2 inline-flex items-center gap-1 rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-0.5 text-[11px] font-semibold text-indigo-700 hover:bg-indigo-100"
-            >
-              Showing one automation · <span className="underline">show all</span>
-            </button>
-          )}
-        </div>
-
-        <div className="flex items-center gap-2 text-xs w-full sm:w-56">
-          <span className="text-slate-500 font-medium shrink-0">Filter Status:</span>
-          <SearchableSelect
-            value={selectedStatus}
-            onChange={(val) => {
-              setSelectedStatus(String(val));
-              setPage(1);
-            }}
-            placeholder="All Statuses"
-            searchPlaceholder="Filter status..."
-            allowClear={true}
-            options={[
-              { value: "", label: "All Statuses" },
-              { value: "QUEUED", label: "QUEUED", badge: "wait" },
-              { value: "RUNNING", label: "RUNNING", badge: "active" },
-              { value: "GENERATING", label: "GENERATING", badge: "ai" },
-              { value: "PENDING_APPROVAL", label: "PENDING_APPROVAL", badge: "review" },
-              { value: "READY_TO_PUBLISH", label: "READY_TO_PUBLISH", badge: "held" },
-              { value: "PUBLISHING", label: "PUBLISHING", badge: "atomic" },
-              { value: "PUBLISHED", label: "PUBLISHED", badge: "done" },
-              { value: "PAUSED", label: "PAUSED", badge: "held" },
-              { value: "FAILED", label: "FAILED", badge: "error" },
-              { value: "CANCELLED", label: "CANCELLED", badge: "abort" },
-            ]}
-          />
-        </div>
-      </div>
+      <PageHeader
+        eyebrow="Operations"
+        title="Execution history"
+        description="Every run: what was generated, when it publishes, and exactly what was written to your database."
+        actions={
+          <>
+            {automationFilter && (
+              <button
+                type="button"
+                onClick={() => { searchParams.delete("automation"); setSearchParams(searchParams); setPage(1); }}
+                className="da-chip da-chip-indigo px-3 py-1 text-[12px] hover:bg-indigo-100"
+              >
+                One automation · <span className="underline">show all</span>
+              </button>
+            )}
+            <div className="w-56">
+              <SearchableSelect
+                value={selectedStatus}
+                onChange={(val) => {
+                  setSelectedStatus(String(val));
+                  setPage(1);
+                }}
+                placeholder="All statuses"
+                searchPlaceholder="Filter status..."
+                allowClear={true}
+                options={[
+                  { value: "", label: "All Statuses" },
+                  { value: "QUEUED", label: "QUEUED", badge: "wait" },
+                  { value: "RUNNING", label: "RUNNING", badge: "active" },
+                  { value: "GENERATING", label: "GENERATING", badge: "ai" },
+                  { value: "PENDING_APPROVAL", label: "PENDING_APPROVAL", badge: "review" },
+                  { value: "READY_TO_PUBLISH", label: "READY_TO_PUBLISH", badge: "held" },
+                  { value: "PUBLISHING", label: "PUBLISHING", badge: "atomic" },
+                  { value: "PUBLISHED", label: "PUBLISHED", badge: "done" },
+                  { value: "PAUSED", label: "PAUSED", badge: "held" },
+                  { value: "FAILED", label: "FAILED", badge: "error" },
+                  { value: "CANCELLED", label: "CANCELLED", badge: "abort" },
+                ]}
+              />
+            </div>
+          </>
+        }
+      />
 
       <AnimatePresence>
         {actionMsg && (
@@ -333,7 +348,7 @@ export const ExecutionsPage: React.FC = () => {
             initial={{ opacity: 0, y: -6 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -6 }}
-            className={`p-3.5 rounded-xl border text-xs flex items-center justify-between shadow-2xs ${
+            className={`flex items-center justify-between rounded-2xl border px-4 py-3 text-[13px] ${
               actionMsg.type === "success"
                 ? "bg-emerald-50 border-emerald-200 text-emerald-800"
                 : actionMsg.type === "error"
@@ -355,21 +370,14 @@ export const ExecutionsPage: React.FC = () => {
       </AnimatePresence>
 
       {loading && executions.length === 0 ? (
-        <div className="py-20 text-center bg-white border border-slate-200/90 rounded-2xl shadow-xs">
-          <div className="w-8 h-8 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-          <p className="text-slate-500 text-sm font-medium">Loading execution records...</p>
-        </div>
+        <Card><Loading label="Loading runs…" /></Card>
       ) : executions.length === 0 ? (
-        <div className="py-16 text-center bg-white border border-dashed border-slate-300 rounded-2xl shadow-xs p-8">
-          <History className="w-10 h-10 text-slate-400 mx-auto mb-2" />
-          <h3 className="text-sm font-bold text-slate-900">No execution records found</h3>
-          <p className="text-xs text-slate-500 mt-1">Run an automation or trigger manual publication to populate history.</p>
-        </div>
+        <EmptyState icon={History} title="No runs yet" description="Run an automation or publish something manually and it shows up here, step by step." />
       ) : (
-        <div className="bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-xs">
+        <div className="da-card overflow-hidden">
           <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead className="bg-slate-50/80 text-slate-600 font-semibold border-b border-slate-200">
+            <table className="w-full text-left text-[13px]">
+              <thead className="border-b border-slate-200 bg-slate-50/80 text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500">
                 <tr>
                   <th className="py-3 px-3 sm:px-4">Run</th>
                   <th className="py-3 px-3 sm:px-4">Automation</th>
@@ -394,7 +402,7 @@ export const ExecutionsPage: React.FC = () => {
                       ref={(el: HTMLTableRowElement | null) =>
                         el ? orbitTargets.register(`executions.row.${e.id}`, el) : orbitTargets.unregister(`executions.row.${e.id}`)
                       }
-                      className="hover:bg-slate-50/70 transition-colors font-mono"
+                      className="font-mono transition-colors hover:bg-indigo-50/30"
                     >
                       <td className="py-3 px-3 sm:px-4 align-top">
                         <span className="font-bold text-slate-900">#{e.id}</span>
@@ -435,7 +443,7 @@ export const ExecutionsPage: React.FC = () => {
                           whileHover={{ scale: 1.05 }}
                           whileTap={{ scale: 0.95 }}
                           onClick={() => handleViewExecution(e)}
-                          className="px-2.5 py-1 bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-700 rounded-lg text-xs inline-flex items-center gap-1 font-medium transition shadow-2xs"
+                          className="da-btn da-btn-secondary da-btn-sm"
                         >
                           <Eye className="w-3 h-3" /> View
                         </motion.button>
@@ -447,7 +455,7 @@ export const ExecutionsPage: React.FC = () => {
                             whileTap={{ scale: 0.95 }}
                             disabled={isProcessing}
                             onClick={() => handlePublishNow(e.id)}
-                            className="btn-primary-gradient px-2.5 py-1 text-white rounded-lg text-xs font-semibold shadow-xs"
+                            className="da-btn da-btn-primary da-btn-sm"
                           >
                             Publish Now
                           </motion.button>
@@ -460,7 +468,7 @@ export const ExecutionsPage: React.FC = () => {
                             whileTap={{ scale: 0.95 }}
                             disabled={isProcessing}
                             onClick={() => handleRetry(e.id)}
-                            className="px-2.5 py-1 bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-800 rounded-lg text-xs font-semibold inline-flex items-center gap-1 shadow-2xs"
+                            className="da-btn da-btn-sm border border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100"
                           >
                             <RotateCcw className="w-3 h-3" /> Retry
                           </motion.button>
@@ -473,7 +481,7 @@ export const ExecutionsPage: React.FC = () => {
                             whileTap={{ scale: 0.95 }}
                             disabled={isProcessing}
                             onClick={() => handlePause(e.id)}
-                            className="px-2.5 py-1 bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-700 rounded-lg text-xs font-medium inline-flex items-center gap-1 shadow-2xs"
+                            className="da-btn da-btn-secondary da-btn-sm"
                           >
                             <PauseCircle className="w-3 h-3" /> Pause
                           </motion.button>
@@ -486,7 +494,7 @@ export const ExecutionsPage: React.FC = () => {
                             whileTap={{ scale: 0.95 }}
                             disabled={isProcessing}
                             onClick={() => handleResume(e.id)}
-                            className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 rounded-lg text-xs font-medium inline-flex items-center gap-1 shadow-2xs"
+                            className="da-btn da-btn-sm border border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100"
                           >
                             <PlayCircle className="w-3 h-3" /> Resume
                           </motion.button>
@@ -499,7 +507,7 @@ export const ExecutionsPage: React.FC = () => {
                             whileTap={{ scale: 0.95 }}
                             disabled={isProcessing}
                             onClick={() => handleCancel(e.id)}
-                            className="px-2 py-1 text-rose-600 hover:bg-rose-50 rounded-lg text-xs font-medium"
+                            className="da-icon-btn h-7 w-7 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
                             title="Cancel execution before target write"
                           >
                             <XCircle className="w-3 h-3" />
@@ -515,20 +523,20 @@ export const ExecutionsPage: React.FC = () => {
           </div>
 
           {totalPages > 1 && (
-            <div className="p-3 bg-slate-50/80 border-t border-slate-200 flex items-center justify-between text-xs text-slate-600">
+            <div className="flex items-center justify-between border-t border-slate-200 bg-slate-50/70 px-4 py-3 text-[13px] text-slate-600">
               <span>Page {page} of {totalPages}</span>
               <div className="space-x-2">
                 <button
                   disabled={page <= 1}
                   onClick={() => setPage(page - 1)}
-                  className="px-3 py-1 bg-white border border-slate-200 disabled:opacity-40 rounded shadow-xs font-medium"
+                  className="da-btn da-btn-secondary da-btn-sm"
                 >
                   Previous
                 </button>
                 <button
                   disabled={page >= totalPages}
                   onClick={() => setPage(page + 1)}
-                  className="px-3 py-1 bg-white border border-slate-200 disabled:opacity-40 rounded shadow-xs font-medium"
+                  className="da-btn da-btn-secondary da-btn-sm"
                 >
                   Next
                 </button>
@@ -541,24 +549,24 @@ export const ExecutionsPage: React.FC = () => {
       {/* Comprehensive Execution Inspector Modal with Visual Preview, RAG & Timeline */}
       <AnimatePresence>
         {selectedExecution && (
-          <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/50 p-0 backdrop-blur-[6px] sm:items-center sm:p-6">
             <motion.div
               initial={{ opacity: 0, scale: 0.95, y: 10 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 10 }}
               transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
-              className="bg-white border border-slate-200 rounded-t-2xl sm:rounded-2xl max-w-4xl w-full p-4 sm:p-6 shadow-2xl space-y-4 max-h-[94vh] sm:max-h-[90vh] flex flex-col"
+              className="flex max-h-[94vh] w-full max-w-5xl flex-col space-y-4 rounded-t-3xl border border-slate-200/70 bg-white p-5 shadow-[0_40px_120px_-30px_rgba(15,23,42,0.55)] sm:max-h-[90vh] sm:rounded-3xl sm:p-7"
             >
               {/* Modal Header */}
               <div className="flex shrink-0 flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3">
                 <div className="flex items-center gap-3">
-                  <div className="p-2 bg-indigo-50 text-indigo-600 rounded-xl">
-                    <Layers className="w-5 h-5" />
+                  <div className="grid h-11 w-11 place-items-center rounded-2xl bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-400 text-white shadow-[0_10px_24px_-10px_rgba(99,102,241,0.8)]">
+                    <Layers className="h-5 w-5" />
                   </div>
                   <div>
                     <div className="flex items-center gap-2">
-                      <h3 className="text-base font-bold text-slate-900">
-                        Execution Run #{selectedExecution.id}
+                      <h3 className="text-[18px] font-bold tracking-[-0.02em] text-slate-950">
+                        Run #{selectedExecution.id}
                       </h3>
                       <StatusPill status={selectedExecution.status} size="sm" />
                       {loadingDetail && (
@@ -574,23 +582,24 @@ export const ExecutionsPage: React.FC = () => {
                 <div className="flex items-center gap-2 self-end sm:self-auto">
                   <button
                     onClick={() => setSelectedExecution(null)}
-                    className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg font-bold text-sm transition"
+                    className="da-icon-btn"
                     title="Close"
+                    aria-label="Close"
                   >
-                    ✕
+                    <XCircle className="h-5 w-5" />
                   </button>
                 </div>
               </div>
 
               {/* Top Metrics Ribbon */}
               <div className="hidden shrink-0 grid-cols-2 sm:grid sm:grid-cols-4 gap-2 text-xs font-mono">
-                <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5">
+                <div className="da-panel p-3">
                   <span className="text-[10px] text-slate-400 uppercase font-sans font-bold block">Target Record</span>
                   <span className="font-bold text-slate-900 text-xs">
                     {selectedExecution.target_record_id ? `#${selectedExecution.target_record_id}` : "Pending Write"}
                   </span>
                 </div>
-                <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5">
+                <div className="da-panel p-3">
                   <span className="text-[10px] text-slate-400 uppercase font-sans font-bold block">Queue Wait</span>
                   <span className="font-bold text-indigo-600 text-xs">
                     {selectedExecution.queue_wait_ms !== null && selectedExecution.queue_wait_ms !== undefined
@@ -598,7 +607,7 @@ export const ExecutionsPage: React.FC = () => {
                       : "-"}
                   </span>
                 </div>
-                <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5">
+                <div className="da-panel p-3">
                   <span className="text-[10px] text-slate-400 uppercase font-sans font-bold block">Execution Duration</span>
                   <span className="font-bold text-emerald-600 text-xs">
                     {selectedExecution.execution_duration_ms !== null && selectedExecution.execution_duration_ms !== undefined
@@ -606,7 +615,7 @@ export const ExecutionsPage: React.FC = () => {
                       : "-"}
                   </span>
                 </div>
-                <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5 truncate">
+                <div className="da-panel truncate p-3">
                   <span className="text-[10px] text-slate-400 uppercase font-sans font-bold block">Idempotency Key</span>
                   <span className="text-slate-700 text-[11px] truncate block" title={selectedExecution.idempotency_key}>
                     {selectedExecution.idempotency_key ? String(selectedExecution.idempotency_key).slice(0, 14) + "..." : "-"}
@@ -615,14 +624,14 @@ export const ExecutionsPage: React.FC = () => {
               </div>
 
               {/* Navigation Tab Bar */}
-              <div className="flex shrink-0 items-center gap-1.5 border-b border-slate-100 pb-1 text-xs font-semibold overflow-x-auto">
+              <div className="flex shrink-0 items-center gap-1 overflow-x-auto rounded-2xl bg-slate-100/90 p-1 text-[13px] font-semibold">
                 <button
                   type="button"
                   onClick={() => setActiveModalTab("preview")}
-                  className={`px-3 py-1.5 rounded-xl transition flex shrink-0 items-center gap-1.5 whitespace-nowrap ${
+                  className={`px-3.5 py-2 rounded-xl transition flex shrink-0 items-center gap-1.5 whitespace-nowrap ${
                     activeModalTab === "preview"
-                      ? "bg-indigo-600 text-white shadow-2xs font-bold"
-                      : "text-slate-600 hover:bg-slate-100"
+                      ? "bg-white text-slate-950 shadow-xs"
+                      : "text-slate-500 hover:text-slate-900"
                   }`}
                 >
                   <FileText className="w-3.5 h-3.5" />
@@ -631,10 +640,10 @@ export const ExecutionsPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setActiveModalTab("provenance")}
-                  className={`px-3 py-1.5 rounded-xl transition flex shrink-0 items-center gap-1.5 whitespace-nowrap ${
+                  className={`px-3.5 py-2 rounded-xl transition flex shrink-0 items-center gap-1.5 whitespace-nowrap ${
                     activeModalTab === "provenance"
-                      ? "bg-indigo-600 text-white shadow-2xs font-bold"
-                      : "text-slate-600 hover:bg-slate-100"
+                      ? "bg-white text-slate-950 shadow-xs"
+                      : "text-slate-500 hover:text-slate-900"
                   }`}
                 >
                   <Cpu className="w-3.5 h-3.5" />
@@ -643,10 +652,10 @@ export const ExecutionsPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setActiveModalTab("timeline")}
-                  className={`px-3 py-1.5 rounded-xl transition flex shrink-0 items-center gap-1.5 whitespace-nowrap ${
+                  className={`px-3.5 py-2 rounded-xl transition flex shrink-0 items-center gap-1.5 whitespace-nowrap ${
                     activeModalTab === "timeline"
-                      ? "bg-indigo-600 text-white shadow-2xs font-bold"
-                      : "text-slate-600 hover:bg-slate-100"
+                      ? "bg-white text-slate-950 shadow-xs"
+                      : "text-slate-500 hover:text-slate-900"
                   }`}
                 >
                   <Clock className="w-3.5 h-3.5" />
@@ -655,10 +664,10 @@ export const ExecutionsPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setActiveModalTab("raw")}
-                  className={`px-3 py-1.5 rounded-xl transition flex shrink-0 items-center gap-1.5 whitespace-nowrap ${
+                  className={`px-3.5 py-2 rounded-xl transition flex shrink-0 items-center gap-1.5 whitespace-nowrap ${
                     activeModalTab === "raw"
-                      ? "bg-indigo-600 text-white shadow-2xs font-bold"
-                      : "text-slate-600 hover:bg-slate-100"
+                      ? "bg-white text-slate-950 shadow-xs"
+                      : "text-slate-500 hover:text-slate-900"
                   }`}
                 >
                   <Zap className="w-3.5 h-3.5" />
@@ -668,7 +677,7 @@ export const ExecutionsPage: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => setActiveModalTab("edit_record")}
-                    className={`px-3 py-1.5 rounded-xl transition flex shrink-0 items-center gap-1.5 whitespace-nowrap ${
+                    className={`px-3.5 py-2 rounded-xl transition flex shrink-0 items-center gap-1.5 whitespace-nowrap ${
                       activeModalTab === "edit_record"
                         ? "bg-amber-600 text-white shadow-2xs font-bold"
                         : "text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200"
@@ -1113,29 +1122,37 @@ export const ExecutionsPage: React.FC = () => {
                         <div className="space-y-3 bg-white p-4 border border-slate-200 rounded-xl shadow-2xs">
                           {fields.map(([key, val]) => (
                             <div key={key} className="space-y-1">
-                              <label className="text-[11px] font-bold text-slate-700 capitalize font-mono flex items-center justify-between">
+                              <label htmlFor={recordFieldId(key)} className="text-[11px] font-bold text-slate-700 capitalize font-mono flex items-center justify-between">
                                 <span>{key}</span>
                                 <span className="text-slate-400 font-sans font-normal text-[10px]">Editable Field</span>
                               </label>
                               {typeof val === "string" && val.length > 80 ? (
                                 <textarea
+                                  id={recordFieldId(key)}
                                   value={val}
-                                  onChange={(e) => setEditRecordPayload(prev => ({ ...prev, [key]: e.target.value }))}
+                                  onChange={(e) => setRecordField(key, e.target.value)}
                                   rows={4}
-                                  className="w-full text-xs font-mono p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition"
+                                  aria-invalid={!!recordErrors[key]}
+                                  aria-describedby={recordErrors[key] ? `${recordFieldId(key)}-error` : undefined}
+                                  className={`da-input text-xs font-mono${invalid(recordErrors[key])}`}
                                 />
                               ) : (
                                 <input
+                                  id={recordFieldId(key)}
                                   type="text"
-                                  value={val ?? ""}
-                                  onChange={(e) => setEditRecordPayload(prev => ({ ...prev, [key]: e.target.value }))}
-                                  className="w-full text-xs font-mono p-2 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition"
+                                  value={typeof val === "object" && val !== null ? JSON.stringify(val) : val ?? ""}
+                                  onChange={(e) => setRecordField(key, e.target.value)}
+                                  aria-invalid={!!recordErrors[key]}
+                                  aria-describedby={recordErrors[key] ? `${recordFieldId(key)}-error` : undefined}
+                                  className={`da-input py-2 text-xs font-mono${invalid(recordErrors[key])}`}
                                 />
                               )}
+                              <FieldError id={recordFieldId(key)} message={recordErrors[key]} />
                             </div>
                           ))}
                         </div>
 
+                        {recordNote && <p className="text-[12px] font-medium text-amber-700" role="status">{recordNote}</p>}
                         <div className="pt-2 flex items-center justify-between">
                           <span className="text-[11px] text-slate-500">
                             Connected DB: <strong className="text-slate-800 font-mono">{selectedExecution.automation?.connection?.database_name || "target_mysql"}</strong>
@@ -1207,9 +1224,9 @@ export const ExecutionsPage: React.FC = () => {
                 </span>
                 <button
                   onClick={() => setSelectedExecution(null)}
-                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl text-xs transition"
+                  className="da-btn da-btn-secondary"
                 >
-                  Close Inspector
+                  Close
                 </button>
               </div>
             </motion.div>

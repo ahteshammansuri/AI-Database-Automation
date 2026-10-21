@@ -22,6 +22,8 @@ interface SearchableSelectProps {
   triggerClassName?: string;
   showSearch?: boolean;
   id?: string;
+  /** Shows the error border; pair with <FieldError id={id} /> below the select. */
+  invalid?: boolean;
 }
 
 export const SearchableSelect: React.FC<SearchableSelectProps> = ({
@@ -36,6 +38,7 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
   triggerClassName = "",
   showSearch,
   id,
+  invalid = false,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -98,11 +101,15 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
         type="button"
         disabled={disabled}
         onClick={() => !disabled && setIsOpen(!isOpen)}
+        aria-invalid={invalid || undefined}
+        aria-describedby={invalid && id ? `${id}-error` : undefined}
         className={`w-full flex items-center justify-between gap-2 px-3 py-2 text-xs rounded-xl border transition-all text-left ${
           disabled
             ? "bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed"
             : isOpen
             ? "bg-white border-indigo-500 ring-2 ring-indigo-500/20 shadow-xs"
+            : invalid
+            ? "bg-rose-50/40 border-rose-400 hover:border-rose-500 text-slate-800"
             : "bg-slate-50/60 hover:bg-white border-slate-200 hover:border-slate-300 text-slate-800"
         } ${triggerClassName}`}
       >

@@ -43,11 +43,14 @@ export const Layout: React.FC = () => {
   }, []);
 
   return (
-    <div className="flex h-screen bg-slate-50 text-slate-800 overflow-hidden font-sans relative">
+    <div className="flex h-screen bg-canvas text-slate-800 overflow-hidden font-sans relative">
       <Sidebar pendingApprovalsCount={pendingCount} mobileOpen={mobileNavOpen} onClose={() => setMobileNavOpen(false)} />
-      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+      <div className="relative flex-1 flex flex-col min-w-0 overflow-hidden">
+        {/* Soft grid + glow behind the top of every page, as on the landing page */}
+        <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 h-80 portal-canvas-grid" />
+        <div aria-hidden className="pointer-events-none absolute -top-40 right-0 h-80 w-[36rem] rounded-full bg-indigo-400/10 blur-3xl" />
         <Navbar onRefresh={fetchGlobalStats} isRefreshing={isRefreshing} onOpenMenu={() => setMobileNavOpen(true)} menuOpen={mobileNavOpen} />
-        <main className="flex-1 overflow-y-auto overflow-x-hidden p-4 sm:p-6 lg:p-8 bg-slate-50/70">
+        <main className="relative flex-1 overflow-y-auto overflow-x-hidden px-4 py-6 sm:px-6 sm:py-8 lg:px-10 lg:py-10">
           <div className="max-w-7xl mx-auto">
             {/* Active task guard banner during write operations */}
             <ActiveTaskGuardBanner />

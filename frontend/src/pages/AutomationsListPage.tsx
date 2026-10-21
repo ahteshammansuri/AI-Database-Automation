@@ -1,9 +1,11 @@
 import React, { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
-import { Workflow, Plus, Play, Pause, Trash2, Database, Clock, CheckCircle, AlertCircle, Zap, RefreshCw, Cpu, Settings } from "lucide-react";
+import { CheckCircle, Clock, Cpu, Database, FileText, History, Mail, Pause, Play, Plus, RefreshCw, Settings, Trash2, Workflow, X } from "lucide-react";
 import { api } from "../services/api";
-import { StatusPill } from "../components/common/StatusPill";
+import { Card, EmptyState, FieldError, FormAlert, Loading, ModalShell, PageHeader } from "../components/ui/kit";
+import { ariaFor, clearError, focusFirstError, invalid, rules, serverFieldErrors, validate, type FieldErrors } from "../lib/validation";
+import { SpotlightCard } from "../components/landing/primitives";
 import { SearchableSelect } from "../components/common/SearchableSelect";
 import { useToast } from "../context/ToastContext";
 import { orbitTargets } from "../services/orbitTargets";
@@ -23,6 +25,8 @@ export const AutomationsListPage: React.FC = () => {
   const [editingModel, setEditingModel] = useState<string>("llama3.2:1b");
   const [editingPrompt, setEditingPrompt] = useState<string>("");
   const [isSavingModal, setIsSavingModal] = useState<boolean>(false);
+  const [modalErrors, setModalErrors] = useState<FieldErrors>({});
+  const [modalError, setModalError] = useState<string | null>(null);
   const { toast, confirm } = useToast();
 
   const loadData = async () => {
@@ -107,6 +111,52 @@ export const AutomationsListPage: React.FC = () => {
     };
   });
 
+  const MODEL_FIELD_ID: Record<string, string> = { ai_model: "auto-model", prompt_context: "auto-topic" };
+
+  function closeModelModal() {
+    setEditingAutomation(null);
+    setModalErrors({});
+    setModalError(null);
+  }
+
+  async function saveModelModal(e: React.FormEvent) {
+    e.preventDefault();
+    if (!editingAutomation) return;
+    setModalError(null);
+    const aiWrites = editingAutomation.operation_mode !== "MANUAL_SCHEDULE";
+    const found = validate({ ai_model: editingModel, prompt_context: editingPrompt }, {
+      ai_model: [rules.maxLength(120, "Model")],
+      prompt_context: [...(aiWrites ? [rules.required("Topic", "Describe what the content should be about.")] : []), rules.maxLength(4000, "Topic")],
+    });
+    setModalErrors(found);
+    if (Object.keys(found).length) {
+      focusFirstError(found, (f) => MODEL_FIELD_ID[f]);
+      return;
+    }
+    try {
+      setIsSavingModal(true);
+      await api.updateAutomation(editingAutomation.id, {
+        ai_provider: editingProvider,
+        ai_model: editingModel.trim(),
+        prompt_context: editingPrompt.trim(),
+      });
+      toast.success("AI Configuration Updated", `Automation #${editingAutomation.id} updated to ${editingProvider}${editingModel.trim() ? ` (${editingModel.trim()})` : ""}.`);
+      closeModelModal();
+      loadData();
+    } catch (err: any) {
+      const fields = serverFieldErrors(err);
+      const placed = Object.fromEntries(Object.entries(fields).filter(([f]) => MODEL_FIELD_ID[f]));
+      if (Object.keys(placed).length) {
+        setModalErrors(placed);
+        focusFirstError(placed, (f) => MODEL_FIELD_ID[f]);
+      } else {
+        setModalError(err.message || "Could not save the changes.");
+      }
+    } finally {
+      setIsSavingModal(false);
+    }
+  }
+
   const handleTrigger = async (id: number) => {
     try {
       setRunningId(id);
@@ -155,30 +205,47 @@ export const AutomationsListPage: React.FC = () => {
     }
   };
 
+  const stateOf = (a: any): string => a.schedule_summary?.state ?? ((a.is_active !== undefined ? a.is_active : a.status === "ACTIVE") ? "ACTIVE" : "PAUSED");
+  const summary = automations.reduce(
+    (acc: Record<string, number>, a: any) => {
+      const st = stateOf(a);
+      acc[st] = (acc[st] ?? 0) + 1;
+      return acc;
+    },
+    {} as Record<string, number>,
+  );
+
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2 mb-1">
-            <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-violet-50 text-violet-700 border border-violet-200">
-              Durable Orchestration
-            </span>
-            <span className="text-xs text-slate-500">• Recurring Publishing Pipelines</span>
-          </div>
-          <h2 className="text-xl font-bold text-slate-900 tracking-tight">Active Automations</h2>
-          <p className="text-xs text-slate-500 mt-0.5">
-            Scheduled pipelines generating and publishing structured data into target MySQL databases
-          </p>
+      <PageHeader
+        eyebrow="Automate"
+        title="Automations"
+        description="Recurring pipelines that write content with your model, get a person's OK, and publish into your tables on time."
+        actions={
+          <Link to="/automations/new" className="da-btn da-btn-primary">
+            <Plus className="h-4 w-4" /> New automation
+          </Link>
+        }
+      />
+
+      {automations.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {[
+            { key: "ACTIVE", label: "Active", cls: "da-chip-emerald" },
+            { key: "SCHEDULED", label: "Starting soon", cls: "da-chip-sky" },
+            { key: "PAUSED", label: "Paused", cls: "da-chip-amber" },
+            { key: "COMPLETED", label: "Finished", cls: "da-chip-slate" },
+            { key: "MANUAL", label: "Manual publishing", cls: "da-chip-violet" },
+          ]
+            .filter((x) => summary[x.key])
+            .map((x) => (
+              <span key={x.key} className={`da-chip ${x.cls} px-3 py-1 text-[12px]`}>
+                {x.label} <span className="font-bold">{summary[x.key]}</span>
+              </span>
+            ))}
+          <span className="da-chip da-chip-slate px-3 py-1 text-[12px]">Total <span className="font-bold">{automations.length}</span></span>
         </div>
-        <Link
-          to="/automations/new"
-          className="btn-primary-gradient flex items-center gap-2 px-4 py-2 text-white rounded-lg text-xs font-semibold transition shadow-xs self-start sm:self-auto"
-        >
-          <Plus className="w-4 h-4" />
-          <span>New Automation</span>
-        </Link>
-      </div>
+      )}
 
       <AnimatePresence>
         {actionMsg && (
@@ -186,291 +253,224 @@ export const AutomationsListPage: React.FC = () => {
             initial={{ opacity: 0, y: -6 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -6 }}
-            className={`p-3.5 rounded-xl border text-xs flex items-center justify-between shadow-2xs ${
-              actionMsg.type === "success"
-                ? "bg-emerald-50 border-emerald-200 text-emerald-800"
-                : "bg-rose-50 border-rose-200 text-rose-800"
+            className={`flex items-center justify-between rounded-2xl border px-4 py-3 text-[13px] ${
+              actionMsg.type === "success" ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-rose-200 bg-rose-50 text-rose-800"
             }`}
           >
             <span>{actionMsg.text}</span>
-            <button onClick={() => setActionMsg(null)} className="font-bold ml-4">✕</button>
+            <button type="button" onClick={() => setActionMsg(null)} className="da-icon-btn h-7 w-7" aria-label="Dismiss"><X className="h-3.5 w-3.5" /></button>
           </motion.div>
         )}
       </AnimatePresence>
 
       {loading && automations.length === 0 ? (
-        <div className="py-20 text-center bg-white border border-slate-200/90 rounded-2xl shadow-xs">
-          <div className="w-8 h-8 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-          <p className="text-slate-500 text-sm font-medium">Loading automations...</p>
-        </div>
+        <Card><Loading label="Loading automations…" /></Card>
       ) : automations.length === 0 ? (
-        <motion.div
-          initial={{ opacity: 0, scale: 0.98 }}
-          animate={{ opacity: 1, scale: 1 }}
-          className="text-center py-16 bg-white border border-dashed border-slate-300 rounded-2xl shadow-xs p-8"
-        >
-          <div className="w-12 h-12 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center mx-auto mb-3 shadow-2xs">
-            <Workflow className="w-6 h-6" />
-          </div>
-          <h3 className="text-base font-bold text-slate-900 mb-1">No automations configured</h3>
-          <p className="text-xs text-slate-500 max-w-sm mx-auto mb-5 leading-relaxed">
-            Build your first AI-assisted or manual publishing pipeline to automate recurring database insertions.
-          </p>
-          <Link
-            to="/automations/new"
-            className="btn-primary-gradient px-4 py-2.5 text-white rounded-lg text-xs font-semibold inline-flex items-center gap-2 shadow-xs transition"
-          >
-            <Plus className="w-4 h-4" />
-            <span>Create Automation</span>
-          </Link>
-        </motion.div>
+        <EmptyState
+          icon={Workflow}
+          title="No automations yet"
+          description="Build your first AI-written or manual publishing pipeline. DataAuto will write, ask for approval and publish on schedule."
+          action={<Link to="/automations/new" className="da-btn da-btn-primary"><Plus className="h-4 w-4" /> Create automation</Link>}
+        />
       ) : (
         <div className="space-y-4">
-          {automations.map((a) => {
+          {automations.map((a, idx) => {
             const isActive = a.is_active !== undefined ? a.is_active : (a.status === "ACTIVE");
             const sum = a.schedule_summary ?? null;
             const tz = sum?.timezone || a.timezone || "UTC";
-            const state: string = sum?.state ?? (isActive ? "ACTIVE" : "PAUSED");
+            const state: string = stateOf(a);
             const isManualContainer = state === "MANUAL";
-            const stateStyle: Record<string, string> = {
-              ACTIVE: "bg-emerald-50 text-emerald-700 border-emerald-200",
-              SCHEDULED: "bg-sky-50 text-sky-700 border-sky-200",
-              FINISHING: "bg-amber-50 text-amber-700 border-amber-200",
-              COMPLETED: "bg-slate-100 text-slate-600 border-slate-200",
-              PAUSED: "bg-amber-50 text-amber-800 border-amber-200",
-              MANUAL: "bg-slate-50 text-slate-600 border-slate-200",
+            const stateChip: Record<string, string> = {
+              ACTIVE: "da-chip-emerald", SCHEDULED: "da-chip-sky", FINISHING: "da-chip-amber", COMPLETED: "da-chip-slate", PAUSED: "da-chip-amber", MANUAL: "da-chip-violet",
             };
             const stateLabel: Record<string, string> = {
-              ACTIVE: "Active", SCHEDULED: "Starts soon", FINISHING: "Last run in progress", COMPLETED: "Already done", PAUSED: "Paused", MANUAL: "Manual publishing",
+              ACTIVE: "Active", SCHEDULED: "Starts soon", FINISHING: "Last run in progress", COMPLETED: "Finished", PAUSED: "Paused", MANUAL: "Manual publishing",
             };
             const freq = sum?.frequency === "ONE_TIME" ? "One time" : sum?.frequency === "WEEKLY" ? "Weekly" : sum?.frequency === "DAILY" ? "Daily" : null;
+            const progress = sum?.total_runs ? Math.round(((sum.finished_runs ?? 0) / sum.total_runs) * 100) : null;
 
             return (
               <motion.div
                 key={a.id}
+                initial={{ opacity: 0, y: 14 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.45, delay: Math.min(idx, 8) * 0.04, ease: [0.16, 1, 0.3, 1] }}
                 ref={(el: HTMLDivElement | null) =>
                   el ? orbitTargets.register(`automations.row.${a.id}`, el) : orbitTargets.unregister(`automations.row.${a.id}`)
                 }
-                className="group flex flex-col gap-4 rounded-xl border border-slate-200/90 bg-white p-4 shadow-xs transition hover:border-indigo-300 hover:shadow-md hover:shadow-indigo-500/5 sm:p-5 lg:flex-row lg:items-center lg:justify-between"
               >
-                <div className="min-w-0 space-y-2">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <h4 className="text-sm font-bold text-slate-900 transition-colors group-hover:text-indigo-600 sm:text-base">{a.name}</h4>
-                    <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-bold ${stateStyle[state] ?? stateStyle.ACTIVE}`}>
-                      {state === "COMPLETED" && <CheckCircle className="h-3 w-3" />}
-                      {stateLabel[state] ?? state}
-                    </span>
-                    {freq && <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600">{freq}</span>}
-                    {a.ai_provider && a.ai_provider !== "none" && (
-                      <span className="inline-flex items-center gap-1 rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">
-                        <Cpu className="h-3 w-3" /> {a.ai_provider}{a.ai_model ? ` · ${a.ai_model}` : ""}
+                <SpotlightCard className="shadow-soft">
+                  <div className="flex flex-col gap-5 p-5 sm:p-6 lg:flex-row lg:items-center lg:justify-between">
+                    <div className="flex min-w-0 gap-4">
+                      <span className={`grid h-12 w-12 shrink-0 place-items-center rounded-2xl text-white shadow-[0_10px_24px_-10px_rgba(99,102,241,0.8)] ${
+                        isManualContainer ? "bg-gradient-to-br from-violet-500 to-fuchsia-500" : state === "PAUSED" ? "bg-gradient-to-br from-amber-400 to-orange-500" : "bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-400"
+                      }`}>
+                        {isManualContainer ? <FileText className="h-5 w-5" /> : <Workflow className="h-5 w-5" />}
                       </span>
-                    )}
+                      <div className="min-w-0 space-y-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h4 className="text-[16px] font-bold tracking-[-0.01em] text-slate-950">{a.name}</h4>
+                          <span className={`da-chip ${stateChip[state] ?? "da-chip-emerald"}`}>
+                            {state === "COMPLETED" && <CheckCircle className="h-3 w-3" />}
+                            {stateLabel[state] ?? state}
+                          </span>
+                          {freq && <span className="da-chip da-chip-slate">{freq}</span>}
+                          {a.ai_provider && a.ai_provider !== "none" && (
+                            <span className="da-chip da-chip-indigo"><Cpu className="h-3 w-3" /> {a.ai_provider}{a.ai_model ? ` · ${a.ai_model}` : ""}</span>
+                          )}
+                        </div>
+                        {sum?.description && <p className="max-w-3xl text-[13.5px] leading-relaxed text-slate-600">{sum.description}</p>}
+                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[12.5px] text-slate-500">
+                          <span className="flex items-center gap-1.5">
+                            <Database className="h-3.5 w-3.5 text-indigo-500" />
+                            <code className="font-semibold text-indigo-700">{a.target_table}</code>
+                            {a.connection?.name && <span className="text-slate-400">in {a.connection.name}</span>}
+                          </span>
+                          {!isManualContainer && sum?.next_run && state !== "PAUSED" && (
+                            <span className="flex items-center gap-1.5">
+                              <Clock className="h-3.5 w-3.5 text-slate-400" />
+                              Next <strong className="font-semibold text-slate-800">{formatInstant(sum.next_run.generation_at, tz, { withYear: false })}</strong>
+                              <span className="text-slate-400">({relativeFromNow(sum.next_run.generation_at)})</span>
+                            </span>
+                          )}
+                          {state === "COMPLETED" && sum?.completed_at && (
+                            <span className="flex items-center gap-1.5 text-slate-600">
+                              <CheckCircle className="h-3.5 w-3.5 text-emerald-600" /> Finished {formatInstant(sum.completed_at, tz, { withYear: false })}
+                            </span>
+                          )}
+                          {a.requires_approval && <span className="flex items-center gap-1.5"><Mail className="h-3.5 w-3.5 text-slate-400" /> Reviewed by {a.reviewer_email || "email"}</span>}
+                        </div>
+                        {progress !== null ? (
+                          <div className="flex max-w-sm items-center gap-3 pt-0.5">
+                            <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-100">
+                              <span className="block h-full rounded-full bg-gradient-to-r from-indigo-500 via-violet-500 to-cyan-400" style={{ width: `${progress}%` }} />
+                            </span>
+                            <span className="shrink-0 text-[12px] text-slate-500">{sum.finished_runs ?? 0} of {sum.total_runs} runs</span>
+                          </div>
+                        ) : !isManualContainer && sum ? (
+                          <div className="text-[12px] text-slate-500">{sum.finished_runs ?? 0} run{(sum.finished_runs ?? 0) === 1 ? "" : "s"} so far</div>
+                        ) : null}
+                      </div>
+                    </div>
+
+                    <div className="flex shrink-0 items-center gap-1.5 self-stretch sm:self-end lg:self-center">
+                      {!isManualContainer && state !== "COMPLETED" && (
+                        <button
+                          type="button"
+                          disabled={runningId === a.id}
+                          onClick={() => handleTrigger(a.id)}
+                          className="da-btn da-btn-primary flex-1 sm:flex-none"
+                          title="Write one run now (it publishes after the usual review window)"
+                        >
+                          {runningId === a.id ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+                          {runningId === a.id ? "Starting…" : "Run now"}
+                        </button>
+                      )}
+                      <Link to={`/executions?automation=${a.id}`} className="da-btn da-btn-secondary" title="Run history">
+                        <History className="h-3.5 w-3.5 text-slate-500" /> History
+                      </Link>
+                      {!isManualContainer && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingAutomation(a);
+                            setEditingProvider(a.ai_provider && a.ai_provider !== "none" ? a.ai_provider : "ollama");
+                            setEditingModel(a.ai_model && a.ai_model !== "default" ? a.ai_model : "");
+                            setEditingPrompt(a.prompt_context || "");
+                          }}
+                          className="da-icon-btn border border-slate-200 bg-white"
+                          title="Change model and topic"
+                          aria-label="Change model and topic"
+                        >
+                          <Settings className="h-4 w-4" />
+                        </button>
+                      )}
+                      {!isManualContainer && state !== "COMPLETED" && (
+                        <button
+                          type="button"
+                          onClick={() => handleToggleStatus(a)}
+                          className="da-icon-btn border border-slate-200 bg-white"
+                          title={isActive ? "Pause" : "Resume"}
+                          aria-label={isActive ? "Pause" : "Resume"}
+                        >
+                          {isActive ? <Pause className="h-4 w-4 text-amber-600" /> : <Play className="h-4 w-4 text-emerald-600" />}
+                        </button>
+                      )}
+                      <button type="button" onClick={() => handleDelete(a.id)} className="da-icon-btn hover:bg-rose-50 hover:text-rose-600" title="Delete" aria-label="Delete">
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
                   </div>
-
-                  {sum?.description && <p className="max-w-3xl text-xs leading-relaxed text-slate-600">{sum.description}</p>}
-
-                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
-                    <span className="flex items-center gap-1.5 text-slate-700">
-                      <Database className="h-3.5 w-3.5 text-indigo-600" />
-                      <code className="font-semibold text-indigo-700">{a.target_table}</code>
-                      {a.connection?.name && <span className="text-slate-400">in {a.connection.name}</span>}
-                    </span>
-                    {!isManualContainer && sum?.next_run && state !== "PAUSED" && (
-                      <span className="flex items-center gap-1.5">
-                        <Clock className="h-3.5 w-3.5 text-slate-400" />
-                        Next: <strong className="text-slate-800">{formatInstant(sum.next_run.generation_at, tz, { withYear: false })}</strong>
-                        <span className="text-slate-400">({relativeFromNow(sum.next_run.generation_at)})</span>
-                      </span>
-                    )}
-                    {state === "COMPLETED" && sum?.completed_at && (
-                      <span className="flex items-center gap-1.5 text-slate-600">
-                        <CheckCircle className="h-3.5 w-3.5 text-emerald-600" /> Finished {formatInstant(sum.completed_at, tz, { withYear: false })}
-                      </span>
-                    )}
-                    {sum?.total_runs ? (
-                      <span>{sum.finished_runs ?? 0} of {sum.total_runs} run{sum.total_runs === 1 ? "" : "s"} done</span>
-                    ) : !isManualContainer && sum ? (
-                      <span>{sum.finished_runs ?? 0} run{(sum.finished_runs ?? 0) === 1 ? "" : "s"} so far</span>
-                    ) : null}
-                    {a.requires_approval && <span>Review by {a.reviewer_email || "email"}</span>}
-                  </div>
-                </div>
-
-                <div className="flex shrink-0 items-center gap-2 self-stretch sm:self-end lg:self-center">
-                  {!isManualContainer && state !== "COMPLETED" && (
-                    <button
-                      disabled={runningId === a.id}
-                      onClick={() => handleTrigger(a.id)}
-                      className="btn-primary-gradient flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3.5 py-2 text-xs font-semibold text-white shadow-xs transition sm:flex-none"
-                      title="Generate one run now (publishes after the usual gap)"
-                    >
-                      {runningId === a.id ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
-                      <span>{runningId === a.id ? "Starting…" : "Run now"}</span>
-                    </button>
-                  )}
-                  <Link to={`/executions?automation=${a.id}`} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 shadow-2xs transition hover:bg-slate-50" title="Run history">
-                    History
-                  </Link>
-                  {!isManualContainer && (
-                    <button
-                      onClick={() => {
-                        setEditingAutomation(a);
-                        setEditingProvider(a.ai_provider && a.ai_provider !== "none" ? a.ai_provider : "ollama");
-                        setEditingModel(a.ai_model && a.ai_model !== "default" ? a.ai_model : "");
-                        setEditingPrompt(a.prompt_context || "");
-                      }}
-                      className="rounded-lg border border-indigo-200 bg-indigo-50 p-2 text-indigo-700 shadow-2xs transition hover:bg-indigo-100"
-                      title="Change model and topic"
-                      aria-label="Change model and topic"
-                    >
-                      <Settings className="h-4 w-4" />
-                    </button>
-                  )}
-                  {!isManualContainer && state !== "COMPLETED" && (
-                    <button
-                      onClick={() => handleToggleStatus(a)}
-                      className="rounded-lg border border-slate-200 bg-slate-50 p-2 text-slate-700 shadow-2xs transition hover:bg-slate-100"
-                      title={isActive ? "Pause" : "Resume"}
-                      aria-label={isActive ? "Pause" : "Resume"}
-                    >
-                      {isActive ? <Pause className="h-4 w-4 text-amber-600" /> : <Play className="h-4 w-4 text-emerald-600" />}
-                    </button>
-                  )}
-                  <button onClick={() => handleDelete(a.id)} className="rounded-lg p-2 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600" title="Delete" aria-label="Delete">
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </div>
+                </SpotlightCard>
               </motion.div>
             );
           })}
         </div>
       )}
 
-      {/* Quick AI Provider & Prompt Reconfigure Modal */}
-      <AnimatePresence>
-        {editingAutomation && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-xs">
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-xl border border-slate-200 space-y-4"
+      <ModalShell
+        open={!!editingAutomation}
+        onClose={closeModelModal}
+        icon={Cpu}
+        title="Model and topic"
+        description={editingAutomation?.name}
+        footer={
+          <>
+            <button type="button" onClick={closeModelModal} className="da-btn da-btn-ghost">Cancel</button>
+            <button
+              type="submit"
+              form="automation-model-form"
+              disabled={isSavingModal}
+              className="da-btn da-btn-primary"
             >
-              <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-                <div className="flex items-center gap-2">
-                  <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center">
-                    <Cpu className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-bold text-slate-900">Configure AI Model & Prompt</h3>
-                    <p className="text-[11px] text-slate-500">{editingAutomation.name}</p>
-                  </div>
-                </div>
-                <button
-                  onClick={() => setEditingAutomation(null)}
-                  className="text-slate-400 hover:text-slate-600 p-1 rounded"
-                >
-                  ✕
-                </button>
-              </div>
-
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    AI Inference Provider
-                  </label>
-                  <SearchableSelect
-                    value={editingProvider}
-                    onChange={(val) => {
-                      const p = String(val);
-                      setEditingProvider(p);
-                      setEditingModel(
-                        p === "ollama" ? "llama3.2:1b"
-                        : p === "gemini" ? "gemini-1.5-flash"
-                        : p === "openai" ? "gpt-4o-mini"
-                        : p === "anthropic" ? "claude-3-5-sonnet"
-                        : "mock-llama3-synthetic"
-                      );
-                    }}
-                    placeholder="Select AI inference provider..."
-                    options={[
-                      { value: "ollama", label: "Ollama (Local LLM) - Zero Cost", badge: "Local" },
-                      { value: "gemini", label: "Google Gemini (Cloud Fast)", badge: "Cloud" },
-                      { value: "anthropic", label: "Anthropic Claude (Cloud Smart)", badge: "Cloud" },
-                      { value: "openai", label: "OpenAI (GPT-4o)", badge: "Cloud" },
-                      { value: "mock", label: "Local Mock (Offline Synthetic)", badge: "Synthetic" },
-                    ]}
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Model Tag / Identifier
-                  </label>
-                  <input
-                    type="text"
-                    value={editingModel}
-                    onChange={(e) => setEditingModel(e.target.value)}
-                    placeholder="e.g. llama3.2:1b, llama3:latest, gemini-1.5-flash"
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-900 font-mono focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600"
-                  />
-                  <p className="text-[10px] text-slate-400 mt-1">
-                    Installed Ollama models: <code>llama3.2:1b</code> (Fast CPU), <code>llama3:latest</code>
-                  </p>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Prompt Context & Themes
-                  </label>
-                  <textarea
-                    rows={3}
-                    value={editingPrompt}
-                    onChange={(e) => setEditingPrompt(e.target.value)}
-                    placeholder="e.g. Meat • Food • Healthy Food • Diet Food"
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-900 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600"
-                  />
-                </div>
-              </div>
-
-              <div className="pt-3 border-t border-slate-100 flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setEditingAutomation(null)}
-                  className="px-3.5 py-1.5 rounded-xl border border-slate-200 text-xs font-semibold text-slate-600 hover:bg-slate-50 transition"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  disabled={isSavingModal}
-                  onClick={async () => {
-                    try {
-                      setIsSavingModal(true);
-                      await api.updateAutomation(editingAutomation.id, {
-                        ai_provider: editingProvider,
-                        ai_model: editingModel,
-                        prompt_context: editingPrompt,
-                      });
-                      toast.success("AI Configuration Updated", `Automation #${editingAutomation.id} updated to ${editingProvider} (${editingModel}).`);
-                      setEditingAutomation(null);
-                      loadData();
-                    } catch (err: any) {
-                      toast.error("Update Failed", err.message);
-                    } finally {
-                      setIsSavingModal(false);
-                    }
-                  }}
-                  className="btn-primary-gradient px-4 py-1.5 text-white rounded-xl text-xs font-bold transition shadow-xs"
-                >
-                  {isSavingModal ? "Saving..." : "Save AI Settings"}
-                </button>
-              </div>
-            </motion.div>
+              {isSavingModal ? "Saving…" : "Save changes"}
+            </button>
+          </>
+        }
+      >
+        <form id="automation-model-form" onSubmit={saveModelModal} noValidate className="space-y-4">
+          <FormAlert message={modalError} onClose={() => setModalError(null)} />
+          <div>
+            <span className="da-label">Provider</span>
+            <SearchableSelect
+              value={editingProvider}
+              onChange={(val) => {
+                const p = String(val);
+                setEditingProvider(p);
+                setModalErrors((x) => clearError(x, "ai_model"));
+                setEditingModel(
+                  p === "ollama" ? "llama3.2:1b"
+                  : p === "gemini" ? "gemini-1.5-flash"
+                  : p === "openai" ? "gpt-4o-mini"
+                  : p === "anthropic" ? "claude-3-5-sonnet"
+                  : "mock-llama3-synthetic"
+                );
+              }}
+              placeholder="Select AI inference provider..."
+              options={[
+                { value: "ollama", label: "Ollama (Local LLM) - Zero Cost", badge: "Local" },
+                { value: "gemini", label: "Google Gemini (Cloud Fast)", badge: "Cloud" },
+                { value: "anthropic", label: "Anthropic Claude (Cloud Smart)", badge: "Cloud" },
+                { value: "openai", label: "OpenAI (GPT-4o)", badge: "Cloud" },
+                { value: "mock", label: "Local Mock (Offline Synthetic)", badge: "Synthetic" },
+              ]}
+            />
           </div>
-        )}
-      </AnimatePresence>
+          <div>
+            <label className="da-label" htmlFor="auto-model">Model</label>
+            <input id="auto-model" type="text" value={editingModel} onChange={(e) => { setEditingModel(e.target.value); setModalErrors((x) => clearError(x, "ai_model")); }}
+              placeholder="e.g. llama3.2:1b, qwen2.5:3b, gemini-1.5-flash" className={`da-input font-mono${invalid(modalErrors.ai_model)}`} {...ariaFor("auto-model", modalErrors.ai_model)} />
+            <FieldError id="auto-model" message={modalErrors.ai_model} />
+            {!modalErrors.ai_model && <p className="da-help">For Ollama, use a model you have pulled on this machine. Leave empty for the provider's default.</p>}
+          </div>
+          <div>
+            <label className="da-label" htmlFor="auto-topic">Topic and themes</label>
+            <textarea id="auto-topic" rows={3} value={editingPrompt} onChange={(e) => { setEditingPrompt(e.target.value); setModalErrors((x) => clearError(x, "prompt_context")); }}
+              placeholder="e.g. Healthy eating · simple recipes · meal prep" className={`da-input${invalid(modalErrors.prompt_context)}`} {...ariaFor("auto-topic", modalErrors.prompt_context)} />
+            <FieldError id="auto-topic" message={modalErrors.prompt_context} />
+          </div>
+        </form>
+      </ModalShell>
     </div>
   );
 };

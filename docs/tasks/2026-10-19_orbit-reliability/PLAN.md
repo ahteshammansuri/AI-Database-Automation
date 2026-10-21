@@ -31,6 +31,11 @@ DONE only after it is verified, and say how.
 | F8 | Replies must contain every verified fact (retry once, else factual sentence); no question echo | DONE | Laravel tests; real browser runs |
 | F9 | Focused path opens catalog pages (page_hint) | DONE | Laravel + Python tests; real browser 20–28 s |
 | F10–F13 | Gate checks: duplicating joins, filter transparency, question-grounded filters, rankings without sorting / over raw child rows (model critic tried and removed: measured worse) | DONE | live evaluation 16/16 with reference SQL |
+| F14 | No raw validation errors for the user: open_form for any surface; model slips hidden from the timeline (kept in audit); "adjusted" for not-on-screen / rejected values; dropdown label matching; partial fills reported | DONE | Laravel test; frontend tsc |
+| F15 | Movement-synced actions (arrival events), navigation tap -> page render -> arrive on page, captions held until read/spoken, softer flight, placement beside heading text and inside the content area | DONE | real-browser sync measurement (shots/sync4) |
+| F16 | Unhurried explanations and tours (policy, 1400-char speech) | DONE | real model: explanation answered in 146 s |
+| F17 | Waits instead of failing on a busy machine: decision 480 s, model call 450 s, SQL writer 420 s | DONE | real run of "can you create one automation for me" (task 218: SUCCEEDED, no failed steps) |
+| F18 | A new message during a running turn is merged into it on every cache driver (lock probe instead of Cache::has, which missed array/database locks; .env.example ships database) | DONE | supersede test + new dead-worker re-queue test |
 
 ## Rules that must still hold
 - Reads only through the gate; writes never model-written; no DDL; blocked tables stay blocked.

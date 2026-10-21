@@ -1,9 +1,19 @@
 import React, { useState, useEffect } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { motion, AnimatePresence } from "framer-motion";
-import { Database, Lock, Mail, User as UserIcon, ArrowRight, AlertCircle, ShieldCheck, CheckCircle2 } from "lucide-react";
+import { ArrowRight, CheckCircle2, Lock, Mail, User as UserIcon } from "lucide-react";
+import { AuthShell } from "../components/ui/AuthShell";
+import { FieldError, FormAlert } from "../components/ui/kit";
 import { useAuth } from "../context/AuthContext";
 import { api } from "../services/api";
+import { ariaFor, clearError, focusFirstError, invalid, rules, serverFieldErrors, validate, type FieldErrors } from "../lib/validation";
+
+const SCHEMA = {
+  name: [rules.required("Name"), rules.maxLength(255, "Name")],
+  email: [rules.required("Email"), rules.email(), rules.maxLength(255, "Email")],
+  password: [rules.required("Password"), rules.minLength(8, "Password"), rules.maxLength(255, "Password")],
+  password_confirmation: [rules.required("Confirm password", "Repeat your password to confirm it."), rules.sameAs("password", "The passwords do not match.")],
+};
+const FIELD_ID: Record<string, string> = { name: "reg-name", email: "reg-email", password: "reg-password", password_confirmation: "reg-confirm" };
 
 export const RegisterPage: React.FC = () => {
   const [name, setName] = useState("");
@@ -11,6 +21,7 @@ export const RegisterPage: React.FC = () => {
   const [password, setPassword] = useState("");
   const [passwordConfirmation, setPasswordConfirmation] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [errors, setErrors] = useState<FieldErrors>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const { login, isAuthenticated } = useAuth();
@@ -25,14 +36,10 @@ export const RegisterPage: React.FC = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-
-    if (password !== passwordConfirmation) {
-      setError("Passwords do not match.");
-      return;
-    }
-
-    if (password.length < 8) {
-      setError("Password must be at least 8 characters.");
+    const found = validate({ name, email, password, password_confirmation: passwordConfirmation }, SCHEMA);
+    setErrors(found);
+    if (Object.keys(found).length) {
+      focusFirstError(found, (f) => FIELD_ID[f]);
       return;
     }
 
@@ -40,8 +47,8 @@ export const RegisterPage: React.FC = () => {
 
     try {
       const res = await api.register({
-        name,
-        email,
+        name: name.trim(),
+        email: email.trim(),
         password,
         password_confirmation: passwordConfirmation,
       });
@@ -53,183 +60,83 @@ export const RegisterPage: React.FC = () => {
         setError("Invalid response received from server.");
       }
     } catch (err: any) {
-      setError(err?.message || "Registration failed. Please check your details.");
+      const fields = serverFieldErrors(err);
+      if (Object.keys(fields).length) {
+        setErrors(fields);
+        focusFirstError(fields, (f) => FIELD_ID[f] ?? f);
+      } else {
+        setError(err?.message || "Could not create your workspace. Please try again.");
+      }
     } finally {
       setIsSubmitting(false);
     }
   };
 
+  const strength = password.length === 0 ? 0 : password.length < 8 ? 1 : /[A-Z]/.test(password) && /\d/.test(password) && password.length >= 12 ? 3 : 2;
+
   return (
-    <div className="min-h-screen mesh-gradient-hero flex flex-col justify-center py-12 sm:px-6 lg:px-8 text-slate-800 relative overflow-hidden">
-      {/* Decorative blurred background orbs */}
-      <div className="absolute top-1/4 right-1/3 w-96 h-96 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none" />
-      <div className="absolute bottom-1/4 left-1/4 w-80 h-80 bg-purple-500/10 rounded-full blur-3xl pointer-events-none" />
-
-      <motion.div
-        initial={{ opacity: 0, y: -15 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4 }}
-        className="sm:mx-auto sm:w-full sm:max-w-md text-center relative z-10"
-      >
-        <Link to="/" className="inline-flex items-center space-x-3 mb-6 group">
-          <motion.div
-            whileHover={{ scale: 1.05, rotate: 3 }}
-            whileTap={{ scale: 0.95 }}
-            className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-indigo-600 to-indigo-500 flex items-center justify-center shadow-md shadow-indigo-500/20 text-white"
-          >
-            <Database className="w-6 h-6" />
-          </motion.div>
-          <span className="text-2xl font-extrabold tracking-tight text-slate-900 group-hover:text-indigo-600 transition">
-            DataAuto
-          </span>
-        </Link>
-        <h2 className="text-2xl font-extrabold text-slate-900 tracking-tight">Create your self-service account</h2>
-        <p className="mt-2 text-xs text-slate-500">
-          Already registered?{" "}
-          <Link to="/login" className="font-bold text-indigo-600 hover:text-indigo-700 transition">
-            Sign in to your account →
-          </Link>
-        </p>
-      </motion.div>
-
-      <motion.div
-        initial={{ opacity: 0, y: 15 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4, delay: 0.1 }}
-        className="mt-8 sm:mx-auto sm:w-full sm:max-w-md px-4 sm:px-0 relative z-10"
-      >
-        <div className="bg-white/90 backdrop-blur-md border border-slate-200/80 py-8 px-6 shadow-xl shadow-slate-200/50 rounded-3xl sm:px-10">
-          <AnimatePresence mode="wait">
-            {error && (
-              <motion.div
-                initial={{ opacity: 0, y: -8, scale: 0.98 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: -8, scale: 0.98 }}
-                className="mb-6 p-3.5 rounded-xl bg-rose-50 border border-rose-200 flex items-start space-x-3 text-xs text-rose-800 shadow-2xs"
-              >
-                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600" />
-                <span>{error}</span>
-              </motion.div>
-            )}
-          </AnimatePresence>
-
-          <form className="space-y-4" onSubmit={handleSubmit}>
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                Full Name
-              </label>
-              <div className="relative">
-                <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
-                  <UserIcon className="w-4 h-4" />
-                </div>
-                <input
-                  type="text"
-                  required
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="Alex Rivers"
-                  className="block w-full pl-10 pr-3.5 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 focus:bg-white text-xs transition"
-                />
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                Work Email
-              </label>
-              <div className="relative">
-                <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
-                  <Mail className="w-4 h-4" />
-                </div>
-                <input
-                  type="email"
-                  required
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="alex@company.com"
-                  className="block w-full pl-10 pr-3.5 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 focus:bg-white text-xs transition"
-                />
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                Password
-              </label>
-              <div className="relative">
-                <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
-                  <Lock className="w-4 h-4" />
-                </div>
-                <input
-                  type="password"
-                  required
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="At least 8 characters"
-                  className="block w-full pl-10 pr-3.5 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 focus:bg-white text-xs transition"
-                />
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                Confirm Password
-              </label>
-              <div className="relative">
-                <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
-                  <Lock className="w-4 h-4" />
-                </div>
-                <input
-                  type="password"
-                  required
-                  value={passwordConfirmation}
-                  onChange={(e) => setPasswordConfirmation(e.target.value)}
-                  placeholder="Repeat your password"
-                  className="block w-full pl-10 pr-3.5 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 focus:bg-white text-xs transition"
-                />
-              </div>
-            </div>
-
-            <motion.button
-              whileHover={{ scale: 1.01 }}
-              whileTap={{ scale: 0.98 }}
-              type="submit"
-              disabled={isSubmitting}
-              className="w-full mt-2 py-2.5 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold text-xs shadow-md shadow-indigo-600/20 transition flex items-center justify-center space-x-2"
-            >
-              {isSubmitting ? (
-                <>
-                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                  <span>Creating Workspace...</span>
-                </>
-              ) : (
-                <>
-                  <span>Create Workspace</span>
-                  <ArrowRight className="w-4 h-4" />
-                </>
-              )}
-            </motion.button>
-          </form>
-
-          {/* Quick trust badges */}
-          <div className="mt-6 pt-5 border-t border-slate-100 grid grid-cols-2 gap-2 text-[10px] text-slate-500">
-            <div className="flex items-center gap-1.5">
-              <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-              <span>Isolated Workspace</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <CheckCircle2 className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
-              <span>Encrypted Credentials</span>
-            </div>
+    <AuthShell
+      title="Create your workspace"
+      subtitle="Free and private to you. Connect a database in the next step."
+      footer={<>Already have an account? <Link to="/login" className="font-semibold text-indigo-600 hover:text-indigo-700">Sign in</Link></>}
+    >
+      <form onSubmit={handleSubmit} noValidate className="space-y-4">
+        <FormAlert message={error} onClose={() => setError(null)} />
+        <div>
+          <label className="da-label" htmlFor="reg-name">Name</label>
+          <div className="relative">
+            <UserIcon className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <input id="reg-name" type="text" autoComplete="name" value={name}
+              onChange={(e) => { setName(e.target.value); setErrors((x) => clearError(x, "name")); }}
+              placeholder="Your name" className={`da-input py-3 pl-10${invalid(errors.name)}`} {...ariaFor("reg-name", errors.name)} />
           </div>
-
-          <div className="mt-4 text-center">
-            <Link to="/" className="text-xs text-slate-400 hover:text-slate-600 font-medium transition">
-              ← Back to homepage
-            </Link>
+          <FieldError id="reg-name" message={errors.name} />
+        </div>
+        <div>
+          <label className="da-label" htmlFor="reg-email">Email</label>
+          <div className="relative">
+            <Mail className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <input id="reg-email" type="email" autoComplete="email" value={email}
+              onChange={(e) => { setEmail(e.target.value); setErrors((x) => clearError(x, "email")); }}
+              placeholder="you@company.com" className={`da-input py-3 pl-10${invalid(errors.email)}`} {...ariaFor("reg-email", errors.email)} />
+          </div>
+          <FieldError id="reg-email" message={errors.email} />
+        </div>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div>
+            <label className="da-label" htmlFor="reg-password">Password</label>
+            <div className="relative">
+              <Lock className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <input id="reg-password" type="password" autoComplete="new-password" value={password}
+                onChange={(e) => { setPassword(e.target.value); setErrors((x) => clearError(clearError(x, "password"), "password_confirmation")); }}
+                placeholder="8+ characters" className={`da-input py-3 pl-10${invalid(errors.password)}`} {...ariaFor("reg-password", errors.password)} />
+            </div>
+            <FieldError id="reg-password" message={errors.password} />
+          </div>
+          <div>
+            <label className="da-label" htmlFor="reg-confirm">Confirm</label>
+            <div className="relative">
+              <Lock className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <input id="reg-confirm" type="password" autoComplete="new-password" value={passwordConfirmation}
+                onChange={(e) => { setPasswordConfirmation(e.target.value); setErrors((x) => clearError(x, "password_confirmation")); }}
+                placeholder="Repeat it" className={`da-input py-3 pl-10${invalid(errors.password_confirmation)}`} {...ariaFor("reg-confirm", errors.password_confirmation)} />
+            </div>
+            <FieldError id="reg-confirm" message={errors.password_confirmation} />
           </div>
         </div>
-      </motion.div>
-    </div>
+        <div className="flex items-center gap-2" aria-hidden>
+          {[1, 2, 3].map((i) => (
+            <span key={i} className={`h-1 flex-1 rounded-full transition-colors ${strength >= i ? (strength === 1 ? "bg-rose-400" : strength === 2 ? "bg-amber-400" : "bg-emerald-500") : "bg-slate-200"}`} />
+          ))}
+          <span className="w-16 text-right text-[11.5px] text-slate-500">{["", "Too short", "Good", "Strong"][strength]}</span>
+        </div>
+        <button type="submit" disabled={isSubmitting} className="da-btn da-btn-primary w-full py-3 text-[14px]">
+          {isSubmitting ? "Creating workspace…" : <>Create workspace <ArrowRight className="h-4 w-4" /></>}
+        </button>
+        <p className="flex items-center justify-center gap-1.5 pt-1 text-[12.5px] text-slate-500">
+          <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" /> No credit card, no paid API needed.
+        </p>
+      </form>
+    </AuthShell>
   );
 };

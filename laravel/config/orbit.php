@@ -14,7 +14,8 @@ return [
     // < worker --timeout (run_all.sh: 1600) < retry_after of the "agent" queue connection (1620).
     'max_iterations' => (int) env('ORBIT_MAX_ITERATIONS', 24),
     'max_turn_seconds' => (int) env('ORBIT_MAX_TURN_SECONDS', 1500),
-    'decide_timeout_seconds' => (int) env('ORBIT_DECIDE_TIMEOUT', 300),
+    // One model decision may take minutes on a busy CPU-only machine: wait rather than fail (turn budget is 1500 s).
+    'decide_timeout_seconds' => (int) env('ORBIT_DECIDE_TIMEOUT', 480),
     'max_repairs' => (int) env('ORBIT_MAX_REPAIRS', 1),
 
     // Visible UI choreography: how long to wait for the browser to acknowledge an action,

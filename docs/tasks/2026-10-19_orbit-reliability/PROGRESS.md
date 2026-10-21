@@ -115,3 +115,38 @@ Newest entries at the bottom.
   Laravel full suite reviewed: all remaining failures environmental (demo MySQL on 3308 down, PHP pgsql
   driver missing). Temporary AI service stopped; probe users (71, 72) deleted. The owner's stack is stopped:
   start it with ./run_all.sh to use the changes.
+
+## 2026-10-19 (round 3) — "Invalid arguments: argument 'surface' must be one of: connections.form"
+- Cause (task 211): open_form(builder.setup) — the builder steps are not pop-up forms, so the gate refused
+  it and the raw validation text (meant for the model) was shown to the user in red. Task 212 showed the
+  same pattern (field 'operation_mode', "Some fields were not accepted") although the run then completed.
+- F14: open_form accepts every catalogued surface (a step-page surface is brought on screen by visiting its
+  page). The model's own malformed calls (INVALID_ARGS, UNKNOWN_TOOL) are kept in the audit records and
+  still explained to the model, but not shown in "What Orbit actually did"; "not on screen" and rejected
+  values are shown neutrally as "adjusted". fill_fields matches dropdown labels to real options and reports
+  partial fills ("Filled name, table. Not accepted: operation (…)").
+- F15: movement-synced actions. Every action waits for Orbit's real arrival (flight animation finished,
+  "arrived" stage event; 2.2 s cap), settles, gestures, then acts. Navigation: fly to the sidebar link, tap,
+  navigate, wait for the page's sections to render, then fly to the page's main area (or its title).
+  show_me waits until the caption could be read (2.5–9 s by length) and narration has finished. Softer
+  flight spring; the flying pose lasts until arrival. Orbit stands beside a heading's text and stays inside
+  the content area (never over the navigation).
+- F16: unhurried explanations: speech limit 1400 chars; policy asks for a complete 4–8 sentence
+  explanation from retrieved knowledge (what it is, the main flow, safety, how Orbit helps) and, for tours,
+  2–3 sentences per page with a caption, then a summary.
+- Verified (real browser, real live channel, no model): at every page change Orbit was exactly at the
+  sidebar link and had been still for 300 ms; afterwards it flew to the page (Connections, Security, Audit
+  Logs); captions stayed 7.6–8.4 s; screenshots in the session scratchpad (shots/sync4). Tests: Laravel +1
+  (slips not shown, builder step opens), frontend 52/52 (stage arrival test), tsc clean.
+- F17 (real model, owner's running stack, load average ~20): "explain this project" answered in 146 s with
+  a complete overview. "can you create one automation for me" first timed out under load (build1); after
+  raising the waits it SUCCEEDED (task 218, ~300 s): go_to_page /automations/new, then it asked for the
+  database details (the probe user had no connection). Timeline: knowledge lookup, Go to New Automation;
+  no red steps.
+- F18: the running-turn check used Cache::has() on the worker's lock key, which only works on the file and
+  redis stores; on array/database (the .env.example default) a mid-turn message queued a second turn
+  instead of being merged. Now probes the lock itself. The stale supersede test now holds a real lock, and
+  a new test covers a RUNNING task whose worker died (re-queued).
+- Final checks: Orbit suites 75 passed, 4 failed: 3 need the demo MySQL on 127.0.0.1:3308 (not running) and
+  1 needs php8.3-pgsql. Frontend 52/52, tsc clean, oxlint 0. Probe user 73 and its index deleted. The
+  owner's queue workers were reloaded with `php artisan queue:restart` during verification.

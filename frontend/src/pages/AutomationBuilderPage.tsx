@@ -11,6 +11,8 @@ import { orbitTargets } from "../services/orbitTargets";
 import { api } from "../services/api";
 import { ConnectionProfile, SchemaResponse, KnowledgeDocument, AIProviderInfo } from "../types";
 import { SearchableSelect } from "../components/common/SearchableSelect";
+import { FieldError, ModalShell, PageHeader } from "../components/ui/kit";
+import { ariaFor, clearError, focusFirstError, invalid, knowledgeFileRules, rules, serverFieldErrors, validate, type FieldErrors } from "../lib/validation";
 import { InlineAiFieldAssist } from "../components/common/InlineAiFieldAssist";
 import { useToast } from "../context/ToastContext";
 import { useAuth } from "../context/AuthContext";
@@ -49,6 +51,31 @@ const defaultSchedule = (tz: string): ScheduleConfig => ({
   generation_time: "08:30",
   publication_time: "09:00",
 });
+
+/** Where each builder field lives: its input id and wizard step (for messages under the field). */
+const BUILDER_FIELD: Record<string, { id: string; step: number }> = {
+  name: { id: "automation-name", step: 1 },
+  connection: { id: "automation-connection", step: 1 },
+  table: { id: "automation-table", step: 1 },
+  topic: { id: "topic", step: 3 },
+  tone: { id: "automation-tone", step: 3 },
+  image_style: { id: "automation-image-style", step: 3 },
+  model: { id: "automation-model", step: 3 },
+  timezone: { id: "schedule-timezone", step: 4 },
+  start_date: { id: "schedule-start", step: 4 },
+  end_date: { id: "schedule-end", step: 4 },
+  weekly_days: { id: "schedule-weekdays", step: 4 },
+  generation_time: { id: "schedule-generation", step: 4 },
+  publication_time: { id: "schedule-publication", step: 4 },
+  reviewer_email: { id: "reviewer-email", step: 4 },
+};
+/** Server field names that differ from the builder's. */
+const SERVER_ALIASES: Record<string, string> = {
+  connection_id: "connection", target_table: "table", prompt_context: "topic", ai_model: "model",
+  "generation_options.tone": "tone", "generation_options.image_style": "image_style",
+};
+/** The id to scroll to for a field: inputs by id, schedule pickers by their message. */
+const builderFocusId = (f: string) => (BUILDER_FIELD[f]?.id.startsWith("schedule-") ? `${BUILDER_FIELD[f].id}-error` : BUILDER_FIELD[f]?.id ?? f);
 
 export const AutomationBuilderPage: React.FC = () => {
   const navigate = useNavigate();
@@ -102,6 +129,15 @@ export const AutomationBuilderPage: React.FC = () => {
   const [previewSeconds, setPreviewSeconds] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Messages shown directly under the field they are about (client checks on Next, and the server's 422).
+  // Each remembers the value it was about; once the value changes (typing, picking, a template or Orbit), it hides.
+  const [errorState, setErrorState] = useState<{ errors: FieldErrors; at: Record<string, unknown> }>({ errors: {}, at: {} });
+  const watched: Record<string, unknown> = { name, connection: selectedConnId, table: targetTable, topic: aiConfig.topic, model: aiConfig.model, tone: genOptions.tone, image_style: genOptions.image_style };
+  const setFieldErrors = (errors: FieldErrors) => setErrorState({ errors, at: watched });
+  const fieldErrors: FieldErrors = Object.fromEntries(
+    Object.entries(errorState.errors).filter(([f]) => !(f in watched) || watched[f] === errorState.at[f]),
+  );
+  const [docErrors, setDocErrors] = useState<FieldErrors>({});
   const [draftRestored, setDraftRestored] = useState(false);
   // Autosave starts only after the stored draft has been read, so it never overwrites it with defaults.
   const [hydrated, setHydrated] = useState(false);
@@ -351,7 +387,12 @@ export const AutomationBuilderPage: React.FC = () => {
 
   const handleUploadDocumentInline = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newDocFile) return;
+    const found = validate({ title: newDocTitle, file: newDocFile }, { title: [rules.maxLength(255, "Title")], file: knowledgeFileRules });
+    setDocErrors(found);
+    if (Object.keys(found).length || !newDocFile) {
+      focusFirstError(found, (f) => (f === "file" ? "doc-file" : "doc-title"));
+      return;
+    }
     try {
       setIsUploadingDoc(true);
       const res = await api.uploadKnowledge(newDocTitle || newDocFile.name.replace(/\.[^/.]+$/, ""), newDocFile);
@@ -360,9 +401,11 @@ export const AutomationBuilderPage: React.FC = () => {
       if (res?.id) setAiConfig((p) => ({ ...p, document_ids: [...p.document_ids, res.id] }));
       setNewDocTitle("");
       setNewDocFile(null);
+      setDocErrors({});
       setShowDocUploadModal(false);
     } catch (err: any) {
-      setError(`Document upload failed: ${err.message}`);
+      const fields = serverFieldErrors(err);
+      setDocErrors(Object.keys(fields).length ? fields : { file: `Upload failed: ${err.message}` });
     } finally {
       setIsUploadingDoc(false);
     }
@@ -389,11 +432,23 @@ export const AutomationBuilderPage: React.FC = () => {
     }
   };
 
+  /** Show messages under their fields, on the earliest step that has one. */
+  const showFieldErrors = (found: FieldErrors) => {
+    setFieldErrors(found);
+    const steps = Object.keys(found).map((f) => BUILDER_FIELD[f]?.step).filter(Boolean) as number[];
+    if (steps.length) setStep(Math.min(...steps));
+    // Wait for the step to animate in before scrolling to the first message.
+    setTimeout(() => focusFirstError(found, builderFocusId), steps.length && Math.min(...steps) !== step ? 420 : 40);
+  };
+
   const handleSubmit = async () => {
-    if (!selectedConnId || !name.trim()) {
-      setError("Give the automation a name and choose a connection.");
-      setStep(1);
-      return;
+    for (const n of [1, 3, 4]) {
+      const { fields } = stepCheck(n);
+      if (Object.keys(fields).length) {
+        setError(null);
+        showFieldErrors(fields);
+        return;
+      }
     }
     try {
       setIsSubmitting(true);
@@ -404,48 +459,92 @@ export const AutomationBuilderPage: React.FC = () => {
       toast.success("Automation saved", next ? `First run: ${new Date(next.generation_at).toLocaleString()}` : "It is now scheduled.");
       navigate("/automations");
     } catch (err: any) {
-      const fieldErrs = err.errors ? Object.values(err.errors).flat().join(" ") : "";
-      setError(`Could not save: ${err.message}${fieldErrs && !String(err.message).includes(fieldErrs) ? ` ${fieldErrs}` : ""}`);
-      toast.error("Could not save the automation", err.message);
+      const fields = serverFieldErrors(err, SERVER_ALIASES);
+      const placed = Object.fromEntries(Object.entries(fields).filter(([f]) => BUILDER_FIELD[f]));
+      const rest = Object.entries(fields).filter(([f]) => !BUILDER_FIELD[f]);
+      if (Object.keys(placed).length) {
+        setError(null);
+        showFieldErrors(placed);
+      } else if (rest.some(([f]) => f.startsWith("field_mappings"))) {
+        // A column rule the server rejected: it belongs to the Fields step.
+        setError(rest.map(([, m]) => m).join(" "));
+        setStep(2);
+      } else {
+        setError(`Could not save: ${err.message}`);
+      }
     } finally {
       setIsSubmitting(false);
     }
   };
 
   // ---------------------------------------------------------------- navigation guards
-  const canLeave = (n: number): string | null => {
+  /**
+   * What stops the user leaving step n: `fields` are shown under their inputs, `message` describes the whole
+   * step (also returned to Orbit), and `inline` means the step already shows its own messages in place.
+   */
+  const stepCheck = (n: number): { fields: FieldErrors; message: string | null; inline?: boolean } => {
     if (n === 1) {
-      if (!name.trim()) return "Give the automation a name.";
-      if (!selectedConnId) return "Choose a database connection.";
-      if (!targetTable) return "Choose the table to write to.";
+      const fields = validate({ name, connection: selectedConnId, table: targetTable }, {
+        name: [rules.required("Name", "Give the automation a name."), rules.maxLength(255, "Name")],
+        connection: [rules.required("Database connection", "Choose a database connection.")],
+        table: [rules.required("Table", "Choose the table to write into.")],
+      });
+      return { fields, message: Object.values(fields)[0] ?? null };
     }
     if (n === 2) {
-      if (!fieldPlan) return planError || "The table's columns are still loading.";
-      if (problemCount > 0) return `Fix ${problemCount} column${problemCount === 1 ? "" : "s"} first.`;
+      if (!fieldPlan) return { fields: {}, message: planError || "The table's columns are still loading." };
+      if (problemCount > 0) return { fields: {}, message: `Fix ${problemCount} column${problemCount === 1 ? "" : "s"} first (marked in red).`, inline: true };
     }
-    if (n === 3 && !manual && !aiConfig.topic.trim()) return "Describe what the content should be about.";
+    if (n === 3 && !manual) {
+      const fields = validate({ topic: aiConfig.topic, tone: genOptions.tone, image_style: genOptions.image_style, model: aiConfig.model }, {
+        topic: [rules.required("Topic", "Describe what the content should be about."), rules.maxLength(4000, "Topic")],
+        tone: [rules.maxLength(200, "Tone")],
+        image_style: [rules.maxLength(300, "Image style")],
+        model: [rules.maxLength(120, "Model")],
+      });
+      return { fields, message: Object.values(fields)[0] ?? null };
+    }
     if (n === 4) {
+      const fields = validate({ reviewer_email: approval.require_approval ? approval.reviewer_email : "" }, {
+        reviewer_email: [rules.email("Reviewer email"), rules.maxLength(255, "Reviewer email")],
+      });
       const gap = gapMinutes(schedule.generation_time, schedule.publication_time);
-      if (gap === null || gap < MIN_GAP_MINUTES) return `Publication must be at least ${MIN_GAP_MINUTES} minutes after generation.`;
-      if (!scheduleValid) return "Fix the schedule first (see the summary).";
+      if (gap === null || gap < MIN_GAP_MINUTES) return { fields, message: `Publication must be at least ${MIN_GAP_MINUTES} minutes after generation.`, inline: true };
+      if (!scheduleValid) return { fields, message: "Fix the schedule fields marked in red first.", inline: true };
+      return { fields, message: Object.values(fields)[0] ?? null };
     }
-    return null;
+    return { fields: {}, message: null };
   };
   const goNext = (from: number) => {
-    const why = canLeave(from);
-    if (why) {
-      setError(why);
-      return { success: false, message: why };
+    const { fields, message, inline } = stepCheck(from);
+    if (message) {
+      setFieldErrors(fields);
+      if (Object.keys(fields).length) {
+        setError(null);
+        setTimeout(() => focusFirstError(fields, builderFocusId), 40);
+      } else if (inline) {
+        // Messages are already under the fields on this step: bring the first one into view.
+        setError(null);
+        document.querySelector("#automation-builder-anchor [data-invalid='true'], #automation-builder-anchor [role='alert']")?.scrollIntoView({ behavior: "smooth", block: "center" });
+      } else {
+        setError(message);
+      }
+      return { success: false, message };
     }
     setError(null);
+    setFieldErrors({});
     setStep(from + 1);
     return { success: true, message: `Moved to step ${from + 1}.` };
   };
   const goBack = (to: number) => {
     setError(null);
+    setFieldErrors({});
     setStep(to);
     return { success: true, message: `Back to step ${to}.` };
   };
+
+  // Schedule fields report edits themselves (ScheduleStep calls this).
+  const clearFieldError = useCallback((f: string) => setErrorState((st) => ({ ...st, errors: clearError(st.errors, f) })), []);
 
   // ---------------------------------------------------------------- Orbit surfaces
   const stepTarget = (n: number) => `builder.step.${n}`;
@@ -717,46 +816,43 @@ export const AutomationBuilderPage: React.FC = () => {
   ];
 
   const navButtons = (n: number, nextLabel: string) => (
-    <div className="flex flex-col-reverse gap-2 border-t border-slate-100 pt-5 sm:flex-row sm:justify-between">
+    <div className="flex flex-col-reverse gap-2 border-t border-slate-100 pt-6 sm:flex-row sm:justify-between">
       {n > 1 ? (
-        <button type="button" onClick={() => goBack(n - 1)} className="flex items-center justify-center gap-1.5 rounded-xl bg-slate-100 px-4 py-2.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-200">
+        <button type="button" onClick={() => goBack(n - 1)} className="da-btn da-btn-secondary">
           <ArrowLeft className="h-3.5 w-3.5" /> Back
         </button>
       ) : <span />}
-      <button type="button" onClick={() => goNext(n)} className="flex items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 text-xs font-bold text-white shadow-xs transition hover:bg-indigo-700">
+      <button type="button" onClick={() => goNext(n)} className="da-btn da-btn-primary px-5">
         <span>{nextLabel}</span> <ArrowRight className="h-3.5 w-3.5" />
       </button>
     </div>
   );
 
-  const card = "bg-white border border-slate-200 rounded-2xl p-4 sm:p-6 space-y-5 shadow-xs";
-  const stepMotion = { initial: { opacity: 0, x: 16 }, animate: { opacity: 1, x: 0 }, exit: { opacity: 0, x: -16 }, transition: { duration: 0.2 } };
+  const card = "da-card p-5 sm:p-8 space-y-6";
+  const stepMotion = { initial: { opacity: 0, x: 24 }, animate: { opacity: 1, x: 0 }, exit: { opacity: 0, x: -24 }, transition: { duration: 0.35, ease: [0.16, 1, 0.3, 1] as const } };
 
   return (
-    <motion.div id="automation-builder-anchor" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className="mx-auto max-w-5xl space-y-5">
-      {/* Header */}
-      <div className="flex flex-col justify-between gap-3 border-b border-slate-200 pb-3 sm:flex-row sm:items-center">
-        <div className="min-w-0">
-          <div className="mb-1 flex flex-wrap items-center gap-2">
-            <span className="rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-0.5 text-[11px] font-semibold text-indigo-700">New automation</span>
-            <span className="text-xs text-slate-400">Step {step} of 5</span>
+    <motion.div id="automation-builder-anchor" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className="mx-auto max-w-5xl space-y-6">
+      <PageHeader
+        eyebrow="Automate"
+        title="Create an automation"
+        description="Writes new rows into any table you choose: blog posts, articles, news, products, FAQs. Set it up once; it runs on schedule in the background."
+        actions={
+          <>
+            <span className="da-chip da-chip-indigo px-3 py-1 text-[12px]">Step {step} of 5</span>
+            {draftRestored && <span className="da-chip da-chip-amber px-3 py-1 text-[12px]"><Check className="h-3 w-3" /> Draft restored</span>}
             {draftRestored && (
-              <span className="flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-bold text-amber-700"><Check className="h-3 w-3" /> Draft restored</span>
+              <button type="button" onClick={handleClearDraft} className="da-btn da-btn-ghost da-btn-sm">
+                <RotateCcw className="h-3.5 w-3.5" /> Start over
+              </button>
             )}
-          </div>
-          <h2 className="text-xl font-extrabold tracking-tight text-slate-900 sm:text-2xl">Create a database automation</h2>
-          <p className="mt-0.5 text-xs text-slate-500">Writes new rows into any table you choose: blog posts, articles, news, products, FAQs.</p>
-        </div>
-        {draftRestored && (
-          <button type="button" onClick={handleClearDraft} className="flex items-center gap-1 self-start text-[11px] font-semibold text-slate-400 hover:text-slate-600 sm:self-auto">
-            <RotateCcw className="h-3 w-3" /> Start over
-          </button>
-        )}
-      </div>
+          </>
+        }
+      />
 
       {/* Progress */}
-      <nav aria-label="Progress" className="rounded-2xl border border-slate-200 bg-white p-3 shadow-xs sm:p-4">
-        <ol className="flex gap-1 overflow-x-auto pb-1 text-xs font-semibold sm:justify-between">
+      <nav aria-label="Progress" className="da-card p-3 sm:p-4">
+        <ol className="flex gap-1 overflow-x-auto pb-1 text-[13px] font-semibold sm:justify-between">
           {wizardSteps.map((s) => {
             const active = step === s.num;
             const done = step > s.num;
@@ -767,9 +863,9 @@ export const AutomationBuilderPage: React.FC = () => {
                   onClick={() => s.num < step && setStep(s.num)}
                   disabled={s.num > step}
                   aria-current={active ? "step" : undefined}
-                  className={`flex items-center gap-2 rounded-xl px-2.5 py-1.5 transition ${active ? "border border-indigo-200 bg-indigo-50 text-indigo-700" : done ? "cursor-pointer text-emerald-700 hover:bg-emerald-50" : "cursor-not-allowed text-slate-400"}`}
+                  className={`flex items-center gap-2.5 rounded-full py-1.5 pl-1.5 pr-3.5 transition ${active ? "bg-slate-950 text-white shadow-[0_10px_24px_-12px_rgba(15,23,42,0.7)]" : done ? "cursor-pointer text-emerald-700 hover:bg-emerald-50" : "cursor-not-allowed text-slate-400"}`}
                 >
-                  <span className={`flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-bold ${active ? "bg-indigo-600 text-white" : done ? "bg-emerald-500 text-white" : "bg-slate-100 text-slate-400"}`}>
+                  <span className={`flex h-7 w-7 items-center justify-center rounded-full text-[12px] font-bold ${active ? "bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-400 text-white" : done ? "bg-emerald-500 text-white" : "bg-slate-100 text-slate-400"}`}>
                     {done ? <Check className="h-3.5 w-3.5" /> : s.num}
                   </span>
                   <span className={`whitespace-nowrap ${active ? "" : "hidden sm:inline"}`}>{s.label}</span>
@@ -778,14 +874,14 @@ export const AutomationBuilderPage: React.FC = () => {
             );
           })}
         </ol>
-        <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
-          <motion.div initial={false} animate={{ width: `${(step / 5) * 100}%` }} transition={{ duration: 0.3 }} className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-indigo-600" />
+        <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
+          <motion.div initial={false} animate={{ width: `${(step / 5) * 100}%` }} transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1] }} className="h-full rounded-full bg-gradient-to-r from-indigo-500 via-violet-500 to-cyan-400" />
         </div>
       </nav>
 
       <AnimatePresence>
         {error && (
-          <motion.div initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }} role="alert" className="flex items-start justify-between gap-2 rounded-xl border border-rose-200 bg-rose-50 p-3.5 text-xs text-rose-800">
+          <motion.div initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }} role="alert" className="flex items-start justify-between gap-2 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-[13px] text-rose-800">
             <div className="flex items-start gap-2"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-600" /><span className="font-medium">{error}</span></div>
             <button onClick={() => setError(null)} aria-label="Dismiss" className="text-slate-400 hover:text-slate-600"><X className="h-4 w-4" /></button>
           </motion.div>
@@ -797,20 +893,20 @@ export const AutomationBuilderPage: React.FC = () => {
         {step === 1 && (
           <motion.div key="s1" {...stepMotion} ref={(el: HTMLDivElement | null) => (el ? orbitTargets.register(stepTarget(1), el) : orbitTargets.unregister(stepTarget(1)))} className={card}>
             <div>
-              <h3 className="flex items-center gap-2 text-sm font-bold text-slate-900"><Database className="h-4 w-4 text-indigo-600" /> What should this automation create?</h3>
-              <p className="mt-0.5 text-xs text-slate-500">Pick a starting template or describe it in your own words, then choose where the rows go.</p>
+              <h3 className="flex items-center gap-2.5 text-[18px] font-bold tracking-[-0.02em] text-slate-950"><Database className="h-4 w-4 text-indigo-600" /> What should this automation create?</h3>
+              <p className="mt-1.5 text-[13.5px] leading-relaxed text-slate-500">Pick a starting template or describe it in your own words, then choose where the rows go.</p>
             </div>
 
             {loadingConnections ? (
-              <div className="space-y-2 py-10 text-center text-xs text-slate-500">
-                <Loader2 className="mx-auto h-6 w-6 animate-spin text-indigo-600" />
+              <div className="space-y-3 py-12 text-center text-[13px] text-slate-500">
+                <Loader2 className="mx-auto h-7 w-7 animate-spin text-indigo-600" />
                 <p>Loading your database connections…</p>
               </div>
             ) : connections.length === 0 ? (
-              <div className="space-y-3 rounded-xl border border-amber-200 bg-amber-50 p-5 text-xs text-amber-800">
-                <p className="text-sm font-semibold">Connect a database first</p>
+              <div className="space-y-3 rounded-2xl border border-amber-200 bg-amber-50 p-6 text-[13px] text-amber-800">
+                <p className="text-[15px] font-bold">Connect a database first</p>
                 <p className="text-slate-600">Automations write into one of your own MySQL databases. Add and test a connection, then come back.</p>
-                <Link to="/connections" className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2 font-semibold text-white hover:bg-indigo-700"><Database className="h-3.5 w-3.5" /> Go to Connections</Link>
+                <Link to="/connections" className="da-btn da-btn-primary"><Database className="h-3.5 w-3.5" /> Go to Connections</Link>
               </div>
             ) : (
               <>
@@ -819,57 +915,63 @@ export const AutomationBuilderPage: React.FC = () => {
                     const Icon = t.icon;
                     const sel = selectedTemplateId === t.id;
                     return (
-                      <button key={t.id} type="button" onClick={t.apply} aria-pressed={sel} className={`flex flex-col justify-between rounded-xl border p-3 text-left transition ${sel ? "border-indigo-600 bg-white ring-2 ring-indigo-500/20" : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50/80"}`}>
+                      <button key={t.id} type="button" onClick={t.apply} aria-pressed={sel} className={`group flex flex-col justify-between rounded-2xl border p-4 text-left transition-all duration-300 ${sel ? "border-indigo-500 bg-indigo-50/40 ring-4 ring-indigo-500/10" : "border-slate-200 bg-white hover:-translate-y-0.5 hover:border-indigo-200 hover:shadow-lift"}`}>
                         <div>
                           <div className="mb-1.5 flex items-center justify-between">
                             <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold ${t.color}`}>{t.badge}</span>
                             <Icon className="h-3.5 w-3.5 text-slate-500" />
                           </div>
-                          <h5 className="text-xs font-bold text-slate-900">{t.title}</h5>
-                          <p className="mt-1 line-clamp-2 text-[11px] leading-snug text-slate-500">{t.description}</p>
+                          <h5 className="text-[14px] font-bold text-slate-900">{t.title}</h5>
+                          <p className="mt-1 line-clamp-2 text-[12.5px] leading-snug text-slate-500">{t.description}</p>
                         </div>
                       </button>
                     );
                   })}
                 </div>
 
-                <div className="space-y-2 rounded-2xl border border-indigo-200/80 bg-gradient-to-r from-indigo-50/80 via-purple-50/50 to-slate-50 p-3 sm:p-4">
-                  <label htmlFor="nl-plan" className="flex items-center gap-2 text-xs font-bold text-slate-900"><Cpu className="h-4 w-4 text-indigo-600" /> Or describe it in plain words</label>
-                  <textarea id="nl-plan" rows={2} value={naturalPrompt} onChange={(e) => setNaturalPrompt(e.target.value)} placeholder="e.g. One practical article about cloud databases every weekday for two weeks, in the right category, with a banner image. Email me to approve; publish at 9 AM." className="w-full resize-none rounded-xl border border-indigo-200 bg-white px-3.5 py-2.5 text-xs text-slate-900 placeholder:text-slate-400 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-500/20" />
+                <div className="space-y-3 rounded-3xl border border-indigo-100 bg-gradient-to-br from-indigo-50/80 via-white to-violet-50/60 p-4 sm:p-5">
+                  <label htmlFor="nl-plan" className="flex items-center gap-2 text-[14px] font-bold text-slate-900"><span className="grid h-7 w-7 place-items-center rounded-lg bg-white text-indigo-600 shadow-xs"><Sparkles className="h-4 w-4" /></span> Or describe it in plain words</label>
+                  <textarea id="nl-plan" rows={2} value={naturalPrompt} onChange={(e) => setNaturalPrompt(e.target.value)} placeholder="e.g. One practical article about cloud databases every weekday for two weeks, in the right category, with a banner image. Email me to approve; publish at 9 AM." className="da-input resize-none" />
                   <div className="flex justify-end">
-                    <button type="button" disabled={isProposing || !selectedConnId || !naturalPrompt.trim()} onClick={handleProposeAutomation} className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white shadow-xs transition hover:bg-indigo-700 disabled:opacity-50">
+                    <button type="button" disabled={isProposing || !selectedConnId || !naturalPrompt.trim()} onClick={handleProposeAutomation} className="da-btn da-btn-accent">
                       {isProposing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
                       {isProposing ? "Reading your schema…" : "Fill in the steps for me"}
                     </button>
                   </div>
-                  {proposeFeedback && <p className="flex items-start gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 p-2.5 text-[11px] text-emerald-900"><CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600" />{proposeFeedback}</p>}
+                  {proposeFeedback && <p className="flex items-start gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-[12.5px] text-emerald-900"><CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600" />{proposeFeedback}</p>}
                 </div>
 
                 <div>
-                  <label htmlFor="automation-name" className="mb-1.5 block text-xs font-semibold text-slate-700">Name</label>
-                  <input id="automation-name" type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Daily tech blog" className="w-full rounded-xl border border-slate-200 bg-slate-50/50 px-3.5 py-2.5 text-xs text-slate-900 placeholder:text-slate-400 focus:border-indigo-600 focus:bg-white focus:ring-2 focus:ring-indigo-500/20" />
+                  <label htmlFor="automation-name" className="da-label">Name</label>
+                  <input id="automation-name" type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Daily tech blog"
+                    className={`da-input${invalid(fieldErrors.name)}`} {...ariaFor("automation-name", fieldErrors.name)} />
+                  <FieldError id="automation-name" message={fieldErrors.name} />
                 </div>
 
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <div>
-                    <label className="mb-1.5 block text-xs font-semibold text-slate-700">Database connection</label>
-                    <SearchableSelect value={selectedConnId} onChange={(v) => setSelectedConnId(Number(v))} placeholder="Choose a connection" options={connections.map((c: any) => ({ value: c.id, label: `${c.name} (${c.database_name || c.database || ""})`, badge: c.driver || c.db_type || "mysql" }))} />
+                    <label className="da-label">Database connection</label>
+                    <SearchableSelect id="automation-connection" invalid={!!fieldErrors.connection} value={selectedConnId} onChange={(v) => setSelectedConnId(Number(v))} placeholder="Choose a connection" options={connections.map((c: any) => ({ value: c.id, label: `${c.name} (${c.database_name || c.database || ""})`, badge: c.driver || c.db_type || "mysql" }))} />
+                    <FieldError id="automation-connection" message={fieldErrors.connection} />
                   </div>
                   <div>
-                    <label className="mb-1.5 block text-xs font-semibold text-slate-700">Table to write into</label>
+                    <label className="da-label">Table to write into</label>
                     <SearchableSelect
+                      id="automation-table"
+                      invalid={!!fieldErrors.table}
                       value={targetTable}
                       onChange={(v) => setTargetTable(String(v))}
                       placeholder={schema ? "Choose a table" : "Loading tables…"}
                       searchPlaceholder="Search tables…"
                       options={(schema?.tables ?? []).filter((t: any) => t.category !== "RESTRICTED").map((t: any) => ({ value: t.name, label: t.name, badge: t.category === "RECOMMENDED" ? "recommended" : t.category === "REVIEW_REQUIRED" ? "review" : undefined }))}
                     />
-                    <p className="mt-1 text-[11px] text-slate-400">Account, credential and payment tables are hidden: automations can never write to them.</p>
+                    <FieldError id="automation-table" message={fieldErrors.table} />
+                    <p className="da-help">Account, credential and payment tables are hidden: automations can never write to them.</p>
                   </div>
                 </div>
 
                 <div>
-                  <span className="mb-1.5 block text-xs font-semibold text-slate-700">Content source</span>
+                  <span className="da-label">Content source</span>
                   <div className="grid grid-cols-1 gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Content source">
                     {[
                       { v: "AI_GENERATED" as Mode, l: "AI writes it", d: "Text, linked records and images are generated for each run.", icon: Sparkles },
@@ -878,9 +980,9 @@ export const AutomationBuilderPage: React.FC = () => {
                       const Icon = o.icon;
                       const active = mode === o.v;
                       return (
-                        <button key={o.v} type="button" role="radio" aria-checked={active} onClick={() => setMode(o.v)} className={`flex items-start gap-2.5 rounded-xl border p-3 text-left transition ${active ? "border-indigo-600 bg-indigo-50/60 ring-2 ring-indigo-500/15" : "border-slate-200 bg-white hover:border-slate-300"}`}>
+                        <button key={o.v} type="button" role="radio" aria-checked={active} onClick={() => setMode(o.v)} className={`flex items-start gap-3 rounded-2xl border p-4 text-left transition-all ${active ? "border-indigo-500 bg-indigo-50/50 ring-4 ring-indigo-500/10" : "border-slate-200 bg-white hover:border-indigo-200 hover:bg-slate-50/60"}`}>
                           <Icon className={`mt-0.5 h-4 w-4 shrink-0 ${active ? "text-indigo-600" : "text-slate-400"}`} />
-                          <span><span className="block text-xs font-bold text-slate-900">{o.l}</span><span className="block text-[11px] text-slate-500">{o.d}</span></span>
+                          <span><span className="block text-[14px] font-bold text-slate-900">{o.l}</span><span className="mt-0.5 block text-[12.5px] text-slate-500">{o.d}</span></span>
                         </button>
                       );
                     })}
@@ -897,20 +999,20 @@ export const AutomationBuilderPage: React.FC = () => {
           <motion.div key="s2" {...stepMotion} ref={(el: HTMLDivElement | null) => (el ? orbitTargets.register(stepTarget(2), el) : orbitTargets.unregister(stepTarget(2)))} className={card}>
             <div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-start">
               <div>
-                <h3 className="flex items-center gap-2 text-sm font-bold text-slate-900"><TableProperties className="h-4 w-4 text-indigo-600" /> How each column of <code className="rounded bg-slate-100 px-1.5 text-indigo-700">{targetTable}</code> is filled</h3>
-                <p className="mt-0.5 text-xs text-slate-500">Read from your live database. Safe choices are already selected; change only what you need.</p>
+                <h3 className="flex items-center gap-2.5 text-[18px] font-bold tracking-[-0.02em] text-slate-950"><TableProperties className="h-4 w-4 text-indigo-600" /> How each column of <code className="rounded bg-slate-100 px-1.5 text-indigo-700">{targetTable}</code> is filled</h3>
+                <p className="mt-1.5 text-[13.5px] leading-relaxed text-slate-500">Read from your live database. Safe choices are already selected; change only what you need.</p>
               </div>
-              <button type="button" onClick={loadFieldPlan} disabled={planLoading} className="inline-flex shrink-0 items-center gap-1.5 self-start rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50">
+              <button type="button" onClick={loadFieldPlan} disabled={planLoading} className="da-btn da-btn-secondary da-btn-sm shrink-0 self-start">
                 <RefreshCw className={`h-3.5 w-3.5 ${planLoading ? "animate-spin" : ""}`} /> Re-read table
               </button>
             </div>
             {planLoading && !fieldPlan ? (
-              <div className="space-y-2">{[0, 1, 2, 3].map((i) => <div key={i} className="h-16 animate-pulse rounded-xl bg-slate-100" />)}</div>
+              <div className="space-y-2.5">{[0, 1, 2, 3].map((i) => <div key={i} className="h-16 animate-pulse rounded-2xl bg-slate-100" />)}</div>
             ) : planError ? (
               <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-xs text-rose-800">
                 <p className="font-semibold">Could not read this table.</p>
                 <p className="mt-1">{planError}</p>
-                <button type="button" onClick={loadFieldPlan} className="mt-2 rounded-lg bg-rose-600 px-3 py-1.5 font-semibold text-white">Try again</button>
+                <button type="button" onClick={loadFieldPlan} className="da-btn da-btn-danger da-btn-sm mt-3">Try again</button>
               </div>
             ) : fieldPlan && selectedConnId ? (
               <FieldMappingStep plan={fieldPlan} mappings={mappings} onChange={(col, m) => setMappings((p) => ({ ...p, [col]: m }))} problems={problems} connectionId={selectedConnId} manual={manual} length={genOptions.length} format={genOptions.content_format} timezone={schedule.timezone} />
@@ -923,42 +1025,46 @@ export const AutomationBuilderPage: React.FC = () => {
         {step === 3 && (
           <motion.div key="s3" {...stepMotion} ref={(el: HTMLDivElement | null) => (el ? orbitTargets.register(stepTarget(3), el) : orbitTargets.unregister(stepTarget(3)))} className={card}>
             {manual ? (
-              <div className="space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs text-slate-600">
-                <p className="flex items-center gap-1.5 font-bold text-slate-900"><Sliders className="h-4 w-4" /> AI is off for this automation</p>
+              <div className="space-y-2 rounded-2xl border border-slate-200 bg-slate-50/70 p-5 text-[13px] text-slate-600">
+                <p className="flex items-center gap-1.5 text-[14px] font-bold text-slate-900"><Sliders className="h-4 w-4" /> AI is off for this automation</p>
                 <p>Each run writes the fixed values from the previous step. No model or image service is called.</p>
               </div>
             ) : (
               <>
                 <div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-start">
                   <div>
-                    <h3 className="flex items-center gap-2 text-sm font-bold text-slate-900"><Cpu className="h-4 w-4 text-indigo-600" /> What should the AI write?</h3>
-                    <p className="mt-0.5 text-xs text-slate-500">Each run picks a new angle on this topic and avoids repeating recent titles.</p>
+                    <h3 className="flex items-center gap-2.5 text-[18px] font-bold tracking-[-0.02em] text-slate-950"><Cpu className="h-4 w-4 text-indigo-600" /> What should the AI write?</h3>
+                    <p className="mt-1.5 text-[13.5px] leading-relaxed text-slate-500">Each run picks a new angle on this topic and avoids repeating recent titles.</p>
                   </div>
-                  <button type="button" onClick={() => setShowDocUploadModal(true)} className="inline-flex items-center gap-1.5 self-start rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-100"><Upload className="h-3.5 w-3.5" /> Add a document</button>
+                  <button type="button" onClick={() => setShowDocUploadModal(true)} className="da-btn da-btn-sm self-start border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100"><Upload className="h-3.5 w-3.5" /> Add a document</button>
                 </div>
 
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <label htmlFor="topic" className="text-xs font-semibold text-slate-700">Topic and direction</label>
+                    <label htmlFor="topic" className="text-[12.5px] font-semibold text-slate-700">Topic and direction</label>
                     <InlineAiFieldAssist fieldName="topic" currentValue={aiConfig.topic} topic={name} targetTable={targetTable} onApply={(v) => setAiConfig((p) => ({ ...p, topic: v }))} />
                   </div>
-                  <textarea id="topic" rows={3} value={aiConfig.topic} onChange={(e) => setAiConfig((p) => ({ ...p, topic: e.target.value }))} placeholder="e.g. Practical guides on running MySQL in production for small teams: indexing, backups, migrations and monitoring." className="w-full rounded-xl border border-slate-200 bg-white p-3 text-xs text-slate-900 focus:border-indigo-600 focus:ring-2 focus:ring-indigo-500/20" />
+                  <textarea id="topic" rows={3} value={aiConfig.topic} onChange={(e) => setAiConfig((p) => ({ ...p, topic: e.target.value }))} placeholder="e.g. Practical guides on running MySQL in production for small teams: indexing, backups, migrations and monitoring."
+                    className={`da-input${invalid(fieldErrors.topic)}`} {...ariaFor("topic", fieldErrors.topic)} />
+                  <FieldError id="topic" message={fieldErrors.topic} />
                 </div>
 
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                   <div>
-                    <label className="mb-1.5 block text-xs font-semibold text-slate-700">Tone</label>
+                    <label className="da-label">Tone</label>
                     <SearchableSelect value={TONES.includes(genOptions.tone) ? genOptions.tone : "__custom"} onChange={(v) => setGenOptions((p) => ({ ...p, tone: v === "__custom" ? "" : String(v) }))} options={[...TONES.map((t) => ({ value: t, label: t })), { value: "__custom", label: "Custom…" }]} showSearch={false} />
                     {!TONES.includes(genOptions.tone) && (
-                      <input value={genOptions.tone} onChange={(e) => setGenOptions((p) => ({ ...p, tone: e.target.value }))} placeholder="Describe the tone" className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-xs focus:border-indigo-600 focus:ring-2 focus:ring-indigo-500/20" />
+                      <input id="automation-tone" value={genOptions.tone} onChange={(e) => setGenOptions((p) => ({ ...p, tone: e.target.value }))} placeholder="Describe the tone"
+                        className={`da-input mt-2${invalid(fieldErrors.tone)}`} {...ariaFor("automation-tone", fieldErrors.tone)} />
                     )}
+                    <FieldError id="automation-tone" message={fieldErrors.tone} />
                   </div>
                   {hasBody && (
                     <div>
-                      <span className="mb-1.5 block text-xs font-semibold text-slate-700">Length of the main text</span>
-                      <div className="grid grid-cols-3 gap-1 rounded-xl bg-slate-100 p-1" role="radiogroup" aria-label="Length">
+                      <span className="da-label">Length of the main text</span>
+                      <div className="grid grid-cols-3 gap-1 rounded-2xl bg-slate-100 p-1" role="radiogroup" aria-label="Length">
                         {(["short", "medium", "long"] as const).map((l) => (
-                          <button key={l} type="button" role="radio" aria-checked={genOptions.length === l} onClick={() => setGenOptions((p) => ({ ...p, length: l }))} className={`rounded-lg py-1.5 text-xs font-semibold capitalize transition ${genOptions.length === l ? "bg-white text-indigo-700 shadow-sm" : "text-slate-600"}`}>
+                          <button key={l} type="button" role="radio" aria-checked={genOptions.length === l} onClick={() => setGenOptions((p) => ({ ...p, length: l }))} className={`rounded-xl py-2 text-[13px] font-semibold capitalize transition ${genOptions.length === l ? "bg-white text-slate-950 shadow-xs" : "text-slate-500 hover:text-slate-800"}`}>
                             {l} <span className="hidden font-normal text-slate-400 sm:inline">~{l === "short" ? 350 : l === "medium" ? 750 : 1300}w</span>
                           </button>
                         ))}
@@ -967,18 +1073,18 @@ export const AutomationBuilderPage: React.FC = () => {
                   )}
                   {hasBody && (
                     <div>
-                      <span className="mb-1.5 block text-xs font-semibold text-slate-700">Format stored in the database</span>
-                      <div className="grid grid-cols-2 gap-1 rounded-xl bg-slate-100 p-1" role="radiogroup" aria-label="Body format">
+                      <span className="da-label">Format stored in the database</span>
+                      <div className="grid grid-cols-2 gap-1 rounded-2xl bg-slate-100 p-1" role="radiogroup" aria-label="Body format">
                         {([["markdown", "Markdown"], ["html", "HTML"]] as const).map(([v, l]) => (
-                          <button key={v} type="button" role="radio" aria-checked={genOptions.content_format === v} onClick={() => setGenOptions((p) => ({ ...p, content_format: v }))} className={`rounded-lg py-1.5 text-xs font-semibold transition ${genOptions.content_format === v ? "bg-white text-indigo-700 shadow-sm" : "text-slate-600"}`}>{l}</button>
+                          <button key={v} type="button" role="radio" aria-checked={genOptions.content_format === v} onClick={() => setGenOptions((p) => ({ ...p, content_format: v }))} className={`rounded-xl py-2 text-[13px] font-semibold transition ${genOptions.content_format === v ? "bg-white text-slate-950 shadow-xs" : "text-slate-500 hover:text-slate-800"}`}>{l}</button>
                         ))}
                       </div>
-                      <p className="mt-1 text-[11px] text-slate-400">Choose HTML if your website shows the column as-is (most WYSIWYG CMSs).</p>
+                      <p className="da-help">Choose HTML if your website shows the column as-is (most WYSIWYG CMSs).</p>
                     </div>
                   )}
                   {hasImage && (
                     <div>
-                      <span className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-slate-700"><ImageIcon className="h-3.5 w-3.5 text-indigo-600" /> Images</span>
+                      <span className="da-label flex items-center gap-1.5"><ImageIcon className="h-3.5 w-3.5 text-indigo-600" /> Images</span>
                       <SearchableSelect
                         value={genOptions.image_provider}
                         onChange={(v) => setGenOptions((p) => ({ ...p, image_provider: v as any }))}
@@ -991,15 +1097,17 @@ export const AutomationBuilderPage: React.FC = () => {
                         ]}
                       />
                       {fieldPlan?.image_provider && genOptions.image_provider === "auto" && <p className="mt-1 text-[11px] text-slate-500">{fieldPlan.image_provider.reason}</p>}
-                      <input value={genOptions.image_style} onChange={(e) => setGenOptions((p) => ({ ...p, image_style: e.target.value }))} placeholder="Optional style, e.g. flat illustration, warm colors" className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-xs focus:border-indigo-600 focus:ring-2 focus:ring-indigo-500/20" />
+                      <input id="automation-image-style" value={genOptions.image_style} onChange={(e) => setGenOptions((p) => ({ ...p, image_style: e.target.value }))} placeholder="Optional style, e.g. flat illustration, warm colors"
+                        className={`da-input mt-2${invalid(fieldErrors.image_style)}`} {...ariaFor("automation-image-style", fieldErrors.image_style)} />
+                      <FieldError id="automation-image-style" message={fieldErrors.image_style} />
                     </div>
                   )}
                 </div>
 
-                <div className="space-y-3 rounded-xl border border-indigo-100 bg-gradient-to-r from-indigo-50/60 via-slate-50 to-purple-50/40 p-3 sm:p-4">
+                <div className="space-y-3 rounded-3xl border border-indigo-100 bg-gradient-to-br from-indigo-50/70 via-white to-violet-50/50 p-4 sm:p-5">
                   <div className="flex flex-col justify-between gap-1 sm:flex-row sm:items-center">
-                    <span className="flex items-center gap-2 text-xs font-bold text-slate-900"><Server className="h-4 w-4 text-indigo-600" /> Text model</span>
-                    <Link to="/ai-providers" className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-700">Manage providers and keys →</Link>
+                    <span className="flex items-center gap-2 text-[14px] font-bold text-slate-900"><Server className="h-4 w-4 text-indigo-600" /> Text model</span>
+                    <Link to="/ai-providers" className="text-[12.5px] font-semibold text-indigo-600 hover:text-indigo-700">Manage providers and keys →</Link>
                   </div>
                   <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
                     {[
@@ -1016,9 +1124,9 @@ export const AutomationBuilderPage: React.FC = () => {
                         <button key={p.id} type="button" aria-pressed={sel} onClick={() => {
                           const models = info?.models || (info as any)?.available_models || [];
                           setAiConfig((prev) => ({ ...prev, provider: p.id, model: info?.current_model || models[0] || "" }));
-                        }} className={`rounded-xl border p-2.5 text-left transition ${sel ? "border-indigo-600 bg-indigo-600 text-white" : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"}`}>
-                          <span className="block text-xs font-bold">{p.name}</span>
-                          <span className={`text-[10px] ${sel ? "text-indigo-100" : ready ? "text-emerald-600" : "text-amber-600"}`}>{ready ? `● ${p.note}` : "Not set up"}</span>
+                        }} className={`rounded-2xl border p-3 text-left transition-all ${sel ? "border-slate-950 bg-slate-950 text-white shadow-[0_12px_28px_-14px_rgba(15,23,42,0.8)]" : "border-slate-200 bg-white text-slate-700 hover:-translate-y-0.5 hover:border-indigo-200"}`}>
+                          <span className="block text-[13px] font-bold">{p.name}</span>
+                          <span className={`text-[11px] ${sel ? "text-indigo-200" : ready ? "text-emerald-600" : "text-amber-600"}`}>{ready ? `● ${p.note}` : "Not set up"}</span>
                         </button>
                       );
                     })}
@@ -1028,12 +1136,16 @@ export const AutomationBuilderPage: React.FC = () => {
                     const models: string[] = info?.models || (info as any)?.available_models || [];
                     return (
                       <div className="grid gap-2 sm:grid-cols-2">
-                        {models.length > 0 ? (
-                          <SearchableSelect value={aiConfig.model} onChange={(v) => setAiConfig((p) => ({ ...p, model: String(v) }))} options={models.map((m) => ({ value: m, label: m }))} placeholder="Choose a model" />
-                        ) : (
-                          <input value={aiConfig.model} onChange={(e) => setAiConfig((p) => ({ ...p, model: e.target.value }))} placeholder="Model name (leave empty for the default)" className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs focus:border-indigo-600 focus:ring-2 focus:ring-indigo-500/20" />
-                        )}
-                        <p className="self-center text-[11px] text-slate-500">
+                        <div>
+                          {models.length > 0 ? (
+                            <SearchableSelect id="automation-model" invalid={!!fieldErrors.model} value={aiConfig.model} onChange={(v) => setAiConfig((p) => ({ ...p, model: String(v) }))} options={models.map((m) => ({ value: m, label: m }))} placeholder="Choose a model" />
+                          ) : (
+                            <input id="automation-model" value={aiConfig.model} onChange={(e) => setAiConfig((p) => ({ ...p, model: e.target.value }))} placeholder="Model name (leave empty for the default)"
+                              className={`da-input${invalid(fieldErrors.model)}`} {...ariaFor("automation-model", fieldErrors.model)} />
+                          )}
+                          <FieldError id="automation-model" message={fieldErrors.model} />
+                        </div>
+                        <p className="self-center text-[12.5px] leading-relaxed text-slate-500">
                           {aiConfig.provider === "ollama" ? "Runs on this machine: private and free. Small models are faster; larger ones write better." : aiConfig.provider === "mock" ? "Test mode writes placeholder text without calling a model. Use it only to try the flow." : "Uses your own encrypted API key."}
                         </p>
                       </div>
@@ -1043,24 +1155,24 @@ export const AutomationBuilderPage: React.FC = () => {
 
                 <div>
                   <div className="mb-1.5 flex items-center justify-between">
-                    <span className="flex items-center gap-1.5 text-xs font-semibold text-slate-700"><BookOpen className="h-3.5 w-3.5 text-indigo-600" /> Ground it in your documents (optional)</span>
-                    <span className="text-[11px] text-slate-400">{aiConfig.document_ids.length} of {knowledgeDocs.length} selected</span>
+                    <span className="flex items-center gap-1.5 text-[12.5px] font-semibold text-slate-700"><BookOpen className="h-3.5 w-3.5 text-indigo-600" /> Ground it in your documents (optional)</span>
+                    <span className="text-[12px] text-slate-400">{aiConfig.document_ids.length} of {knowledgeDocs.length} selected</span>
                   </div>
                   {knowledgeDocs.length === 0 ? (
-                    <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 p-4 text-center text-xs text-slate-500">
+                    <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50/70 p-5 text-center text-[13px] text-slate-500">
                       No documents yet. Upload Markdown, text or PDF files so the AI can use your facts.
                       <button type="button" onClick={() => setShowDocUploadModal(true)} className="ml-1 font-semibold text-indigo-600 hover:underline">Upload one</button>
                     </div>
                   ) : (
                     <div className="relative">
-                      <button type="button" onClick={() => setDocDropdownOpen((o) => !o)} aria-expanded={docDropdownOpen} className="flex w-full items-center justify-between rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-left text-xs hover:border-slate-300">
+                      <button type="button" onClick={() => setDocDropdownOpen((o) => !o)} aria-expanded={docDropdownOpen} className="da-input flex items-center justify-between text-left hover:border-slate-300">
                         <span className={aiConfig.document_ids.length ? "font-semibold text-slate-900" : "text-slate-500"}>
                           {aiConfig.document_ids.length ? `${aiConfig.document_ids.length} document${aiConfig.document_ids.length > 1 ? "s" : ""} selected` : "Choose documents…"}
                         </span>
                         {docDropdownOpen ? <ChevronUp className="h-4 w-4 text-slate-400" /> : <ChevronDown className="h-4 w-4 text-slate-400" />}
                       </button>
                       {docDropdownOpen && (
-                        <div className="absolute left-0 right-0 z-30 mt-1 space-y-2 rounded-xl border border-slate-200 bg-white p-3 shadow-xl">
+                        <div className="absolute left-0 right-0 z-30 mt-2 space-y-2 rounded-2xl border border-slate-200 bg-white p-3 shadow-lift">
                           <div className="relative">
                             <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-400" />
                             <input value={docSearchFilter} onChange={(e) => setDocSearchFilter(e.target.value)} placeholder="Search documents…" className="w-full rounded-lg border border-slate-200 bg-slate-50 py-1.5 pl-8 pr-3 text-xs focus:bg-white focus:outline-none focus:ring-1 focus:ring-indigo-500" />
@@ -1092,8 +1204,8 @@ export const AutomationBuilderPage: React.FC = () => {
         {step === 4 && (
           <motion.div key="s4" {...stepMotion} ref={(el: HTMLDivElement | null) => (el ? orbitTargets.register(stepTarget(4), el) : orbitTargets.unregister(stepTarget(4)))} className={card}>
             <div>
-              <h3 className="flex items-center gap-2 text-sm font-bold text-slate-900"><Clock className="h-4 w-4 text-indigo-600" /> When should it run?</h3>
-              <p className="mt-0.5 text-xs text-slate-500">Content is generated first; it is written to your database at the publication time.</p>
+              <h3 className="flex items-center gap-2.5 text-[18px] font-bold tracking-[-0.02em] text-slate-950"><Clock className="h-4 w-4 text-indigo-600" /> When should it run?</h3>
+              <p className="mt-1.5 text-[13.5px] leading-relaxed text-slate-500">Content is generated first; it is written to your database at the publication time.</p>
             </div>
             <ScheduleStep
               schedule={schedule}
@@ -1103,6 +1215,8 @@ export const AutomationBuilderPage: React.FC = () => {
               userEmail={user?.email}
               targetTable={targetTable}
               onValidity={(v) => setScheduleValid(v)}
+              fieldErrors={Object.fromEntries(Object.entries(fieldErrors).filter(([f]) => BUILDER_FIELD[f]?.step === 4))}
+              onFieldEdited={clearFieldError}
             />
             {navButtons(4, "Continue to preview")}
           </motion.div>
@@ -1112,17 +1226,17 @@ export const AutomationBuilderPage: React.FC = () => {
         {step === 5 && (
           <motion.div key="s5" {...stepMotion} ref={(el: HTMLDivElement | null) => (el ? orbitTargets.register(stepTarget(5), el) : orbitTargets.unregister(stepTarget(5)))} className={card}>
             <div>
-              <h3 className="flex items-center gap-2 text-sm font-bold text-slate-900"><Eye className="h-4 w-4 text-indigo-600" /> Preview a real run, then save</h3>
-              <p className="mt-0.5 text-xs text-slate-500">The preview runs the same steps as a scheduled run, including images and the exact database plan, but writes nothing.</p>
+              <h3 className="flex items-center gap-2.5 text-[18px] font-bold tracking-[-0.02em] text-slate-950"><Eye className="h-4 w-4 text-indigo-600" /> Preview a real run, then save</h3>
+              <p className="mt-1.5 text-[13.5px] leading-relaxed text-slate-500">The preview runs the same steps as a scheduled run, including images and the exact database plan, but writes nothing.</p>
             </div>
 
-            <div className="rounded-xl border border-slate-200">
-              <button type="button" onClick={() => setShowRecap((s) => !s)} aria-expanded={showRecap} className="flex w-full items-center justify-between px-3.5 py-2.5 text-left">
-                <span className="flex items-center gap-1.5 text-xs font-bold text-slate-800"><Workflow className="h-3.5 w-3.5 text-indigo-600" /> Your settings</span>
+            <div className="overflow-hidden rounded-2xl border border-slate-200">
+              <button type="button" onClick={() => setShowRecap((s) => !s)} aria-expanded={showRecap} className="flex w-full items-center justify-between bg-slate-50/70 px-4 py-3 text-left hover:bg-slate-50">
+                <span className="flex items-center gap-2 text-[14px] font-bold text-slate-900"><Workflow className="h-4 w-4 text-indigo-600" /> Your settings</span>
                 {showRecap ? <ChevronUp className="h-4 w-4 text-slate-400" /> : <ChevronDown className="h-4 w-4 text-slate-400" />}
               </button>
               {showRecap && (
-                <dl className="grid grid-cols-1 gap-x-6 gap-y-2 border-t border-slate-100 px-3.5 py-3 text-xs sm:grid-cols-2">
+                <dl className="grid grid-cols-1 gap-x-8 gap-y-2.5 border-t border-slate-100 px-4 py-4 text-[13px] sm:grid-cols-2">
                   {[
                     ["Name", name || "—", 1],
                     ["Writes into", `${targetTable} · ${selectedConnection?.name ?? ""}`, 1],
@@ -1135,7 +1249,7 @@ export const AutomationBuilderPage: React.FC = () => {
                       <dt className="shrink-0 text-slate-400">{k}</dt>
                       <dd className="min-w-0 text-right font-semibold text-slate-800">
                         <span className="break-words">{v}</span>
-                        <button type="button" onClick={() => setStep(Number(s))} className="ml-1.5 text-[10px] font-semibold text-indigo-600 hover:underline">Edit</button>
+                        <button type="button" onClick={() => setStep(Number(s))} className="ml-2 text-[11.5px] font-semibold text-indigo-600 hover:underline">Edit</button>
                       </dd>
                     </div>
                   ))}
@@ -1143,12 +1257,12 @@ export const AutomationBuilderPage: React.FC = () => {
               )}
             </div>
 
-            <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-slate-50/80 p-3.5 sm:flex-row sm:items-center sm:justify-between">
-              <div className="text-xs">
-                <p className="font-bold text-slate-900">Sample preview</p>
+            <div className="flex flex-col gap-3 rounded-2xl border border-indigo-100 bg-gradient-to-br from-indigo-50/70 via-white to-cyan-50/40 p-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="text-[13px]">
+                <p className="text-[14px] font-bold text-slate-900">Sample preview</p>
                 <p className="text-slate-500">{manual ? "Checks your fixed values against the live table." : "Usually 20 seconds to 3 minutes on a local model."}</p>
               </div>
-              <button type="button" onClick={handlePreview} disabled={isPreviewing} className="inline-flex items-center justify-center gap-2 rounded-xl border border-indigo-200 bg-white px-4 py-2 text-xs font-bold text-indigo-700 shadow-2xs transition hover:bg-indigo-50 disabled:opacity-60">
+              <button type="button" onClick={handlePreview} disabled={isPreviewing} className="da-btn da-btn-accent">
                 {isPreviewing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Eye className="h-3.5 w-3.5" />}
                 {isPreviewing ? `Generating… ${previewSeconds}s` : preview ? "Generate another preview" : "Generate sample preview"}
               </button>
@@ -1162,7 +1276,7 @@ export const AutomationBuilderPage: React.FC = () => {
               </div>
             )}
             {previewError && (
-              <div role="alert" className="space-y-2 rounded-xl border border-rose-200 bg-rose-50 p-3.5 text-xs text-rose-800">
+              <div role="alert" className="space-y-2 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-[13px] text-rose-800">
                 <p className="font-bold">The preview could not be generated</p>
                 <p>{previewError.message}</p>
                 {previewError.events && previewError.events.length > 0 && (
@@ -1174,9 +1288,9 @@ export const AutomationBuilderPage: React.FC = () => {
               <ContentPreview payload={preview.payload} meta={preview.meta} targetTable={targetTable} timezone={schedule.timezone} publicationTime={preview.schedule?.next_run?.publication_at ?? null} />
             )}
 
-            <div className="flex flex-col-reverse gap-2 border-t border-slate-100 pt-5 sm:flex-row sm:justify-between">
-              <button type="button" onClick={() => goBack(4)} className="flex items-center justify-center gap-1.5 rounded-xl bg-slate-100 px-4 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-200"><ArrowLeft className="h-3.5 w-3.5" /> Back</button>
-              <button type="button" onClick={handleSubmit} disabled={isSubmitting} className="flex items-center justify-center gap-2 rounded-xl bg-indigo-600 px-6 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-60">
+            <div className="flex flex-col-reverse gap-2 border-t border-slate-100 pt-6 sm:flex-row sm:justify-between">
+              <button type="button" onClick={() => goBack(4)} className="da-btn da-btn-secondary"><ArrowLeft className="h-3.5 w-3.5" /> Back</button>
+              <button type="button" onClick={handleSubmit} disabled={isSubmitting} className="da-btn da-btn-primary px-6">
                 {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}
                 {isSubmitting ? "Saving…" : "Save and schedule"}
               </button>
@@ -1186,39 +1300,44 @@ export const AutomationBuilderPage: React.FC = () => {
       </AnimatePresence>
 
       {/* Document upload modal */}
-      <AnimatePresence>
-        {showDocUploadModal && (
-          <div className="fixed inset-0 z-50 flex items-end justify-center p-0 sm:items-center sm:p-4">
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setShowDocUploadModal(false)} className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs" />
-            <motion.div role="dialog" aria-modal="true" aria-labelledby="doc-upload-title" initial={{ y: 24, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 24, opacity: 0 }} className="relative z-10 w-full max-w-md space-y-4 rounded-t-2xl border border-slate-200 bg-white p-5 shadow-xl sm:rounded-2xl sm:p-6">
-              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-                <h3 id="doc-upload-title" className="flex items-center gap-2 text-sm font-bold text-slate-900"><Upload className="h-4 w-4 text-indigo-600" /> Add a knowledge document</h3>
-                <button onClick={() => setShowDocUploadModal(false)} aria-label="Close" className="p-1 text-slate-400 hover:text-slate-600"><X className="h-4 w-4" /></button>
-              </div>
-              <form onSubmit={handleUploadDocumentInline} className="space-y-4">
-                <div>
-                  <label htmlFor="doc-title" className="mb-1.5 block text-xs font-semibold text-slate-700">Title</label>
-                  <input id="doc-title" required value={newDocTitle} onChange={(e) => setNewDocTitle(e.target.value)} placeholder="e.g. Product handbook" className="w-full rounded-xl border border-slate-200 bg-slate-50/50 px-3.5 py-2.5 text-xs focus:border-indigo-600 focus:bg-white focus:ring-2 focus:ring-indigo-500/20" />
-                </div>
-                <div onClick={() => docFileInputRef.current?.click()} className="cursor-pointer rounded-xl border-2 border-dashed border-slate-200 bg-slate-50/40 p-4 text-center transition hover:border-indigo-300">
-                  <input ref={docFileInputRef} type="file" accept=".md,.txt,.pdf" className="hidden" onChange={(e) => {
-                    const f = e.target.files?.[0] || null;
-                    setNewDocFile(f);
-                    if (f && !newDocTitle) setNewDocTitle(f.name.replace(/\.[^/.]+$/, ""));
-                  }} />
-                  {newDocFile ? <span className="block truncate text-xs font-bold text-emerald-700">{newDocFile.name}</span> : <span className="text-xs text-slate-600"><Upload className="mx-auto mb-1 h-5 w-5 text-indigo-500" />Choose a .md, .txt or .pdf file</span>}
-                </div>
-                <div className="flex justify-end gap-2 border-t border-slate-100 pt-2">
-                  <button type="button" onClick={() => setShowDocUploadModal(false)} className="rounded-xl bg-slate-100 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-200">Cancel</button>
-                  <button type="submit" disabled={isUploadingDoc || !newDocFile} className="flex items-center gap-1.5 rounded-xl bg-indigo-600 px-5 py-2 text-xs font-bold text-white hover:bg-indigo-700 disabled:opacity-50">
-                    {isUploadingDoc ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}{isUploadingDoc ? "Indexing…" : "Upload and select"}
-                  </button>
-                </div>
-              </form>
-            </motion.div>
+      <ModalShell
+        open={showDocUploadModal}
+        onClose={() => { setShowDocUploadModal(false); setDocErrors({}); }}
+        size="sm"
+        icon={Upload}
+        title="Add a knowledge document"
+        description="Markdown, text or PDF. It is indexed and selected for this automation."
+      >
+        <form onSubmit={handleUploadDocumentInline} noValidate className="space-y-4">
+          <div>
+            <label htmlFor="doc-title" className="da-label">Title</label>
+            <input id="doc-title" value={newDocTitle} onChange={(e) => { setNewDocTitle(e.target.value); setDocErrors((x) => clearError(x, "title")); }} placeholder="e.g. Product handbook"
+              className={`da-input${invalid(docErrors.title)}`} {...ariaFor("doc-title", docErrors.title)} />
+            <FieldError id="doc-title" message={docErrors.title} />
+            {!docErrors.title && <p className="da-help">Optional. The file name is used when left empty.</p>}
           </div>
-        )}
-      </AnimatePresence>
+          <div>
+            <button id="doc-file" type="button" onClick={() => docFileInputRef.current?.click()} {...ariaFor("doc-file", docErrors.file)}
+              className={`block w-full cursor-pointer rounded-2xl border-2 border-dashed p-6 text-center transition ${docErrors.file ? "border-rose-300 bg-rose-50/40" : "border-slate-200 bg-slate-50/50 hover:border-indigo-300 hover:bg-indigo-50/30"}`}>
+              {newDocFile ? <span className="block truncate text-[13px] font-bold text-emerald-700">{newDocFile.name}</span> : <span className="text-[13px] text-slate-600"><Upload className="mx-auto mb-2 h-6 w-6 text-indigo-500" />Choose a .md, .txt or .pdf file (up to 10 MB)</span>}
+            </button>
+            <input ref={docFileInputRef} type="file" accept=".md,.markdown,.txt,.pdf" className="hidden" onChange={(e) => {
+              const f = e.target.files?.[0] || null;
+              setNewDocFile(f);
+              setDocErrors((x) => clearError(x, "file"));
+              if (f && !newDocTitle) setNewDocTitle(f.name.replace(/\.[^/.]+$/, ""));
+              e.target.value = "";
+            }} />
+            <FieldError id="doc-file" message={docErrors.file} />
+          </div>
+          <div className="flex justify-end gap-2 border-t border-slate-100 pt-4">
+            <button type="button" onClick={() => { setShowDocUploadModal(false); setDocErrors({}); }} className="da-btn da-btn-ghost">Cancel</button>
+            <button type="submit" disabled={isUploadingDoc} className="da-btn da-btn-primary">
+              {isUploadingDoc ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}{isUploadingDoc ? "Indexing…" : "Upload and select"}
+            </button>
+          </div>
+        </form>
+      </ModalShell>
     </motion.div>
   );
 };

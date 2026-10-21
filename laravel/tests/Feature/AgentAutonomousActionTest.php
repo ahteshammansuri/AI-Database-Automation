@@ -529,6 +529,33 @@ class AgentAutonomousActionTest extends TestCase
         $this->assertSame('full loop', AgentTask::where('conversation_id', $c->id)->first()->last_decision['speech_text']);
     }
 
+    public function test_opening_a_builder_step_is_accepted_and_slips_are_not_shown_as_failures()
+    {
+        // Real run: open_form(builder.setup) was refused with "argument 'surface' must be one of: connections.form",
+        // and that raw validation text was shown to the user in red.
+        $browser = $this->fakeBrowser([
+            ['ok', ['success' => true, 'message' => 'Automation builder, step 1 is open.']],
+            ['not_mounted', ['message' => 'Automation builder, step 3 is not available on this page.']],
+        ]);
+        $this->fakeModel(
+            $this->toolCall('open_form', ['surface' => 'builder.setup']),
+            $this->toolCall('fill_fields', ['surface' => 'builder.setup', 'values' => ['operation_mode' => 'x']]),
+            $this->toolCall('open_form', ['surface' => 'builder.content']),
+            $this->decision(['kind' => 'ASK_CLARIFICATION', 'speech_text' => 'What should the automation write about?']),
+        );
+        $c = $this->conversation();
+        $this->say($c, 'can you create one automation for me');
+
+        $this->assertSame(['surface.open_form', 'surface.open_form'], array_column($browser->requests, 0));
+        $task = AgentTask::where('conversation_id', $c->id)->first();
+        $events = $task->timelineEvents()->get();
+        $this->assertSame(0, $events->where('status', 'failed')->count(), 'nothing red for the user');
+        $this->assertSame(1, $events->where('status', 'adjusted')->count());
+        $this->assertSame(1, AgentToolCall::where('task_id', $task->id)->where('status', 'rejected')->where('error_category', 'INVALID_ARGS')->count(),
+            'the slip is still in the audit records');
+        $this->assertSame('INVALID_ARGS', $this->decideRequests()[2]['observations'][1]['result']['error_category'], 'the model still learns why');
+    }
+
     public function test_unconfirmed_and_read_only_presses_never_carry_the_confirmation_flag()
     {
         $browser = $this->fakeBrowser([]);
@@ -670,13 +697,34 @@ class AgentAutonomousActionTest extends TestCase
             'user_id' => $this->user1->id, 'conversation_id' => $c->id, 'task_type' => 'ORBIT_REQUEST', 'goal' => 'x',
             'status' => 'RUNNING', 'plan_version' => 1, 'current_turn_id' => 'turn-1',
         ]);
+        // A live worker holds the task lock; without it a RUNNING row is treated as stale and re-queued.
+        $lock = \Illuminate\Support\Facades\Cache::lock("orbit-agent-task:{$task->id}", 60);
+        $lock->get();
 
         $this->say($c, 'actually use the Reviews category instead')->assertStatus(202);
+        $lock->release();
 
         $task->refresh();
         $this->assertTrue($task->pending_user_turn);
         $this->assertSame(2, $task->plan_version);
         Queue::assertNothingPushed();
+    }
+
+    public function test_utterance_on_a_running_task_whose_worker_died_is_queued_again()
+    {
+        Queue::fake();
+        $c = $this->conversation();
+        $task = AgentTask::create([
+            'user_id' => $this->user1->id, 'conversation_id' => $c->id, 'task_type' => 'ORBIT_REQUEST', 'goal' => 'x',
+            'status' => 'RUNNING', 'plan_version' => 1, 'current_turn_id' => 'turn-1',
+        ]);
+
+        $this->say($c, 'are you still there?')->assertStatus(202);
+
+        $task->refresh();
+        $this->assertSame('QUEUED', $task->status);
+        $this->assertFalse($task->pending_user_turn);
+        Queue::assertPushed(\App\Jobs\RunAgentTurnJob::class, fn ($job) => $job->taskId === $task->id);
     }
 
     public function test_stop_button_cancels_waiting_task_and_requests_stop_for_running_task()

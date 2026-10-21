@@ -2,14 +2,17 @@ import React, { useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   AlertTriangle, CheckCircle2, ChevronDown, Circle, History, Keyboard, Loader2, Mic, MicOff, Pause, Play,
-  Shield, Sparkles, Square, Volume2, VolumeX, XCircle,
+  RotateCcw, Shield, Sparkles, Square, Volume2, VolumeX, XCircle,
 } from "lucide-react";
 import { OrbitMascotCharacter, CharacterState } from "./OrbitMascotCharacter";
 import { SecureCredentialCard } from "./SecureCredentialCard";
 import { useAssistant, ACTIVE_TASK_STATUSES } from "../../context/AssistantContext";
 import { collapseTimeline } from "../../services/orbitBehavior";
 import { usePressAndHold } from "../../hooks/usePressAndHold";
+import { dockClearance } from "../../hooks/useMascotTravel";
 import soundManager from "../../services/soundEffects";
+import { FieldError } from "../ui/kit";
+import { rules, validateField } from "../../lib/validation";
 
 export interface AgentOperationalHUDProps {
   isOpen: boolean;
@@ -79,6 +82,7 @@ const TimelineIcon: React.FC<{ status: string }> = ({ status }) => {
   if (status === "failed") return <XCircle className="w-3 h-3 text-rose-400 shrink-0" />;
   if (status === "running") return <Loader2 className="w-3 h-3 text-cyan-400 animate-spin shrink-0" />;
   if (status === "waiting") return <Circle className="w-3 h-3 text-amber-400 shrink-0" />;
+  if (status === "adjusted") return <RotateCcw className="w-3 h-3 text-sky-400 shrink-0" />;
   if (status === "cancelled" || status === "stopped") return <Square className="w-3 h-3 text-slate-400 shrink-0" />;
   return <Circle className="w-3 h-3 text-slate-500 shrink-0" />;
 };
@@ -95,6 +99,7 @@ export const AgentOperationalHUD: React.FC<AgentOperationalHUDProps> = ({
 
   const [showTyping, setShowTyping] = useState(!voiceSupported);
   const [typed, setTyped] = useState("");
+  const [typedError, setTypedError] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
   const [showStudio, setShowStudio] = useState(false);
   const [previewState, setPreviewState] = useState<CharacterState>("idle");
@@ -110,6 +115,14 @@ export const AgentOperationalHUD: React.FC<AgentOperationalHUDProps> = ({
   useEffect(() => {
     if (!voiceSupported) setShowTyping(true);
   }, [voiceSupported]);
+
+  // The panel sits above docked Orbit (never underneath it), so every control stays clickable.
+  const [clearance, setClearance] = useState(() => dockClearance());
+  useEffect(() => {
+    const onResize = () => setClearance(dockClearance());
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   const { isHolding, bind: micBind } = usePressAndHold({
     startOnDown: true,
@@ -146,7 +159,8 @@ export const AgentOperationalHUD: React.FC<AgentOperationalHUDProps> = ({
           animate={{ opacity: 1, y: 0, scale: 1 }}
           exit={{ opacity: 0, y: 16, scale: 0.96 }}
           transition={{ type: "spring", damping: 26, stiffness: 300 }}
-          className="fixed bottom-24 right-4 sm:right-6 z-50 w-[calc(100vw-2rem)] sm:w-[420px] max-h-[82vh] overflow-y-auto bg-slate-900/95 backdrop-blur-2xl border border-slate-800 rounded-3xl shadow-2xl text-slate-100 flex flex-col"
+          style={{ bottom: clearance, maxHeight: `calc(100vh - ${clearance + 72}px)` }}
+          className="fixed right-4 sm:right-6 z-50 w-[calc(100vw-2rem)] sm:w-[420px] overflow-y-auto bg-slate-900/95 backdrop-blur-2xl border border-slate-800 rounded-3xl shadow-2xl text-slate-100 flex flex-col"
         >
           {/* Header */}
           <header className="p-3.5 border-b border-slate-800/80 flex items-center justify-between bg-slate-950/60 rounded-t-3xl">
@@ -350,31 +364,40 @@ export const AgentOperationalHUD: React.FC<AgentOperationalHUDProps> = ({
               <button type="button" onClick={() => setShowTyping((s) => !s)} className="text-[11px] text-slate-400 hover:text-slate-200 flex items-center gap-1">
                 <Keyboard className="w-3.5 h-3.5" /> {showTyping ? "Hide typing" : "Type instead"}
               </button>
-              <button type="button" onClick={startNewConversation} className="text-[11px] text-slate-500 hover:text-slate-300">New conversation</button>
+              <button type="button" onClick={startNewConversation} className="text-[11px] text-slate-400 hover:text-cyan-200 px-1.5 py-0.5 -mr-1.5 rounded-md hover:bg-slate-800/70">New conversation</button>
             </div>
             {showTyping && (
               <form
+                noValidate
                 onSubmit={(e) => {
                   e.preventDefault();
-                  const t = typed.trim();
-                  if (t && !isLoading) {
-                    void sendMessage(t, false);
-                    setTyped("");
-                  }
+                  if (isLoading) return;
+                  const problem = validateField("message", { message: typed }, {
+                    message: [rules.required("Message", "Type a message for Orbit first."), rules.maxLength(4000, "Message")],
+                  });
+                  setTypedError(problem);
+                  if (problem) return;
+                  void sendMessage(typed.trim(), false);
+                  setTyped("");
                 }}
-                className="flex items-center gap-1.5"
               >
-                <input
-                  type="text"
-                  value={typed}
-                  onChange={(e) => setTyped(e.target.value)}
-                  placeholder="Type to Orbit (never type passwords here)"
-                  aria-label="Type a message to Orbit"
-                  disabled={isLoading}
-                  className="flex-1 min-w-0 bg-slate-950/80 border border-slate-700/80 rounded-xl px-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-500"
-                />
-                <button type="submit" disabled={!typed.trim() || isLoading}
-                  className="px-3 py-2 bg-slate-800 disabled:opacity-40 text-xs text-cyan-300 border border-cyan-500/30 rounded-xl">Send</button>
+                <div className="flex items-center gap-1.5">
+                  <input
+                    id="orbit-typed"
+                    type="text"
+                    value={typed}
+                    onChange={(e) => { setTyped(e.target.value); setTypedError(null); }}
+                    placeholder="Type to Orbit (never type passwords here)"
+                    aria-label="Type a message to Orbit"
+                    aria-invalid={!!typedError}
+                    aria-describedby={typedError ? "orbit-typed-error" : undefined}
+                    disabled={isLoading}
+                    className={`flex-1 min-w-0 bg-slate-950/80 border rounded-xl px-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none ${typedError ? "border-rose-400/80 focus:border-rose-400" : "border-slate-700/80 focus:border-cyan-500"}`}
+                  />
+                  <button type="submit" disabled={isLoading}
+                    className="px-3 py-2 bg-slate-800 disabled:opacity-40 text-xs text-cyan-300 border border-cyan-500/30 rounded-xl">Send</button>
+                </div>
+                <FieldError id="orbit-typed" message={typedError} tone="dark" />
               </form>
             )}
           </div>

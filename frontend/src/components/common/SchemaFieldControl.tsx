@@ -16,6 +16,10 @@ export interface SchemaFieldControlProps {
   referencedTable?: string | null;
   compact?: boolean;
   hideFieldAssist?: boolean;
+  /** Input id; pair with <FieldError id={id} /> so the message is announced with the input. */
+  id?: string;
+  /** Shows the error state (red border). */
+  invalid?: boolean;
 }
 
 export const isNumericType = (col: SchemaColumn | { data_type?: string }): boolean => {
@@ -104,8 +108,13 @@ export const SchemaFieldControl: React.FC<SchemaFieldControlProps> = ({
   referencedTable = null,
   compact = false,
   hideFieldAssist = false,
+  id,
+  invalid = false,
 }) => {
   const colName = column.name;
+  // Error styling and accessibility shared by every input variant below.
+  const inv = invalid ? " da-input-invalid" : "";
+  const a11y = id ? { id, "aria-invalid": invalid, "aria-describedby": invalid ? `${id}-error` : undefined } : {};
   const dataType = (column.data_type || "").toLowerCase();
 
   const isRel = isRelational || isRelationalColumn(column);
@@ -122,6 +131,8 @@ export const SchemaFieldControl: React.FC<SchemaFieldControlProps> = ({
     return (
       <div className="relative">
         <SearchableSelect
+          id={id}
+          invalid={invalid}
           value={value !== undefined ? value : ""}
           onChange={(val) => onChange(Number(val) || val)}
           placeholder={loadingRelational ? "Fetching records..." : "Select related record..."}
@@ -154,6 +165,8 @@ export const SchemaFieldControl: React.FC<SchemaFieldControlProps> = ({
   if (isEnum && column.enum_values) {
     return (
       <SearchableSelect
+        id={id}
+        invalid={invalid}
         value={value || column.enum_values[0] || ""}
         onChange={(val) => onChange(String(val))}
         placeholder="Select enum value..."
@@ -192,7 +205,8 @@ export const SchemaFieldControl: React.FC<SchemaFieldControlProps> = ({
             onChange={(e) => onChange(e.target.value)}
             placeholder="#4F46E5"
             maxLength={9}
-            className="flex-1 bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-mono font-semibold text-slate-900 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 transition"
+            {...a11y}
+            className={`da-input flex-1 py-2 font-mono font-semibold${inv}`}
           />
 
           {/* Color Preview Swatch Pill */}
@@ -286,16 +300,17 @@ export const SchemaFieldControl: React.FC<SchemaFieldControlProps> = ({
           <div className="relative flex-1">
             <input
               type="datetime-local"
-              required={!column.nullable}
+              aria-required={!column.nullable}
+              {...a11y}
               value={pickerValue}
               onChange={(e) => handleDateTimeChange(e.target.value)}
-              className="w-full bg-slate-50/50 border border-slate-200 rounded-xl px-3.5 py-2 text-xs text-slate-900 font-mono focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 focus:bg-white transition"
+              className={`da-input py-2 font-mono${inv}`}
             />
           </div>
           <button
             type="button"
             onClick={handleSetNow}
-            className="px-2.5 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl text-xs font-semibold transition shrink-0 flex items-center gap-1 shadow-2xs"
+            className="da-btn da-btn-sm shrink-0 border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100"
             title="Set to current date and time"
           >
             <Clock className="w-3.5 h-3.5" />
@@ -357,15 +372,16 @@ export const SchemaFieldControl: React.FC<SchemaFieldControlProps> = ({
         <div className="flex items-center gap-2">
           <input
             type="date"
-            required={!column.nullable}
+            aria-required={!column.nullable}
+            {...a11y}
             value={dateValue}
             onChange={(e) => handleDateChange(e.target.value)}
-            className="flex-1 bg-slate-50/50 border border-slate-200 rounded-xl px-3.5 py-2 text-xs text-slate-900 font-mono focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 focus:bg-white transition"
+            className={`da-input flex-1 py-2 font-mono${inv}`}
           />
           <button
             type="button"
             onClick={handleSetToday}
-            className="px-2.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold transition shrink-0 flex items-center gap-1"
+            className="da-btn da-btn-secondary da-btn-sm shrink-0"
           >
             <Calendar className="w-3.5 h-3.5" />
             <span>Today</span>
@@ -387,17 +403,19 @@ export const SchemaFieldControl: React.FC<SchemaFieldControlProps> = ({
         <input
           type="number"
           step={isFloat ? "0.01" : "1"}
-          required={!column.nullable}
+          aria-required={!column.nullable}
+          {...a11y}
           value={value !== undefined && value !== null ? value : ""}
           onChange={(e) => {
             const raw = e.target.value;
+            // Empty stays empty (so a required column says so) instead of silently becoming 0.
             if (raw === "") {
-              onChange(column.nullable ? null : 0);
+              onChange(column.nullable ? null : "");
             } else {
               onChange(isFloat ? parseFloat(raw) : parseInt(raw, 10));
             }
           }}
-          className="w-full bg-slate-50/50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs text-slate-900 font-mono focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 focus:bg-white transition"
+          className={`da-input font-mono${inv}`}
           placeholder="0"
         />
       </div>
@@ -412,10 +430,11 @@ export const SchemaFieldControl: React.FC<SchemaFieldControlProps> = ({
       <div className="flex items-center gap-2">
         <input
           type="text"
-          required={!column.nullable}
+          aria-required={!column.nullable}
+          {...a11y}
           value={value !== undefined && value !== null ? value : ""}
           onChange={(e) => onChange(e.target.value)}
-          className="flex-1 bg-slate-50/50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs text-slate-900 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 focus:bg-white transition"
+          className={`da-input flex-1${inv}`}
           placeholder={`Enter ${colName}...`}
         />
         {canAssist && (

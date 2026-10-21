@@ -1,22 +1,9 @@
 import React from "react";
-import { NavLink, useLocation } from "react-router-dom";
+import { Link, NavLink, useLocation } from "react-router-dom";
 import { motion } from "framer-motion";
+import { Database, ShieldCheck, X } from "lucide-react";
 import { orbitTargets } from "../../services/orbitTargets";
-import {
-  LayoutDashboard,
-  Database,
-  TableProperties,
-  Workflow,
-  PlusCircle,
-  FileEdit,
-  CheckCircle2,
-  BookOpen,
-  Cpu,
-  History,
-  ShieldCheck,
-  FileText,
-  X
-} from "lucide-react";
+import { NAV_GROUPS } from "./navConfig";
 
 interface SidebarProps {
   pendingApprovalsCount?: number;
@@ -25,141 +12,137 @@ interface SidebarProps {
   onClose?: () => void;
 }
 
+/** Dark "ink" navigation, the same surface as the landing page hero. Every link is an Orbit target. */
 export const Sidebar: React.FC<SidebarProps> = ({ pendingApprovalsCount = 0, mobileOpen = false, onClose }) => {
   const location = useLocation();
 
-  const links = [
-    { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-    { to: "/connections", label: "Connections", icon: Database },
-    { to: "/explorer", label: "Schema Explorer", icon: TableProperties },
-    { to: "/automations", label: "Automations", icon: Workflow },
-    { to: "/automations/new", label: "New Automation", icon: PlusCircle },
-    { to: "/manual-schedule", label: "Manual Publishing", icon: FileEdit },
-    {
-      to: "/approvals",
-      label: "Approvals",
-      icon: CheckCircle2,
-      badge: pendingApprovalsCount > 0 ? pendingApprovalsCount : undefined,
-    },
-    { to: "/knowledge", label: "Knowledge Base", icon: BookOpen },
-    { to: "/ai-providers", label: "AI Providers", icon: Cpu },
-    { to: "/executions", label: "Execution History", icon: History },
-    { to: "/audit-logs", label: "Audit Logs", icon: FileText },
-    { to: "/security", label: "Security & Guardrails", icon: ShieldCheck },
-  ];
-
   return (
     <>
-    {/* Mobile overlay */}
-    <div
-      aria-hidden="true"
-      onClick={onClose}
-      className={`fixed inset-0 z-30 bg-slate-900/40 backdrop-blur-[1px] transition-opacity lg:hidden ${
-        mobileOpen ? "opacity-100" : "pointer-events-none opacity-0"
-      }`}
-    />
-    <aside
-      id="portal-sidebar"
-      className={`fixed inset-y-0 left-0 z-40 w-72 max-w-[85vw] bg-white border-r border-slate-200/90 flex flex-col shrink-0 shadow-xl transition-transform duration-200 ease-out
-        lg:static lg:z-20 lg:w-64 lg:max-w-none lg:translate-x-0 lg:shadow-xs ${mobileOpen ? "translate-x-0" : "-translate-x-full"}`}
-    >
-      {/* Brand Header */}
-      <div className="p-5 border-b border-slate-100 flex items-center gap-3">
-        <motion.div
-          whileHover={{ rotate: 5, scale: 1.05 }}
-          transition={{ type: "spring", stiffness: 400, damping: 15 }}
-          className="w-9 h-9 rounded-xl bg-gradient-to-tr from-indigo-600 to-indigo-500 flex items-center justify-center text-white shadow-sm"
-        >
-          <Database className="w-5 h-5" />
-        </motion.div>
-        <div>
-          <h1 className="font-bold text-slate-900 text-sm tracking-tight flex items-center gap-1.5">
-            <span>DataAuto</span>
-            <span className="text-[10px] px-1.5 py-0.2 rounded bg-indigo-50 text-indigo-700 font-bold uppercase tracking-wider">
-              PRO
+      {/* Mobile overlay */}
+      <div
+        aria-hidden="true"
+        onClick={onClose}
+        className={`fixed inset-0 z-30 bg-slate-950/50 backdrop-blur-[2px] transition-opacity lg:hidden ${
+          mobileOpen ? "opacity-100" : "pointer-events-none opacity-0"
+        }`}
+      />
+      <aside
+        id="portal-sidebar"
+        className={`fixed inset-y-0 left-0 z-40 flex w-72 max-w-[85vw] shrink-0 flex-col overflow-hidden bg-ink text-slate-300 shadow-2xl transition-transform duration-300 ease-out
+          lg:static lg:z-20 lg:w-[264px] lg:max-w-none lg:translate-x-0 lg:shadow-none ${mobileOpen ? "translate-x-0" : "-translate-x-full"}`}
+      >
+        {/* Aurora + grid, as on the landing page */}
+        <div aria-hidden className="pointer-events-none absolute inset-0">
+          <div className="landing-blob absolute -top-24 -left-24 h-72 w-72 rounded-full bg-indigo-600/30" />
+          <div className="landing-blob absolute bottom-10 -right-28 h-72 w-72 rounded-full bg-violet-600/20" style={{ animationDelay: "-8s" }} />
+          <div className="absolute inset-0 landing-grid opacity-60" />
+        </div>
+
+        {/* Brand */}
+        <div className="relative flex items-center gap-3 px-5 pt-5 pb-4">
+          <Link to="/dashboard" className="group flex items-center gap-2.5" aria-label="DataAuto dashboard">
+            <span className="grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-400 shadow-[0_8px_24px_-8px_rgba(99,102,241,0.8)] transition-transform duration-500 group-hover:rotate-[8deg] group-hover:scale-105">
+              <Database className="h-[18px] w-[18px] text-white" />
             </span>
-          </h1>
-          <p className="text-[11px] text-slate-400 font-medium">Database Automation</p>
+            <span>
+              <span className="block text-[16px] font-bold tracking-tight text-white">DataAuto</span>
+              <span className="block text-[11px] font-medium text-slate-500">Database automation</span>
+            </span>
+          </Link>
+          <button
+            type="button"
+            onClick={onClose}
+            className="ml-auto -mr-2 rounded-lg p-2 text-slate-400 hover:bg-white/10 hover:text-white lg:hidden"
+            aria-label="Close menu"
+          >
+            <X className="h-5 w-5" />
+          </button>
         </div>
-        <button
-          type="button"
-          onClick={onClose}
-          className="ml-auto p-2 -mr-2 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 lg:hidden"
-          aria-label="Close menu"
-        >
-          <X className="w-5 h-5" />
-        </button>
-      </div>
 
-      {/* Nav Links */}
-      <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
-        {links.map((link) => {
-          const Icon = link.icon;
-          const isActive = location.pathname === link.to;
+        {/* Navigation */}
+        <nav className="relative flex-1 space-y-5 overflow-y-auto px-3 pb-4 pt-2">
+          {NAV_GROUPS.map((group) => (
+            <div key={group.label}>
+              <div className="px-3 pb-1.5 text-[10.5px] font-semibold uppercase tracking-[0.16em] text-slate-500">{group.label}</div>
+              <div className="space-y-0.5">
+                {group.items.map((link) => {
+                  const Icon = link.icon;
+                  const isActive = location.pathname === link.to;
+                  const badge = link.badgeKey === "approvals" && pendingApprovalsCount > 0 ? pendingApprovalsCount : undefined;
+                  return (
+                    <NavLink
+                      key={link.to}
+                      to={link.to}
+                      end={link.to === "/dashboard"}
+                      className="relative block rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50"
+                      ref={(el: HTMLAnchorElement | null) =>
+                        el ? orbitTargets.register(`nav:${link.to}`, el) : orbitTargets.unregister(`nav:${link.to}`)
+                      }
+                    >
+                      {isActive && (
+                        <motion.span
+                          layoutId="activeSidebarIndicator"
+                          className="absolute inset-0 rounded-xl border border-white/10 bg-white/[0.07] shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]"
+                          transition={{ type: "spring", stiffness: 380, damping: 32 }}
+                        >
+                          <span className="absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-r-full bg-gradient-to-b from-indigo-400 via-violet-400 to-cyan-300" />
+                        </motion.span>
+                      )}
+                      <span
+                        className={`group relative flex items-center justify-between rounded-xl px-3 py-2.5 lg:py-2 text-[14px] lg:text-[13.5px] font-medium transition-colors ${
+                          isActive ? "text-white" : "text-slate-400 hover:bg-white/[0.04] hover:text-slate-100"
+                        }`}
+                      >
+                        <span className="flex items-center gap-3">
+                          <Icon
+                            className={`h-[17px] w-[17px] shrink-0 transition-colors ${
+                              isActive ? "text-cyan-300" : "text-slate-500 group-hover:text-slate-300"
+                            }`}
+                          />
+                          <span>{link.label}</span>
+                        </span>
+                        {badge !== undefined && (
+                          <motion.span
+                            initial={{ scale: 0.8 }}
+                            animate={{ scale: 1 }}
+                            className="rounded-full bg-amber-400 px-2 py-px text-[10.5px] font-bold text-slate-950 shadow-[0_0_14px_rgba(251,191,36,0.55)]"
+                          >
+                            {badge}
+                          </motion.span>
+                        )}
+                      </span>
+                    </NavLink>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </nav>
 
-          return (
-            <NavLink
-              key={link.to}
-              to={link.to}
-              end={link.to === "/dashboard"}
-              className="relative block"
-              ref={(el: HTMLAnchorElement | null) =>
-                el ? orbitTargets.register(`nav:${link.to}`, el) : orbitTargets.unregister(`nav:${link.to}`)
-              }
-            >
-              {isActive && (
-                <motion.div
-                  layoutId="activeSidebarIndicator"
-                  className="absolute inset-0 bg-indigo-50/90 rounded-lg border border-indigo-200/60 shadow-xs"
-                  transition={{ type: "spring", stiffness: 350, damping: 30 }}
-                />
-              )}
-
-              <motion.div
-                whileHover={{ x: 2 }}
-                transition={{ duration: 0.15 }}
-                className={`relative flex items-center justify-between px-3 py-2.5 lg:py-2 rounded-lg text-sm lg:text-xs font-medium transition-colors ${
-                  isActive
-                    ? "text-indigo-700 font-bold"
-                    : "text-slate-600 hover:text-slate-900 hover:bg-slate-50"
-                }`}
-              >
-                <div className="flex items-center gap-2.5">
-                  <Icon
-                    className={`w-4 h-4 shrink-0 transition-colors ${
-                      isActive ? "text-indigo-600" : "text-slate-400"
-                    }`}
-                  />
-                  <span>{link.label}</span>
+        {/* Guardrails status */}
+        <div className="relative p-3">
+          <Link
+            to="/security"
+            className="group block rounded-2xl border border-white/10 bg-white/[0.04] p-3.5 transition-colors hover:border-white/20 hover:bg-white/[0.07]"
+          >
+            <div className="flex items-center gap-2.5">
+              <span className="grid h-8 w-8 place-items-center rounded-xl bg-emerald-500/15 text-emerald-300">
+                <ShieldCheck className="h-4 w-4" />
+              </span>
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5 text-[12.5px] font-semibold text-white">
+                  <span className="relative flex h-1.5 w-1.5">
+                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-70" />
+                    <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                  </span>
+                  Guardrails on
                 </div>
-
-                {link.badge !== undefined && (
-                  <motion.span
-                    initial={{ scale: 0.8 }}
-                    animate={{ scale: 1 }}
-                    className="bg-amber-100 text-amber-800 border border-amber-300/80 text-[10px] font-bold px-2 py-0.2 rounded-full shadow-2xs"
-                  >
-                    {link.badge}
-                  </motion.span>
-                )}
-              </motion.div>
-            </NavLink>
-          );
-        })}
-      </nav>
-
-      {/* Safe Execution Footer */}
-      <div className="p-4 border-t border-slate-100 bg-slate-50/70 text-xs">
-        <div className="flex items-center gap-2 mb-1">
-          <span className="relative flex h-2 w-2">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-            <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
-          </span>
-          <span className="text-slate-800 font-bold text-[11px]">Safe Execution Engine</span>
+                <div className="truncate text-[11px] text-slate-500 group-hover:text-slate-400">Enforced by the server, not the model</div>
+              </div>
+            </div>
+          </Link>
         </div>
-        <p className="text-[10px] text-slate-500">Parameterized MySQL Writes Only</p>
-      </div>
-    </aside>
+      </aside>
     </>
   );
 };

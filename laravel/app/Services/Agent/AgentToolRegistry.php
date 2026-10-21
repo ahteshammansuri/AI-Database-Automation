@@ -35,7 +35,6 @@ class AgentToolRegistry
     {
         $routes = SurfaceCatalog::routes();
         $surfaces = SurfaceCatalog::surfaceIds();
-        $openable = SurfaceCatalog::surfaceIds(fn ($s) => !empty($s['openable']));
         $ui = fn (string $name, string $label, string $description, array $properties, array $required = []) => [
             'name' => $name, 'label' => $label, 'description' => $description, 'outcome' => 'Visible action in the portal, acknowledged by the browser.',
             'scope' => 'tenant_user', 'read_only' => $name === 'read_screen', 'side_effects' => 'Operates the portal UI on screen.',
@@ -47,8 +46,8 @@ class AgentToolRegistry
         return [
             $ui('go_to_page', 'Go to a page', 'Visibly navigate the portal to a page (Orbit taps the sidebar item). Returns which surfaces are now on screen.',
                 ['page' => ['type' => 'string', 'enum' => $routes]], ['page']),
-            $ui('open_form', 'Open a form', 'Navigate if needed and open a form (Orbit taps its opener, e.g. "Connect Database"). Returns its fields, current values and which required fields are still missing.',
-                ['surface' => ['type' => 'string', 'enum' => $openable]], ['surface']),
+            $ui('open_form', 'Open a form', 'Bring a form or section on screen: navigates if needed and, for pop-up forms, taps its opener (e.g. "Connect Database"). Returns its fields, current values and which required fields are still missing.',
+                ['surface' => ['type' => 'string', 'enum' => $surfaces]], ['surface']),
             $ui('read_screen', 'Read the screen', 'Read what is on screen now: surfaces with their non-secret field values, errors, list rows (with their ids) and available actions.', []),
             $ui('fill_fields', 'Fill form fields', 'Type values into fields of an on-screen surface (Orbit types them visibly). values is an object of field name to value. Never for secret or file fields. Returns per-field acceptance or validation errors and fields still missing.',
                 ['surface' => ['type' => 'string', 'enum' => $surfaces], 'values' => ['type' => 'object'], 'row' => ['type' => 'string']], ['surface', 'values']),

@@ -5,6 +5,8 @@ import { DatePicker } from "../ui/DatePicker";
 import { TimePicker } from "../ui/TimePicker";
 import { TimezoneSelect } from "../ui/TimezoneSelect";
 import { CalendarMonth, DayMarker } from "../ui/CalendarMonth";
+import { FieldError } from "../ui/kit";
+import { ariaFor, invalid } from "../../lib/validation";
 import {
   MIN_GAP_MINUTES, WEEKDAYS, addDays, addMinutesHHMM, daysBetween, formatDateShort, formatGap, formatInstant,
   formatTime12, gapMinutes, isoWeekday, monthMatrix, publishesNextDay, relativeFromNow, runDates, todayIn,
@@ -38,7 +40,14 @@ interface Props {
   excludeAutomationId?: number;
   /** Reports whether the server accepted the schedule (used to enable Next). */
   onValidity?: (valid: boolean, errors: Record<string, string>) => void;
+  /** Messages from the parent (checks on Next/Save, or the server's 422), shown under the matching field. */
+  fieldErrors?: Record<string, string>;
+  /** The parent clears its message for a field once the user changes it. */
+  onFieldEdited?: (field: string) => void;
 }
+
+/** Fields that show their own message; anything else is listed in the summary box. */
+const INLINE_FIELDS = ["timezone", "start_date", "end_date", "weekly_days", "generation_time", "publication_time", "reviewer_email"];
 
 const POLICIES = [
   { value: "KEEP_DRAFT" as const, title: "Keep it as a draft", text: "Nothing is published and the run stops. The draft stays in the run history." },
@@ -49,11 +58,14 @@ const POLICIES = [
 const END_PRESETS = [3, 7, 14, 30];
 
 export const ScheduleStep: React.FC<Props> = ({
-  schedule, onScheduleChange, approval, onApprovalChange, userEmail, targetTable, excludeAutomationId, onValidity,
+  schedule, onScheduleChange, approval, onApprovalChange, userEmail, targetTable, excludeAutomationId, onValidity, fieldErrors, onFieldEdited,
 }) => {
   const s = schedule;
   const today = todayIn(s.timezone);
-  const set = (patch: Partial<ScheduleConfig>) => onScheduleChange({ ...s, ...patch });
+  const set = (patch: Partial<ScheduleConfig>) => {
+    Object.keys(patch).forEach((k) => onFieldEdited?.(k));
+    onScheduleChange({ ...s, ...patch });
+  };
 
   const gap = gapMinutes(s.generation_time, s.publication_time);
   const gapError = gap === null ? "Choose both times." : gap === 0 ? "Publication must be after generation." : gap < MIN_GAP_MINUTES ? `Publication must be at least ${MIN_GAP_MINUTES} minutes after generation (now ${gap} min).` : null;
@@ -148,14 +160,16 @@ export const ScheduleStep: React.FC<Props> = ({
   };
 
   const summary = server?.summary;
-  const errors = server?.errors ?? {};
+  const errors: Record<string, string> = { ...(server?.errors ?? {}), ...(fieldErrors ?? {}) };
+  const otherErrors = Object.entries(errors).filter(([k]) => !INLINE_FIELDS.includes(k)).map(([, v]) => v);
+  const publicationError = gapError ?? errors.publication_time ?? null;
   const endPreset = s.end_date ? daysBetween(s.start_date, s.end_date) + 1 : null;
 
   return (
     <div className="space-y-5">
       {/* Frequency */}
       <div>
-        <label className="mb-1.5 block text-xs font-semibold text-slate-700">How often should it run?</label>
+        <label className="da-label">How often should it run?</label>
         <div className="grid grid-cols-3 gap-2" role="radiogroup" aria-label="Frequency">
           {[
             { v: "ONE_TIME" as const, l: "One time", d: "Runs once, then stops", icon: Send },
@@ -185,12 +199,13 @@ export const ScheduleStep: React.FC<Props> = ({
       {/* Dates + timezone */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <div className="sm:col-span-2 lg:col-span-1">
-          <label className="mb-1.5 block text-xs font-semibold text-slate-700">Timezone</label>
+          <label className="da-label">Timezone</label>
           <TimezoneSelect value={s.timezone} onChange={(tz) => set({ timezone: tz })} />
-          <p className="mt-1 text-[11px] text-slate-400">All dates and times below are in this timezone.</p>
+          <FieldError id="schedule-timezone" message={errors.timezone} />
+          {!errors.timezone && <p className="mt-1 text-[11px] text-slate-400">All dates and times below are in this timezone.</p>}
         </div>
         <div>
-          <label className="mb-1.5 block text-xs font-semibold text-slate-700">{s.frequency === "ONE_TIME" ? "Run date" : "Start date"}</label>
+          <label className="da-label">{s.frequency === "ONE_TIME" ? "Run date" : "Start date"}</label>
           <DatePicker
             value={s.start_date}
             onChange={(d) => d && set({ start_date: d, end_date: s.end_date && s.end_date < d ? d : s.end_date })}
@@ -201,11 +216,11 @@ export const ScheduleStep: React.FC<Props> = ({
             invalid={!!errors.start_date}
             ariaLabel={s.frequency === "ONE_TIME" ? "Run date" : "Start date"}
           />
-          {errors.start_date && <p className="mt-1 text-[11px] text-rose-600">{errors.start_date}</p>}
+          <FieldError id="schedule-start" message={errors.start_date} />
         </div>
         {s.frequency !== "ONE_TIME" && (
           <div>
-            <label className="mb-1.5 block text-xs font-semibold text-slate-700">Run until</label>
+            <label className="da-label">Run until</label>
             <DatePicker
               value={s.end_date}
               onChange={(d) => set({ end_date: d })}
@@ -239,14 +254,14 @@ export const ScheduleStep: React.FC<Props> = ({
                 No end
               </button>
             </div>
-            {errors.end_date && <p className="mt-1 text-[11px] text-rose-600">{errors.end_date}</p>}
+            <FieldError id="schedule-end" message={errors.end_date} />
           </div>
         )}
       </div>
 
       {s.frequency === "WEEKLY" && (
         <div>
-          <label className="mb-1.5 block text-xs font-semibold text-slate-700">On these days</label>
+          <label className="da-label">On these days</label>
           <div className="flex flex-wrap gap-1.5" role="group" aria-label="Weekdays">
             {WEEKDAYS.map((w) => {
               const on = s.weekly_days.includes(w.iso);
@@ -266,34 +281,39 @@ export const ScheduleStep: React.FC<Props> = ({
               );
             })}
           </div>
+          <FieldError id="schedule-weekdays" message={errors.weekly_days} />
         </div>
       )}
 
       {/* Times */}
       <div className="grid gap-4 sm:grid-cols-2">
         <div>
-          <label className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-slate-700">
+          <label className="da-label flex items-center gap-1.5">
             <Sparkles className="h-3.5 w-3.5 text-indigo-600" /> Content is generated at
           </label>
-          <TimePicker value={s.generation_time} onChange={setGeneration} ariaLabel="Generation time" />
-          <p className="mt-1 text-[11px] text-slate-400">Runs in the background; your browser can be closed.</p>
+          <TimePicker value={s.generation_time} onChange={setGeneration} invalid={!!errors.generation_time} ariaLabel="Generation time" />
+          <FieldError id="schedule-generation" message={errors.generation_time} />
+          {!errors.generation_time && <p className="mt-1 text-[11px] text-slate-400">Runs in the background; your browser can be closed.</p>}
         </div>
         <div>
-          <label className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-slate-700">
+          <label className="da-label flex items-center gap-1.5">
             <Send className="h-3.5 w-3.5 text-emerald-600" /> Published to the database at
           </label>
           <TimePicker
             value={s.publication_time}
             onChange={(t) => set({ publication_time: t })}
-            invalid={!!gapError}
+            invalid={!!publicationError}
             ariaLabel="Publication time"
             quickOptions={[15, 30, 60, 120].map((m) => ({ label: `+${formatGap(m)}`, value: addMinutesHHMM(s.generation_time, m) }))}
             hint={`Must be at least ${MIN_GAP_MINUTES} minutes after generation.`}
           />
-          <p className={`mt-1 flex items-center gap-1 text-[11px] ${gapError ? "text-rose-600" : "text-slate-500"}`}>
-            <Timer className="h-3 w-3" />
-            {gapError ?? `${formatGap(gap)} after generation${publishesNextDay(s.generation_time, s.publication_time) ? " (the next day)" : ""}${approval.require_approval ? ", which is the time your reviewer has to decide" : ""}.`}
-          </p>
+          <FieldError id="schedule-publication" message={publicationError} />
+          {!publicationError && (
+            <p className="mt-1 flex items-center gap-1 text-[11px] text-slate-500">
+              <Timer className="h-3 w-3" />
+              {`${formatGap(gap)} after generation${publishesNextDay(s.generation_time, s.publication_time) ? " (the next day)" : ""}${approval.require_approval ? ", which is the time your reviewer has to decide" : ""}.`}
+            </p>
+          )}
         </div>
       </div>
 
@@ -350,7 +370,7 @@ export const ScheduleStep: React.FC<Props> = ({
       </div>
 
       {/* Approval */}
-      <div className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50/70 p-3 sm:p-4">
+      <div className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50/60 p-4 sm:p-5">
         <div className="flex items-start justify-between gap-3">
           <div>
             <span className="flex items-center gap-1.5 text-xs font-bold text-slate-900"><ShieldCheck className="h-4 w-4 text-indigo-600" /> Email me to approve before publishing</span>
@@ -374,18 +394,21 @@ export const ScheduleStep: React.FC<Props> = ({
         {approval.require_approval && (
           <div className="grid gap-3 border-t border-slate-200 pt-3 md:grid-cols-2">
             <div>
-              <label className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-slate-700"><Mail className="h-3.5 w-3.5" /> Send the review email to</label>
+              <label className="da-label flex items-center gap-1.5" htmlFor="reviewer-email"><Mail className="h-3.5 w-3.5" /> Send the review email to</label>
               <input
+                id="reviewer-email"
                 type="email"
                 value={approval.reviewer_email}
                 placeholder={userEmail || "editor@example.com"}
-                onChange={(e) => onApprovalChange({ ...approval, reviewer_email: e.target.value })}
-                className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs text-slate-900 focus:border-indigo-600 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+                onChange={(e) => { onFieldEdited?.("reviewer_email"); onApprovalChange({ ...approval, reviewer_email: e.target.value }); }}
+                className={`da-input${invalid(errors.reviewer_email)}`}
+                {...ariaFor("reviewer-email", errors.reviewer_email)}
               />
-              <p className="mt-1 text-[11px] text-slate-400">Leave empty to use {userEmail || "your account email"}.</p>
+              <FieldError id="reviewer-email" message={errors.reviewer_email} />
+              {!errors.reviewer_email && <p className="mt-1 text-[11px] text-slate-400">Leave empty to use {userEmail || "your account email"}.</p>}
             </div>
             <div>
-              <span className="mb-1.5 block text-xs font-semibold text-slate-700">If nobody decides by the publication time</span>
+              <span className="da-label">If nobody decides by the publication time</span>
               <div className="space-y-1.5" role="radiogroup" aria-label="No-response policy">
                 {POLICIES.map((p) => (
                   <label key={p.value} className={`flex cursor-pointer items-start gap-2 rounded-xl border px-3 py-2 transition ${approval.timeout_policy === p.value ? "border-indigo-300 bg-white" : "border-transparent hover:bg-white"}`}>
@@ -416,7 +439,9 @@ export const ScheduleStep: React.FC<Props> = ({
         </div>
         {server && !server.valid ? (
           <ul className="space-y-1 text-xs text-rose-800">
-            {Object.values(errors).map((e) => <li key={String(e)} className="flex items-start gap-1.5"><AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />{String(e)}</li>)}
+            {otherErrors.length
+              ? otherErrors.map((e) => <li key={String(e)} className="flex items-start gap-1.5"><AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />{String(e)}</li>)
+              : <li className="flex items-start gap-1.5"><AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />Fix the fields marked in red above to see the schedule.</li>}
           </ul>
         ) : summary ? (
           <div className="space-y-3 text-xs text-slate-700">

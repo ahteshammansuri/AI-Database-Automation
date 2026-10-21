@@ -78,7 +78,7 @@ class AgentExecutionService
             $updates['page_context'] = self::stripPageSecrets($pageContext);
         }
 
-        $isActivelyRunning = $task->status === 'RUNNING' && \Illuminate\Support\Facades\Cache::has("orbit-agent-task:{$task->id}");
+        $isActivelyRunning = $task->status === 'RUNNING' && $this->workerHoldsTask($task);
 
         if ($isActivelyRunning) {
             // The running loop applies this at its next safe checkpoint (stale steps are not dispatched).
@@ -99,6 +99,21 @@ class AgentExecutionService
         }
 
         return $this->snapshot($conversation, $task, $message);
+    }
+
+    /**
+     * Whether a worker is mid-turn on this task (it holds the task lock taken in AgentOrchestrator::runTurn).
+     * Probes the lock itself rather than Cache::has(): array/database/dynamodb stores keep locks apart from
+     * cache keys. A RUNNING row with no holder is stale (its worker died) and is re-queued instead.
+     */
+    protected function workerHoldsTask(AgentTask $task): bool
+    {
+        $probe = \Illuminate\Support\Facades\Cache::lock("orbit-agent-task:{$task->id}", 1);
+        if ($probe->get()) {
+            $probe->release();
+            return false;
+        }
+        return true;
     }
 
     /**

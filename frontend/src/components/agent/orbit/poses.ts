@@ -7,7 +7,7 @@
  * gestures always point at the real target.
  */
 
-export type EyeShape = "open" | "happy" | "closed" | "wide" | "focused" | "sad" | "squint";
+export type EyeShape = "open" | "happy" | "closed" | "wide" | "focused" | "sad" | "squint" | "wink";
 export type MouthShape = "smile" | "grin" | "open" | "o" | "flat" | "frown" | "wavy" | "talk";
 export type HandShape = "mitten" | "point" | "open" | "fist";
 export type Motion =
@@ -34,6 +34,9 @@ export interface PoseNumbers {
   capeFlutter: number; // 0..1
   floatAmp: number;
   thruster: number; // 0..1
+  browY: number; // eyebrow height offset (negative = raised)
+  browTilt: number; // degrees; positive = inner ends up (worried), negative = determined
+  browAsym: number; // one brow raised (curious, questioning)
 }
 
 export interface OrbitPose extends PoseNumbers {
@@ -68,8 +71,8 @@ export const COLORS = {
 
 const BASE: OrbitPose = {
   bodyY: 0, bodyRot: 0, headRot: 0, headY: 0, lookX: 0, lookY: 0, lid: 0, eyeScale: 1, mouthOpen: 0,
-  lShoulder: 10, lElbow: 8, rShoulder: -10, rElbow: -8,
-  feetTuck: 0, antennaRot: 0, glow: 0.6, capeFlutter: 0.25, floatAmp: 3, thruster: 0.5,
+  lShoulder: 30, lElbow: 6, rShoulder: -30, rElbow: -6,
+  feetTuck: 0, antennaRot: 0, glow: 0.6, capeFlutter: 0.25, floatAmp: 3, thruster: 0.5, browY: 0, browTilt: 0, browAsym: 0,
   eyes: "open", mouth: "smile", lHand: "mitten", rHand: "mitten", core: COLORS.cyan,
   motions: ["float", "breathe"], extras: [], blush: false,
 };
@@ -80,58 +83,58 @@ const P = (o: Partial<OrbitPose>): OrbitPose => ({ ...BASE, ...o });
 export const POSES: Record<string, OrbitPose> = {
   // Idle and awareness
   idle: P({}),
-  curious: P({ headRot: 10, lookX: 0.4, mouth: "o", motions: ["float", "breathe", "tilt"] }),
-  greeting: P({ rShoulder: -155, rElbow: -15, rHand: "open", eyes: "happy", mouth: "grin", blush: true, motions: ["float", "wave"] }),
-  resting: P({ bodyY: 8, lid: 0.6, mouth: "flat", lShoulder: 4, rShoulder: -4, floatAmp: 1, thruster: 0.2, glow: 0.3, extras: ["zz"] }),
+  curious: P({ headRot: 10, lookX: 0.4, mouth: "o", browAsym: 2.5, motions: ["float", "breathe", "tilt"] }),
+  greeting: P({ rShoulder: -155, rElbow: -15, rHand: "open", eyes: "happy", mouth: "grin", blush: true, browY: -2, motions: ["float", "wave"] }),
+  resting: P({ bodyY: 8, lid: 0.6, mouth: "flat", browY: 1, lShoulder: 4, rShoulder: -4, floatAmp: 1, thruster: 0.2, glow: 0.3, extras: ["zz"] }),
 
   // Voice
-  waking: P({ eyes: "wide", headRot: -4, glow: 0.9, mouth: "o" }),
-  listening: P({ bodyRot: -3, headRot: -6, lookY: 0.1, eyes: "wide", mouth: "smile", glow: 1, antennaRot: -6,
+  waking: P({ eyes: "wide", headRot: -4, glow: 0.9, mouth: "o", browY: -3 }),
+  listening: P({ bodyRot: -3, headRot: -6, lookY: 0.1, eyes: "wide", mouth: "smile", glow: 1, antennaRot: -6, browY: -2.5,
     lShoulder: 16, rShoulder: -16, motions: ["float", "breathe"] }),
-  transcribing: P({ eyes: "focused", lookY: -0.2, headRot: -4, glow: 0.9, mouth: "flat", motions: ["float", "scan"] }),
-  understanding: P({ eyes: "focused", lookY: -0.3, headRot: 6, mouth: "o", motions: ["float", "nod"] }),
+  transcribing: P({ eyes: "focused", lookY: -0.2, headRot: -4, glow: 0.9, mouth: "flat", browY: 0.5, motions: ["float", "scan"] }),
+  understanding: P({ eyes: "focused", lookY: -0.3, headRot: 6, mouth: "o", browAsym: 2, motions: ["float", "nod"] }),
   thinking: P({ eyes: "focused", lookX: 0.5, lookY: -0.6, headRot: 8, rShoulder: 30, rElbow: 120, rHand: "fist",
-    mouth: "flat", core: COLORS.violet, glow: 0.9, extras: ["thinking_dots"], motions: ["float", "breathe"] }),
-  speaking: P({ mouth: "talk", eyes: "open", rShoulder: -28, rElbow: -30, rHand: "open", motions: ["float", "talk"] }),
-  interrupted: P({ eyes: "wide", mouth: "flat", headRot: 0, rShoulder: -120, rElbow: 15, rHand: "open",
+    mouth: "flat", core: COLORS.violet, glow: 0.9, browAsym: 3, extras: ["thinking_dots"], motions: ["float", "breathe"] }),
+  speaking: P({ mouth: "talk", eyes: "open", browY: -0.5, rShoulder: -28, rElbow: -30, rHand: "open", motions: ["float", "talk"] }),
+  interrupted: P({ eyes: "wide", mouth: "flat", headRot: 0, browY: -2.5, rShoulder: -120, rElbow: 15, rHand: "open",
     core: COLORS.amber, extras: ["stop_glow"], motions: ["float"] }),
 
   // Work planning and website interaction
   planning: P({ eyes: "focused", lookY: 0.5, lShoulder: -30, lElbow: -45, rShoulder: 30, rElbow: 45,
-    mouth: "flat", extras: ["tablet"], motions: ["float", "breathe"] }),
+    mouth: "smile", browY: 1, extras: ["tablet"], motions: ["float", "breathe"] }),
   moving: P({ bodyRot: 14, headRot: -6, feetTuck: 1, thruster: 1, capeFlutter: 1, lShoulder: 35, rShoulder: -55,
-    rElbow: -10, eyes: "focused", lookX: 0.8, mouth: "smile", extras: ["trail"], motions: ["fly"] }),
+    rElbow: -10, eyes: "open", lookX: 0.8, mouth: "smile", browTilt: -4, extras: ["trail"], motions: ["fly"] }),
   arriving: P({ bodyRot: -4, feetTuck: 0.4, thruster: 0.8, capeFlutter: 0.6, eyes: "open", lookX: 0.6 }),
-  pointing: P({ rShoulder: -95, rElbow: -5, rHand: "point", lookX: 0.9, eyes: "open", mouth: "smile", bodyRot: 4 }),
-  clicking: P({ rShoulder: -75, rElbow: -20, rHand: "point", lookX: 0.9, lookY: 0.1, eyes: "focused", mouth: "smile",
+  pointing: P({ rShoulder: -95, rElbow: -5, rHand: "point", lookX: 0.9, eyes: "open", mouth: "smile", bodyRot: 4, browY: -1 }),
+  clicking: P({ rShoulder: -75, rElbow: -20, rHand: "point", lookX: 0.9, lookY: 0.1, eyes: "focused", mouth: "smile", browTilt: -3,
     bodyRot: 6, extras: ["ripple"], motions: ["float", "tap"] }),
-  typing: P({ lShoulder: -15, lElbow: -10, rShoulder: 15, rElbow: 10, lookY: 0.6, eyes: "focused", mouth: "flat",
+  typing: P({ lShoulder: -15, lElbow: -10, rShoulder: 15, rElbow: 10, lookY: 0.6, eyes: "focused", mouth: "smile", browY: 1,
     extras: ["keyboard"], motions: ["float", "type"] }),
-  inspecting: P({ eyes: "squint", lookX: 0.6, headRot: 4, rShoulder: -30, rElbow: -60, mouth: "flat", motions: ["float", "scan"] }),
+  inspecting: P({ eyes: "squint", lookX: 0.6, headRot: 4, rShoulder: -30, rElbow: -60, mouth: "flat", browTilt: -5, browAsym: 1.5, motions: ["float", "scan"] }),
   waiting: P({ eyes: "open", mouth: "smile", headRot: 4, motions: ["float", "breathe"] }),
-  validating: P({ eyes: "squint", lookY: 0.2, mouth: "flat", rShoulder: -35, rElbow: -70, core: COLORS.violet,
+  validating: P({ eyes: "squint", lookY: 0.2, mouth: "flat", browTilt: -4, rShoulder: -35, rElbow: -70, core: COLORS.violet,
     motions: ["float", "scan"] }),
-  working: P({ eyes: "focused", lookY: 0.3, mouth: "flat", lShoulder: -25, lElbow: -40, rShoulder: 25, rElbow: 40,
+  working: P({ eyes: "focused", lookY: 0.3, mouth: "smile", browTilt: -2, lShoulder: -25, lElbow: -40, rShoulder: 25, rElbow: 40,
     glow: 0.9, motions: ["float", "busy"] }),
   processing: P({ eyes: "focused", lookY: -0.2, mouth: "flat", lShoulder: 25, rShoulder: -25, core: COLORS.violet,
     extras: ["rings"], motions: ["float", "breathe"] }),
   returning: P({ bodyRot: -10, feetTuck: 0.8, thruster: 0.9, capeFlutter: 0.8, lookX: -0.5, extras: ["trail"], motions: ["fly"] }),
 
   // Result states
-  success: P({ eyes: "happy", mouth: "grin", blush: true, lShoulder: 140, lElbow: 20, rShoulder: -140, rElbow: -20,
+  success: P({ eyes: "happy", mouth: "grin", blush: true, browY: -2, lShoulder: 140, lElbow: 20, rShoulder: -140, rElbow: -20,
     lHand: "open", rHand: "open", core: COLORS.green, glow: 1, motions: ["float", "bounce"] }),
-  celebrate: P({ eyes: "happy", mouth: "grin", blush: true, lShoulder: 150, lElbow: 25, rShoulder: -150, rElbow: -25,
+  celebrate: P({ eyes: "happy", mouth: "grin", blush: true, browY: -3, lShoulder: 150, lElbow: 25, rShoulder: -150, rElbow: -25,
     lHand: "open", rHand: "open", core: COLORS.green, glow: 1, capeFlutter: 0.8, extras: ["sparkles"], motions: ["float", "bounce"] }),
-  partial_success: P({ eyes: "open", mouth: "flat", rShoulder: -70, rElbow: -30, rHand: "open", core: COLORS.amber }),
-  needs_input: P({ eyes: "open", headRot: 6, mouth: "smile", rShoulder: -45, rElbow: -40, rHand: "open", core: COLORS.cyan }),
-  needs_confirmation: P({ eyes: "open", mouth: "flat", rShoulder: -110, rElbow: -20, rHand: "open", core: COLORS.amber,
+  partial_success: P({ eyes: "open", mouth: "flat", browTilt: 4, rShoulder: -70, rElbow: -30, rHand: "open", core: COLORS.amber }),
+  needs_input: P({ eyes: "open", headRot: 6, mouth: "smile", browY: -2, browAsym: 1.5, rShoulder: -45, rElbow: -40, rHand: "open", core: COLORS.cyan }),
+  needs_confirmation: P({ eyes: "open", mouth: "flat", browY: -1.5, browAsym: 2, rShoulder: -110, rElbow: -20, rHand: "open", core: COLORS.amber,
     glow: 0.9, motions: ["float", "breathe"] }),
-  warning: P({ eyes: "sad", mouth: "wavy", headRot: -6, rShoulder: -60, rElbow: -30, rHand: "open", core: COLORS.amber }),
-  error: P({ eyes: "sad", mouth: "frown", headRot: -8, lShoulder: 4, rShoulder: -4, lElbow: 0, rElbow: 0, capeFlutter: 0.1,
+  warning: P({ eyes: "wink", mouth: "wavy", headRot: -6, browTilt: 6, rShoulder: -60, rElbow: -30, rHand: "open", core: COLORS.amber }),
+  error: P({ eyes: "sad", mouth: "frown", headRot: -8, browTilt: 10, browY: -1, lShoulder: 4, rShoulder: -4, lElbow: 0, rElbow: 0, capeFlutter: 0.1,
     core: COLORS.red, glow: 0.8, motions: ["float", "shake"] }),
-  paused: P({ eyes: "open", lid: 0.35, mouth: "flat", lShoulder: 6, rShoulder: -6, floatAmp: 1.5, core: COLORS.amber, glow: 0.4 }),
-  cancelled: P({ eyes: "open", mouth: "flat", lShoulder: 50, lElbow: 50, lHand: "open", core: COLORS.gray, glow: 0.4 }),
-  offline: P({ eyes: "closed", mouth: "flat", bodyY: 10, floatAmp: 0.6, thruster: 0.1, glow: 0.15, core: COLORS.gray,
+  paused: P({ eyes: "open", lid: 0.35, mouth: "flat", browY: 1, lShoulder: 6, rShoulder: -6, floatAmp: 1.5, core: COLORS.amber, glow: 0.4 }),
+  cancelled: P({ eyes: "open", mouth: "flat", browTilt: 3, lShoulder: 50, lElbow: 50, lHand: "open", core: COLORS.gray, glow: 0.4 }),
+  offline: P({ eyes: "closed", mouth: "flat", bodyY: 10, browY: 1.5, floatAmp: 0.6, thruster: 0.1, glow: 0.15, core: COLORS.gray,
     lShoulder: 3, rShoulder: -3, extras: ["zz"] }),
 };
 
@@ -169,18 +172,18 @@ export function poseFor(state: string): OrbitPose {
 export function applyEmotion(pose: OrbitPose, emotion?: string | null): OrbitPose {
   switch (emotion) {
     case "happy":
-      return { ...pose, eyes: pose.eyes === "open" ? "happy" : pose.eyes, blush: true, mouth: pose.mouth === "talk" ? "talk" : "grin" };
+      return { ...pose, eyes: pose.eyes === "open" ? "happy" : pose.eyes, blush: true, mouth: pose.mouth === "talk" ? "talk" : "grin", browY: pose.browY - 1.5 };
     case "celebrating":
       return { ...pose, eyes: "happy", blush: true };
     case "concerned":
     case "apologetic":
-      return { ...pose, eyes: "sad", headRot: pose.headRot - 4 };
+      return { ...pose, eyes: "sad", headRot: pose.headRot - 4, browTilt: pose.browTilt + 8 };
     case "curious":
-      return { ...pose, headRot: pose.headRot + 8 };
+      return { ...pose, headRot: pose.headRot + 8, browAsym: pose.browAsym + 2.5 };
     case "focused":
-      return { ...pose, eyes: "focused" };
+      return { ...pose, eyes: "focused", browTilt: pose.browTilt - 3 };
     case "attentive":
-      return { ...pose, eyes: "wide" };
+      return { ...pose, eyes: "wide", browY: pose.browY - 2 };
     default:
       return pose;
   }
@@ -189,4 +192,5 @@ export function applyEmotion(pose: OrbitPose, emotion?: string | null): OrbitPos
 export const NUMERIC_KEYS: (keyof PoseNumbers)[] = [
   "bodyY", "bodyRot", "headRot", "headY", "lookX", "lookY", "lid", "eyeScale", "mouthOpen",
   "lShoulder", "lElbow", "rShoulder", "rElbow", "feetTuck", "antennaRot", "glow", "capeFlutter", "floatAmp", "thruster",
+  "browY", "browTilt", "browAsym",
 ];

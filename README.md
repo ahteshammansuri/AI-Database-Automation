@@ -286,7 +286,9 @@ On CPU-only machines a single model decision can take **20–90 s**, and longer 
 - **Type instead:** a small toggle in the panel, for accessibility or when voice is unavailable.
 - **Stop / Pause / Resume** control a running task. No new step starts after Stop; anything already committed is reported as committed.
 - **Memory:** Orbit remembers what you said earlier in the conversation, such as the connection name and earlier answers.
-- **Character:** Orbit is an articulated vector character whose poses follow what is really happening (flying to a target, tapping, typing, thinking, celebrating only after a verified result). At rest it blinks, glances around, tilts its head and reacts when you rest the pointer on it. A 3D renderer exists as an option (`renderer="3d"`).
+- **Character:** Orbit is a compact, articulated vector character drawn after its character sheet: a big round glossy head (rim light, glass-sheen screen face with glowing ring eyes, twinkling catchlights, eyebrows, a soft smile and blush), ear discs, antenna, purple scarf and cape, and a chest emblem on a small chibi body. Its poses follow what is really happening (flying to a target, tapping, typing, thinking, celebrating only after a verified result). At rest it blinks, makes tiny eye movements, glances around, tilts its head, smiles now and then, and smiles when you rest the pointer on it; it glances up when you open its panel, and its ear discs glow with your voice while it listens. A 3D renderer exists as an option (`renderer="3d"`).
+- **Speaking:** the mouth follows the words really being spoken: each syllable gets a shape from its vowel (open "ah", wide "ee", round "oh/oo", closed lips for m/b/p), it closes into a smile at commas and full stops, and every word-boundary event from the voice re-syncs it. Eyebrows lift a little on stressed words and questions.
+- **Panel:** the Orbit panel opens above docked Orbit, never underneath it, so every control in it stays clickable.
 - **Voice privacy:** browser speech recognition in Chrome/Edge may send audio to the browser vendor. Orbit tells you this the first time you use it.
 
 ### Required background worker
@@ -301,10 +303,13 @@ php artisan queue:work agent --queue=agent --sleep=1 --tries=1 --timeout=1600
 
 The application enforces strict non-negotiable security rules:
 
-1. **Zero Destructive Queries:**
-   The backend AST interceptor permanently blocks `DELETE`, `DROP`, `TRUNCATE`, `ALTER`, `CREATE TABLE`, `RENAME`, `GRANT`, `REVOKE`, and arbitrary raw SQL execution.
-2. **Allowed Operations Only:**
-   The target executor permits **read-only metadata introspection**, parameterized allowlisted `INSERT`, and primary-key scoped `UPDATE` queries exclusively.
+1. **Never allowed (no setting enables them):**
+   `DROP`, `TRUNCATE`, `ALTER`, `CREATE`, `RENAME`, `GRANT`, `REVOKE`, any other DDL, a raw SQL console, and model-written SQL for writes.
+2. **Tiered data policy (ADR-010, enforced in Laravel, never decided by the model):**
+   - **Reads** (SELECT, counts, aggregates, schema questions): one validated SELECT through the AST read gate, allowlisted tables and functions, forced `LIMIT`, timeout and a read-only transaction.
+   - **INSERT / UPDATE**: only after a preview and confirmation; updates are pinned to the exact previewed primary keys (never unscoped). Automations write only the tables and columns you mapped, after validation.
+   - **DELETE**: only when the connection owner sets access mode `read_write_delete`, with impact analysis, a typed confirmation, a transaction, an encrypted backup and an audit record.
+   - Every connection starts in `read_only` mode.
 3. **Sensitive Table Auto-Deny:**
    Tables matching patterns like `users`, `auth`, `passwords`, `tokens`, `payments`, `billing`, and `audit_logs` are classified as restricted by default.
 4. **Encrypted Credentials at Rest:**
@@ -350,10 +355,11 @@ Simulates complete real-world tenant journey (registration -> empty dashboard ->
 python scripts/verify_end_to_end.py
 ```
 
-### 5. Orbit Mascot & Autonomous Operator Verification
-Validates mascot sprite assets, vector rig fallback, sound effects, HUD interaction, and capability registration:
+### 5. Orbit Character, Lip-Sync & Movement Tests
+Checks the pose library (every state has its own articulated pose), natural blinking and idle personality, the lip-sync timeline (syllables, vowel shapes, pauses at punctuation, Hindi words, re-sync on real word boundaries), movement/arrival events and the page catalog:
 ```bash
-python scripts/verify_orbit_mascot.py
+cd frontend
+npm test
 ```
 
 ---

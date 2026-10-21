@@ -186,6 +186,9 @@ class AgentOrchestrator
         }));
     }
 
+    /** Gate refusals caused by the model's own malformed call; the loop gives the model the reason to fix it. */
+    protected const SELF_CORRECTED = ['INVALID_ARGS', 'UNKNOWN_TOOL'];
+
     /** True when this turn started by running a step the user confirmed, and that step succeeded. */
     protected bool $confirmedStepDone = false;
 
@@ -469,6 +472,11 @@ class AgentOrchestrator
             $this->persistCall($task, $turnId, $iteration, $name, $gate['def']['version'] ?? 1, $safeArgs, 'rejected', $result, $traceId, now());
             $held = $gate['error_category'] === 'CONFIRMATION_REQUIRED';
             // The gate's text is written for the model; the person sees plain wording.
+            if (!$held && in_array($gate['error_category'], self::SELF_CORRECTED, true)) {
+                // The model's own slip (bad arguments, unknown tool): it corrects itself next step; the
+                // attempt stays in the audit records but is not shown to the user as a failure.
+                return ['iteration' => $iteration, 'tool' => $name, 'args' => $safeArgs, 'result' => $this->runner->modelView($result)];
+            }
             $this->timeline($task, $label, $held ? 'waiting' : 'failed', $held
                 ? (ToolPolicyGate::needsPanelButton($name, $safeArgs)
                     ? 'Held until you press Confirm in this panel (a typed "yes" does not count for removals).'
@@ -524,7 +532,10 @@ class AgentOrchestrator
             'safe_message' => $result['safe_message'], 'verified' => $result['verified'],
             'resource_refs' => $result['resource_refs'],
         ], 'AgentTask', (string) $task->id);
-        $this->timeline($task, $label, $result['success'] ? 'succeeded' : 'failed', $result['safe_message'],
+        // A field the page rejected, or a part not on screen yet, is something Orbit adjusts to, not a failure.
+        $adjusted = !$result['success'] && in_array($result['error_category'], ['NOT_ON_SCREEN', 'VALIDATION_ERROR'], true);
+        $this->timeline($task, $label, $result['success'] ? 'succeeded' : ($adjusted ? 'adjusted' : 'failed'),
+            $adjusted && $result['error_category'] === 'NOT_ON_SCREEN' ? 'Not on screen yet; finding it another way.' : $result['safe_message'],
             array_filter(['trace_id' => $traceId, 'verification' => $result['verification'] ?? null]));
 
         if ($result['success']) {

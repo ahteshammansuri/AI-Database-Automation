@@ -12,6 +12,7 @@ use App\Services\Data\Dialects\DialectRegistry;
 use App\Services\Data\TargetConnector;
 use App\Services\Data\DataException;
 use Illuminate\Http\Request;
+use Illuminate\Validation\ValidationException;
 use Exception;
 use PDO;
 
@@ -41,23 +42,14 @@ class DbConnectionController extends Controller
     public function store(Request $request)
     {
         // Support either Connection URI or Manual parameters
-        $validated = $request->validate([
-            'name' => 'required|string|max:255',
+        $validated = $request->validate(array_merge(self::targetRules(false), [
+            'name' => 'required|string|max:120',
             'db_type' => 'nullable|string|in:mysql,mariadb,postgresql,postgres,pgsql,sqlite,sqlsrv,mongodb',
             'access_mode' => 'nullable|string|in:read_only,read_write,read_write_delete',
             'data_policy' => 'nullable|array',
-            'data_timezone' => 'nullable|string|max:64',
-            'connection_mode' => 'nullable|string|in:manual,uri',
-            'connection_uri' => 'nullable|string',
-            'host' => 'nullable|string',
-            'port' => 'nullable|integer|min:1|max:65535',
-            'database_name' => 'nullable|string',
-            'username' => 'nullable|string',
-            'password' => 'nullable|string',
-            'ssl_mode' => 'nullable|string|in:disabled,preferred,required,disable,prefer,require',
-            'connection_timeout' => 'nullable|integer|min:1|max:30',
+            'data_timezone' => 'nullable|string|max:64|timezone:all',
             'test_before_save' => 'nullable|boolean',
-        ]);
+        ]), self::targetMessages());
 
         $mode = $validated['connection_mode'] ?? (!empty($validated['connection_uri']) ? 'uri' : 'manual');
         $timeout = (int) ($validated['connection_timeout'] ?? 5);
@@ -71,10 +63,10 @@ class DbConnectionController extends Controller
             $password = $parsed['password'];
             $sslMode = $this->normalizeSslMode($parsed['ssl_mode'] ?? ($validated['ssl_mode'] ?? 'preferred'));
         } else {
-            if (empty($validated['host']) || empty($validated['database_name']) || empty($validated['username'])) {
-                return response()->json([
-                    'message' => 'Host, Database Name, and Username are required in manual configuration mode.',
-                ], 422);
+            $missing = array_filter(['host' => 'Host is required.', 'database_name' => 'Database name is required.', 'username' => 'Username is required.'],
+                fn($k) => empty($validated[$k]), ARRAY_FILTER_USE_KEY);
+            if ($missing) {
+                return response()->json(['message' => reset($missing), 'errors' => array_map(fn($m) => [$m], $missing)], 422);
             }
             $host = $validated['host'];
             $port = (int) ($validated['port'] ?? 3306);
@@ -84,8 +76,10 @@ class DbConnectionController extends Controller
             $sslMode = $this->normalizeSslMode($validated['ssl_mode'] ?? 'preferred');
         }
 
-        // SSRF & target validation
-        $this->safetyService->validateConnectionTarget($host, $port);
+        // SSRF & target validation (a refused host is a field problem, not a server error)
+        if ($refused = $this->refusedTarget($host, $port)) {
+            return $refused;
+        }
 
         // Check for duplicate connection name within workspace
         $existingName = DbConnection::where('user_id', $request->user()->id)
@@ -93,9 +87,8 @@ class DbConnectionController extends Controller
             ->exists();
 
         if ($existingName) {
-            return response()->json([
-                'message' => "A connection profile named '{$validated['name']}' already exists in your workspace.",
-            ], 422);
+            $msg = "You already have a connection named '{$validated['name']}'. Choose a different name.";
+            return response()->json(['message' => $msg, 'errors' => ['name' => [$msg]]], 422);
         }
 
         $status = 'unverified';
@@ -184,22 +177,19 @@ class DbConnectionController extends Controller
             ->where('id', $id)
             ->firstOrFail();
 
-        $validated = $request->validate([
-            'name' => 'sometimes|string|max:255',
+        $validated = $request->validate(array_merge(self::targetRules(true), [
+            'name' => 'sometimes|required|string|max:120',
             'access_mode' => 'nullable|string|in:read_only,read_write,read_write_delete',
             'data_policy' => 'nullable|array',
-            'data_timezone' => 'nullable|string|max:64',
-            'connection_mode' => 'nullable|string|in:manual,uri',
-            'connection_uri' => 'nullable|string',
-            'host' => 'sometimes|string',
-            'port' => 'sometimes|integer|min:1|max:65535',
-            'database_name' => 'sometimes|string',
-            'username' => 'sometimes|string',
-            'password' => 'nullable|string',
-            'ssl_mode' => 'nullable|string|in:disabled,preferred,required,disable,prefer,require',
-            'connection_timeout' => 'nullable|integer|min:1|max:30',
+            'data_timezone' => 'nullable|string|max:64|timezone:all',
             'is_active' => 'nullable|boolean',
-        ]);
+        ]), self::targetMessages());
+
+        if (isset($validated['name']) && $validated['name'] !== $connection->name
+            && DbConnection::where('user_id', $request->user()->id)->where('name', $validated['name'])->where('id', '!=', $connection->id)->exists()) {
+            $msg = "You already have a connection named '{$validated['name']}'. Choose a different name.";
+            return response()->json(['message' => $msg, 'errors' => ['name' => [$msg]]], 422);
+        }
 
         if (!empty($validated['connection_uri'])) {
             $parsed = $this->parseConnectionUri($validated['connection_uri']);
@@ -215,7 +205,9 @@ class DbConnectionController extends Controller
         if (!empty($validated['host']) || !empty($validated['port'])) {
             $host = $validated['host'] ?? $connection->host;
             $port = (int) ($validated['port'] ?? $connection->port);
-            $this->safetyService->validateConnectionTarget($host, $port);
+            if ($refused = $this->refusedTarget($host, $port)) {
+                return $refused;
+            }
         }
 
         $dataToUpdate = [
@@ -300,18 +292,10 @@ class DbConnectionController extends Controller
 
     public function test(Request $request)
     {
-        $validated = $request->validate([
+        $validated = $request->validate(array_merge(self::targetRules(false, testing: true), [
             'id' => 'nullable|integer',
             'db_type' => 'nullable|string',
-            'connection_uri' => 'nullable|string',
-            'host' => 'nullable|string',
-            'port' => 'nullable|integer',
-            'database_name' => 'nullable|string',
-            'username' => 'nullable|string',
-            'password' => 'nullable|string',
-            'ssl_mode' => 'nullable|string|in:disabled,preferred,required,disable,prefer,require',
-            'connection_timeout' => 'nullable|integer|min:1|max:30',
-        ]);
+        ]), self::targetMessages());
 
         $connection = null;
         $timeout = (int) ($validated['connection_timeout'] ?? 5);
@@ -405,14 +389,23 @@ class DbConnectionController extends Controller
      */
     protected function parseConnectionUri(string $uri): array
     {
+        // A URI the parser cannot use is a problem with that field (422 under it), never a server error.
+        $fail = fn(string $msg) => throw ValidationException::withMessages(['connection_uri' => [$msg]]);
+
         $parsed = parse_url($uri);
         if (!$parsed || empty($parsed['host'])) {
-            throw new Exception("Invalid database URI format. Expected: mysql://[user[:password]@]host[:port]/database");
+            $fail('Connection URI is not in the expected format: mysql://user:password@host:3306/database.');
         }
 
         $scheme = strtolower($parsed['scheme'] ?? 'mysql');
         if ($scheme !== 'mysql') {
-            throw new Exception("Unsupported database scheme '{$scheme}'. Only 'mysql' is currently supported.");
+            $fail('Connection URI must start with mysql://. For PostgreSQL, use Connection details.');
+        }
+        if (ltrim($parsed['path'] ?? '', '/') === '') {
+            $fail('Add the database name after the host, like mysql://user:password@127.0.0.1:3306/blog.');
+        }
+        if (($parsed['user'] ?? '') === '') {
+            $fail('Add the username before the host, like mysql://user:password@127.0.0.1:3306/blog.');
         }
 
         $host = $parsed['host'];
@@ -438,6 +431,64 @@ class DbConnectionController extends Controller
             'password' => $pass,
             'ssl_mode' => $sslMode,
         ];
+    }
+
+    private const HOST_PATTERN = '/^[A-Za-z0-9.\-_:\[\]]+$/';
+    private const DATABASE_PATTERN = '/^[A-Za-z0-9_$\-]+$/';
+    private const URI_PATTERN = '/^mysql:\/\/\S+$/i';
+
+    /**
+     * Rules for where a connection points. Manual details (host, database, username) are required unless a
+     * connection URI is used; when testing a saved connection by id nothing else is required.
+     */
+    private static function targetRules(bool $update, bool $testing = false): array
+    {
+        $needed = $update ? ['sometimes', 'required'] : [$testing ? 'required_without_all:id,connection_uri' : 'required_without:connection_uri'];
+        return [
+            'connection_mode' => 'nullable|string|in:manual,uri',
+            'connection_uri' => ['nullable', 'string', 'max:2048', 'required_if:connection_mode,uri', 'regex:' . self::URI_PATTERN],
+            'host' => ['exclude_if:connection_mode,uri', ...$needed, 'nullable', 'string', 'max:253', 'regex:' . self::HOST_PATTERN],
+            'port' => 'nullable|integer|min:1|max:65535',
+            'database_name' => ['exclude_if:connection_mode,uri', ...$needed, 'nullable', 'string', 'max:64', 'regex:' . self::DATABASE_PATTERN],
+            'username' => ['exclude_if:connection_mode,uri', ...$needed, 'nullable', 'string', 'max:80'],
+            'password' => 'nullable|string|max:255',
+            'ssl_mode' => 'nullable|string|in:disabled,preferred,required,disable,prefer,require',
+            'connection_timeout' => 'nullable|integer|min:1|max:30',
+        ];
+    }
+
+    private static function targetMessages(): array
+    {
+        return [
+            'host.regex' => 'Host must be a hostname or IP address, like 127.0.0.1 or db.example.com.',
+            'host.required_without' => 'Host is required.',
+            'host.required_without_all' => 'Host is required.',
+            'database_name.regex' => 'Database name can use letters, numbers, _, $ and - (up to 64 characters).',
+            'database_name.required_without' => 'Database name is required.',
+            'database_name.required_without_all' => 'Database name is required.',
+            'username.required_without' => 'Username is required.',
+            'username.required_without_all' => 'Username is required.',
+            'connection_uri.required_if' => 'Paste a connection URI, or switch to connection details.',
+            'connection_uri.regex' => 'Connection URI must start with mysql://, like mysql://user:password@127.0.0.1:3306/blog. For PostgreSQL, use Connection details.',
+            'connection_timeout.min' => 'Timeout must be between 1 and 30 seconds.',
+            'connection_timeout.max' => 'Timeout must be between 1 and 30 seconds.',
+            'data_timezone.timezone' => 'Use a valid timezone, like Asia/Kolkata or UTC.',
+            'ssl_mode.in' => 'Choose preferred, required or disabled.',
+        ];
+    }
+
+    /** A host/port the safety rules refuse becomes a 422 on the host field (never a 500). */
+    private function refusedTarget(string $host, int $port): ?\Illuminate\Http\JsonResponse
+    {
+        try {
+            $this->safetyService->validateConnectionTarget($host, $port);
+            return null;
+        } catch (\Throwable $e) {
+            // Shown under the field, so the internal "Security violation:" label is left off; the reason stays.
+            $msg = preg_replace('/^Security violation:\s*/i', '', $e->getMessage());
+            $field = str_contains(strtolower($msg), 'port') ? 'port' : 'host';
+            return response()->json(['message' => $msg, 'errors' => [$field => [$msg]]], 422);
+        }
     }
 
     /**

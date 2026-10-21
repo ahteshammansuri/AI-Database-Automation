@@ -7,6 +7,7 @@ use App\Models\ApprovalToken;
 use App\Models\ContentVersion;
 use App\Models\AutomationExecution;
 use App\Models\AuditLog;
+use App\Services\Automation\DraftPayloadValidator;
 use App\Services\EmailApprovalService;
 use App\Services\LiveEventService;
 use App\Jobs\PublishAutomationContentJob;
@@ -107,7 +108,8 @@ class ApprovalController extends Controller
      */
     public function reject(Request $request, $tokenString)
     {
-        $feedback = $request->input('feedback', 'Requested revisions from editor.');
+        $request->validate(['feedback' => 'nullable|string|max:2000']);
+        $feedback = trim((string) $request->input('feedback', '')) ?: 'Requested revisions from editor.';
 
         try {
             $result = $this->approvalService->reject($tokenString, $feedback);
@@ -144,6 +146,9 @@ class ApprovalController extends Controller
             ->firstOrFail();
         if ($blocked = $this->notReviewable($version)) {
             return $blocked;
+        }
+        if ($invalid = $this->invalidPayload($version, $request->input('payload'))) {
+            return $invalid;
         }
 
         $version->payload = $request->input('payload');
@@ -182,6 +187,9 @@ class ApprovalController extends Controller
         }
 
         if ($request->has('payload') && is_array($request->input('payload'))) {
+            if ($invalid = $this->invalidPayload($version, $request->input('payload'))) {
+                return $invalid;
+            }
             $version->payload = $request->input('payload');
         }
 
@@ -228,6 +236,7 @@ class ApprovalController extends Controller
         if ($blocked = $this->notReviewable($version)) {
             return $blocked;
         }
+        $request->validate(['feedback' => 'nullable|string|max:2000']);
         $feedback = trim((string) $request->input('feedback', '')) ?: 'Requested revisions from editor in portal.';
 
         $version->update([
@@ -266,6 +275,18 @@ class ApprovalController extends Controller
             'version' => $version,
             'execution' => $execution->fresh(),
         ]);
+    }
+
+    /** 422 with a message per edited column (keyed "payload.<column>") when an editor's change cannot be published. */
+    private function invalidPayload(ContentVersion $version, array $payload): ?\Illuminate\Http\JsonResponse
+    {
+        $errors = DraftPayloadValidator::errors(
+            $payload,
+            is_array($version->payload) ? $version->payload : [],
+            $version->meta['write_plan']['columns'] ?? [],
+            DraftPayloadValidator::relationColumns($version->meta)
+        );
+        return $errors ? response()->json(['message' => reset($errors)[0], 'errors' => $errors], 422) : null;
     }
 
     /** 409 response when a version can no longer be edited, approved or rejected. */

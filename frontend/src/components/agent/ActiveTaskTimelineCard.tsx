@@ -15,6 +15,8 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { AgentTask, AgentTimelineEvent } from "../../context/AssistantContext";
+import { FieldError } from "../ui/kit";
+import { rules, validateField } from "../../lib/validation";
 
 interface ActiveTaskTimelineCardProps {
   task: AgentTask;
@@ -38,6 +40,7 @@ export const ActiveTaskTimelineCard: React.FC<ActiveTaskTimelineCardProps> = ({
   const [elapsedSecs, setElapsedSecs] = useState<number>(0);
   const [showCorrectionInput, setShowCorrectionInput] = useState<boolean>(false);
   const [correctionText, setCorrectionText] = useState<string>("");
+  const [correctionError, setCorrectionError] = useState<string | null>(null);
   const [showTechnicalTrace, setShowTechnicalTrace] = useState<boolean>(false);
 
   // Timer: elapsed time counter while task is running
@@ -59,7 +62,11 @@ export const ActiveTaskTimelineCard: React.FC<ActiveTaskTimelineCardProps> = ({
 
   const handleCorrectionSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!correctionText.trim()) return;
+    const problem = validateField("correction", { correction: correctionText }, {
+      correction: [rules.required("Correction", "Type what Orbit should change."), rules.maxLength(4000, "Correction")],
+    });
+    setCorrectionError(problem);
+    if (problem) return;
     onCorrect(correctionText.trim());
     setCorrectionText("");
     setShowCorrectionInput(false);
@@ -235,24 +242,29 @@ export const ActiveTaskTimelineCard: React.FC<ActiveTaskTimelineCardProps> = ({
             animate={{ opacity: 1, height: "auto" }}
             exit={{ opacity: 0, height: 0 }}
             onSubmit={handleCorrectionSubmit}
+            noValidate
             className="mt-3 pt-3 border-t border-slate-800"
           >
             <div className="flex items-center space-x-2">
               <input
+                id={`orbit-correction-${task.id}`}
                 type="text"
                 value={correctionText}
-                onChange={(e) => setCorrectionText(e.target.value)}
+                onChange={(e) => { setCorrectionText(e.target.value); setCorrectionError(null); }}
                 placeholder="e.g. Stop, use category Reviews instead"
-                className="flex-1 px-3 py-1.5 text-xs bg-slate-800 border border-slate-700 rounded-lg text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                aria-label="Correction for Orbit"
+                aria-invalid={!!correctionError}
+                aria-describedby={correctionError ? `orbit-correction-${task.id}-error` : undefined}
+                className={`flex-1 px-3 py-1.5 text-xs bg-slate-800 border rounded-lg text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-1 ${correctionError ? "border-rose-400/80 focus:ring-rose-400" : "border-slate-700 focus:ring-indigo-500"}`}
               />
               <button
                 type="submit"
-                disabled={!correctionText.trim()}
                 className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-lg transition disabled:opacity-50"
               >
                 Apply
               </button>
             </div>
+            <FieldError id={`orbit-correction-${task.id}`} message={correctionError} tone="dark" />
           </motion.form>
         )}
       </AnimatePresence>

@@ -89,10 +89,10 @@ class SchemaController extends Controller
             ->firstOrFail();
 
         $validated = $request->validate([
-            'ai_purpose' => 'nullable|string',
-            'ai_business_concept' => 'nullable|string',
-            'user_override_notes' => 'nullable|string',
-            'user_notes' => 'nullable|string',
+            'ai_purpose' => 'nullable|string|max:2000',
+            'ai_business_concept' => 'nullable|string|max:255',
+            'user_override_notes' => 'nullable|string|max:2000',
+            'user_notes' => 'nullable|string|max:2000',
             'is_user_verified' => 'nullable|boolean',
         ]);
 

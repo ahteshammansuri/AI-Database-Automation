@@ -7,6 +7,7 @@ import { api } from "./api";
 import { actionBridge, ActionExecutionStatus } from "./actionBridge";
 import { orbitStage, OrbitGesture } from "./orbitStage";
 import { orbitTargets } from "./orbitTargets";
+import { ttsAdapter } from "./ttsAdapter";
 import { actionTarget, catalogField, describeSurface, fieldTarget, matchOption, orbitSurfaces } from "./orbitSurfaces";
 
 export interface UiActionEvent {
@@ -25,24 +26,78 @@ const prefersReducedMotion = () =>
   typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Fly to a registered element and make a gesture; skipped silently if it is not on screen. */
+/**
+ * Fly to a registered element, wait until Orbit has really arrived (its flight animation finished),
+ * then make the gesture and let it read before the action happens. Skipped if the element is not on screen.
+ */
 async function visit(target: string | undefined, gesture: OrbitGesture, waitMs = 1200): Promise<HTMLElement | null> {
   if (!target) return null;
   const el = await orbitTargets.waitFor(target, waitMs);
   if (!el) return null;
+  const reduced = prefersReducedMotion();
+  const arrived = reduced ? Promise.resolve(null) : orbitStage.waitFor((e) => e.type === "arrived" && e.target === target, 2200);
   orbitStage.emit({ type: "travel", target });
-  await sleep(prefersReducedMotion() ? 0 : 520);
+  await arrived;
+  await sleep(reduced ? 0 : 140); // settle before acting
   orbitStage.emit({ type: "gesture", gesture, target });
+  await sleep(reduced ? 0 : gesture === "tap" ? 260 : 120); // the tap is seen before the click lands
   return el;
 }
 
+const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r(null)));
+
+/**
+ * Navigate the way a person does, in step with Orbit: fly to the sidebar link, tap it, then wait until
+ * the new page has rendered its sections before anything else happens on it.
+ */
 async function ensureRoute(route: string): Promise<boolean> {
   if (window.location.pathname === route) return true;
   await visit(`nav:${route}`, "tap", 600);
   const res = await actionBridge.dispatchAsync("navigation.navigate", { route });
   if (res.status !== "ok") return false;
-  for (let i = 0; i < 60 && window.location.pathname !== route; i++) await sleep(50);
-  return window.location.pathname === route;
+  for (let i = 0; i < 80 && window.location.pathname !== route; i++) await sleep(50);
+  if (window.location.pathname !== route) return false;
+  const pageSurfaces = (orbitSurfaces.getCatalog()?.surfaces ?? []).filter((s) => s.route === route).map((s) => s.id);
+  if (pageSurfaces.length) {
+    await Promise.race([...pageSurfaces.map((id) => orbitSurfaces.waitFor(id, 3000)), sleep(3000)]);
+  }
+  await nextFrame();
+  await nextFrame();
+  await sleep(prefersReducedMotion() ? 0 : 250); // let the page settle visually
+  return true;
+}
+
+/** The visible page title, registered on demand so Orbit can stand beside it on any page. */
+function pageHeadingTarget(): string | null {
+  const el = document.querySelector<HTMLElement>("main h1, main h2");
+  if (!el) return null;
+  orbitTargets.register("page.heading", el);
+  return "page.heading";
+}
+
+/** Where Orbit stands to present a surface: its own element, else the page title. */
+function presentTarget(id: string): string | null {
+  const h = orbitSurfaces.get(id);
+  const target = h?.target ?? h?.openTarget;
+  return target && orbitTargets.has(target) ? target : pageHeadingTarget();
+}
+
+/** After arriving on a page, Orbit moves to its main area so the user sees where it is working. */
+async function arriveOnPage(route: string): Promise<void> {
+  const ids = (orbitSurfaces.getCatalog()?.surfaces ?? []).filter((s) => s.route === route).map((s) => s.id);
+  const target = ids.map((id) => {
+    const h = orbitSurfaces.get(id);
+    const t = h?.target ?? h?.openTarget;
+    return t && orbitTargets.has(t) ? t : null;
+  }).find(Boolean) ?? pageHeadingTarget();
+  if (target) await visit(target, "point", 400);
+}
+
+/** How long a caption stays before Orbit moves on: time to read it, and to finish speaking. */
+async function waitUntilReadAndSpoken(text: string): Promise<void> {
+  if (prefersReducedMotion()) return;
+  await sleep(Math.min(9000, Math.max(2500, 1500 + text.length * 55)));
+  for (let i = 0; i < 60 && ttsAdapter.isSpeaking(); i++) await sleep(250);
 }
 
 /**
@@ -104,9 +159,10 @@ async function perform(evt: UiActionEvent): Promise<Outcome> {
   switch (evt.action) {
     case "surface.go_to_page": {
       const title = orbitSurfaces.getCatalog()?.pages.find((pg) => pg.route === p.page)?.title ?? p.page;
+      const already = window.location.pathname === p.page;
       if (!(await ensureRoute(p.page))) return fail("error", `Could not open ${title} (${p.page}).`);
-      await sleep(400);
-      return ok({ success: true, message: `Opened ${title}.`, page: p.page, surfaces_on_screen: orbitSurfaces.mounted() });
+      if (!already) await arriveOnPage(p.page);
+      return ok({ success: true, message: already ? `Already on ${title}.` : `Opened ${title}.`, page: p.page, surfaces_on_screen: orbitSurfaces.mounted() });
     }
 
     case "surface.open_form": {
@@ -144,7 +200,12 @@ async function perform(evt: UiActionEvent): Promise<Outcome> {
         }
         const rowOrName = meta.dynamic ? name : row;
         await visit(f.target?.(rowOrName) ?? fieldTarget(p.surface, name, row), "type", 800);
-        const err = await typeInto((v) => f.set(v, rowOrName), value, meta.type);
+        let err = await typeInto((v) => f.set(v, rowOrName), value, meta.type);
+        if (err && f.options && (meta.type === "select" || meta.type === "searchable_select" || meta.dynamic)) {
+          // A dropdown given a visible label instead of its value: pick the matching real option.
+          const { match } = matchOption(await f.options(rowOrName), String(value));
+          if (match) err = (await f.set(match.value, rowOrName)) ?? null;
+        }
         if (err) {
           results[name] = { error: String(err) };
           errors++;
@@ -155,9 +216,13 @@ async function perform(evt: UiActionEvent): Promise<Outcome> {
       }
       await sleep(150);
       const after = describeSurface(p.surface);
+      const filled = Object.keys(results).filter((k) => results[k].ok);
+      const rejected = Object.entries(results).filter(([, r]) => r.error).map(([k, r]) => `${k} (${r.error})`);
+      const message = [filled.length ? `Filled ${filled.join(", ")}.` : "", rejected.length ? `Not accepted: ${rejected.join("; ")}.` : ""].filter(Boolean).join(" ");
       return {
-        status: errors ? "validation_error" : "ok",
-        result: { success: errors === 0, message: errors ? "Some fields were not accepted." : "Fields filled.", results, missing_required: after.missing_required, fields: after.fields },
+        // Partly filled is progress: the accepted fields stay filled and the result says which were not.
+        status: filled.length ? "ok" : "validation_error",
+        result: { success: filled.length > 0, message, results, not_accepted: rejected, missing_required: after.missing_required, fields: after.fields },
       };
     }
 
@@ -224,10 +289,12 @@ async function perform(evt: UiActionEvent): Promise<Outcome> {
       if (!cat || !h) return fail("not_mounted", "That part of the portal is not on screen. Use go_to_page first.");
       const el = p.element
         ? (h.fields?.[p.element] ? (h.fields[p.element].target?.() ?? fieldTarget(p.surface, p.element)) : (h.actions?.[p.element]?.target?.() ?? actionTarget(p.surface, p.element)))
-        : (h.target ?? h.openTarget);
-      await visit(el, "point");
+        : presentTarget(p.surface);
+      const reached = await visit(el ?? undefined, "point");
+      if (!reached) await visit(presentTarget(p.surface) ?? undefined, "point", 400); // element not on screen: present from the page title
       const caption = String(p.caption || "").slice(0, 160);
       orbitStage.emit({ type: "caption", text: caption });
+      await waitUntilReadAndSpoken(caption); // never rush on to the next page
       return ok({ success: true, message: caption ? `Showed ${cat.title}: ${caption.slice(0, 90)}` : `Pointed at ${cat.title}.` });
     }
   }

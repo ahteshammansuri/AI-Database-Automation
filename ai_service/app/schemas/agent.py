@@ -75,7 +75,7 @@ class AgentDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: DecisionKind
-    speech_text: str = Field("", max_length=700)
+    speech_text: str = Field("", max_length=1400)
     tool_call: Optional[ToolCall] = None
     plan: List[PlanItem] = Field(default_factory=list, max_length=12)
     missing_fields: List[str] = Field(default_factory=list, max_length=12)

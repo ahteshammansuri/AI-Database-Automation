@@ -305,3 +305,29 @@ All require a Sanctum bearer token and only see the caller's own connections and
 ### AI service additions
 - `POST /v1/ai/generate` accepts `field_specs` (name, kind, max_length, enum_values, options, allow_new, entity, required, instructions), `length` and `max_output_tokens`; returns `missing_fields` instead of inventing values (one repair pass first).
 - `POST /v1/ai/generate-image` `{provider: openai|gemini|local, api_key?, model?, prompt, width, height, title?, label?, seed?}` → `{image_base64, mime_type, width, height, provider_used, model_used}`. Output is always re-encoded to the exact size.
+
+## Validation errors (2026-10-21)
+
+Every form endpoint returns **422** with one message per field, so the portal shows each message directly under
+the field it is about (never only as a banner or toast, and never as a 500):
+
+```json
+{ "message": "Host is required.", "errors": { "host": ["Host is required."], "database_name": ["Database name is required."] } }
+```
+
+- Messages and field names come from `laravel/lang/en/validation.php` (e.g. `database_name` → "Database name").
+- Problems found after the basic rules use the same shape: duplicate connection name → `errors.name`; an unsafe
+  host (SSRF guard) → `errors.host`; an unusable connection URI (no host, database or user; non-`mysql://`
+  scheme) → `errors.connection_uri`; wrong sign-in → `errors.password`; a cloud AI provider with no saved key →
+  `errors.api_key`; an unsupported knowledge file → `errors.file`.
+- Row values are keyed `payload.<column>`: Manual Publishing (`POST /api/automations/manual-publish` when the plan
+  cannot be written), editing or approving a draft (`PUT /api/approvals/{id}/payload`,
+  `POST /api/approvals/{id}/portal-approve`) and updating a published record (`POST /api/executions/{id}/update-record`).
+  Draft and record edits are checked by `DraftPayloadValidator` against the version's write plan: no new columns,
+  required columns stay filled, number columns hold numbers (linked columns in a draft may hold a record's name),
+  and text fits `varchar(n)`/`char(n)`.
+- Schedule problems use the schedule field names (`start_date`, `end_date`, `weekly_days`, `generation_time`,
+  `publication_time`, `timezone`).
+
+The frontend mirrors these rules in `frontend/src/lib/validation.ts` (forms use `noValidate`; `FieldError` renders
+the message under the input with `aria-invalid`/`aria-describedby`), then places any server 422 under the same field.

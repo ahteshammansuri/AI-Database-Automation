@@ -377,7 +377,7 @@ class AiServiceClient
      *
      * @return array{success: bool, sql?: string, assumptions?: array, clarification?: string, error?: string, error_category?: string}
      */
-    public function writeSelectSql(array $params, int $timeoutSeconds = 260): array
+    public function writeSelectSql(array $params, int $timeoutSeconds = 420): array
     {
         try {
             $res = $this->agentClient($timeoutSeconds)->post("{$this->baseUrl}/v1/ai/data/sql", $params + [

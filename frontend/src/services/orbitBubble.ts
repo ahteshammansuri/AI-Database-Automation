@@ -49,7 +49,8 @@ export interface BubbleInput {
 export function pickBubble(s: BubbleInput): Bubble | null {
   const speech = s.speech?.text ? bubbleText(s.speech.text) : null;
   if (s.caption) {
-    return { key: s.caption.key, kind: "caption", text: bubbleText(s.caption.text).text, ttlMs: 7000 };
+    return { key: s.caption.key, kind: "caption", text: bubbleText(s.caption.text).text,
+      ttlMs: Math.min(11000, Math.max(4000, 3000 + s.caption.text.length * 55)) };
   }
   if (s.awaitingConfirmationTool && s.taskId !== null) {
     return {

@@ -109,7 +109,7 @@ class SurfaceCatalog
         $ok = fn (bool $consequential = false, int $timeout = 20) => ['ok' => true, 'error' => null, 'consequential' => $consequential, 'timeout' => $timeout];
 
         if ($tool === 'go_to_page') {
-            return in_array($args['page'] ?? '', self::routes(), true) ? $ok(false, 20) : $fail('Unknown page. Pages: ' . implode(', ', self::routes()));
+            return in_array($args['page'] ?? '', self::routes(), true) ? $ok(false, 30) : $fail('Unknown page. Pages: ' . implode(', ', self::routes()));
         }
         if ($tool === 'read_screen') {
             return $ok(false, 15);
@@ -122,7 +122,8 @@ class SurfaceCatalog
 
         switch ($tool) {
             case 'open_form':
-                return !empty($surface['openable']) ? $ok(false, 25) : $fail("'{$surface['id']}' is always visible on its page; use go_to_page then fill or press.");
+                // Pop-up forms are opened; other sections are brought on screen by visiting their page.
+                return $ok(false, 30);
             case 'fill_fields':
                 $values = $args['values'] ?? [];
                 if (!is_array($values) || $values === []) {
@@ -144,7 +145,7 @@ class SurfaceCatalog
                     }
                 }
                 // Orbit types text visibly (up to ~2 s per field) and travels between fields.
-                return $ok(false, 20 + 4 * count($values));
+                return $ok(false, 25 + 5 * count($values));
             case 'choose_option':
                 $f = self::field($surface, (string) ($args['field'] ?? ''));
                 if (!$f || (!in_array($f['type'], ['select', 'searchable_select'], true) && empty($f['dynamic']))) {
@@ -164,7 +165,7 @@ class SurfaceCatalog
                 }
                 return $ok(!empty($a['consequential']), (int) ($a['timeout_s'] ?? 30));
             case 'show_me':
-                return $ok(false, 15);
+                return $ok(false, 45); // waits until the caption could be read and narration has finished
         }
 
         return $fail("'{$tool}' is not a UI tool.");

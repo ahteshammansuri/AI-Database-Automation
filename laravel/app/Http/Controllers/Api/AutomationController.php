@@ -569,8 +569,13 @@ class AutomationController extends Controller
         }
         if (!$plan['can_publish']) {
             $errs = array_values(array_filter($plan['issues'], fn($i) => $i['level'] === 'error'));
+            $byField = [];
+            foreach ($errs as $i) {
+                $byField[isset($i['column']) ? 'payload.' . $i['column'] : 'payload'][] = $i['message'];
+            }
             return response()->json([
                 'message' => implode(' ', array_map(fn($i) => $i['message'], $errs)),
+                'errors' => $byField,
                 'plan' => $plan,
             ], 422);
         }
