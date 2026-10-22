@@ -19,9 +19,10 @@ The platform includes **Orbit**, a voice-first companion that operates the porta
 3. [Bare-Metal Local Setup (Manual Setup)](#3-bare-metal-local-setup)
 4. [Step-by-Step User Journey & Verification](#4-step-by-step-user-journey--verification)
 5. [Orbit — Voice-First Website Operator](#5-orbit--voice-first-website-operator)
-6. [Core Security & Guardrails](#6-core-security--guardrails)
-7. [Automated Test Suites](#7-automated-test-suites)
-8. [Configuration & Environment Reference](#8-configuration--environment-reference)
+6. [Admin Panel](#6-admin-panel)
+7. [Core Security & Guardrails](#7-core-security--guardrails)
+8. [Automated Test Suites](#8-automated-test-suites)
+9. [Configuration & Environment Reference](#9-configuration--environment-reference)
 
 ---
 
@@ -98,12 +99,18 @@ docker compose up --build
 6. **Synthetic Demo MySQL:** Boots MySQL 8.0 on port `3309` (mapped internally to 3306), executes `scripts/docker-init-db/init.sql`, and creates demo tables (`posts`, `categories`, `tags`, `post_tags`, `users`, `payments`).
 7. **Mailpit:** Runs local SMTP server on port `1025` and web inbox UI on port `8025`.
 
+Then create the first administrator for the admin panel (there is no default account):
+```bash
+docker compose exec laravel php artisan admin:create
+```
+
 ### Service URLs & Ports
 
 | Service | Access URL | Description |
 | :--- | :--- | :--- |
 | **Web Portal & UI** | [http://localhost:5173](http://localhost:5173) | Main application frontend with Orbit Mascot |
 | **Laravel REST API** | [http://localhost:8000](http://localhost:8000) | Control plane API & health endpoints (`/up`) |
+| **Admin Panel** | [http://localhost:8000/admin](http://localhost:8000/admin) | Operators: customers, settings, website content, Orbit, roles, system health ([section 6](#6-admin-panel)) |
 | **Python AI Service** | [http://localhost:8001](http://localhost:8001) | AI OpenAPI Swagger docs at `/docs`, health at `/health` |
 | **Mailpit Email UI** | [http://localhost:8025](http://localhost:8025) | Local inbox to preview generated approval emails |
 | **Synthetic Demo MySQL** | `localhost:3309` | Target database for tests & automations (see credentials below) |
@@ -166,6 +173,10 @@ php artisan key:generate
 
 # Run platform database migrations (SQLite or MySQL)
 php artisan migrate
+
+# Admin panel: permissions and preset roles, then the first administrator (always a super admin)
+php artisan admin:sync-permissions
+php artisan admin:create
 
 cd ..
 ```
@@ -321,7 +332,55 @@ the current task.
 
 ---
 
-## 6. Core Security & Guardrails
+## 6. Admin Panel
+
+The platform's operators manage everything from a Filament admin panel at **`http://127.0.0.1:8000/admin`** (on the
+Laravel server, not the portal). Admins are separate accounts: a customer login or API token never opens the panel,
+and an admin is not a customer.
+
+### First administrator
+There is no default account. Create the first one on the server:
+```bash
+cd laravel
+php artisan admin:sync-permissions     # permissions + preset roles (run after every deploy; safe to repeat)
+php artisan admin:create               # asks for name, email and password; the first admin is always a super admin
+# non-interactive: php artisan admin:create --name="Ada" --email=ada@example.com --password='a-long-passphrase' [--super]
+```
+Each admin can turn on an authenticator app (two-factor, with recovery codes) from their profile.
+
+### What it manages
+| Area | Pages |
+| :--- | :--- |
+| Overview | Customers, active this week, connections, automations, run success rate, Orbit success, paired phones; sign-up and run charts; newest customers; recent failed runs |
+| Customers | Customers (usage per customer: connections, automations, runs, success rate, Orbit requests, last active; **suspend / reactivate / sign out everywhere / delete**), Connections (credentials never shown; force read-only), Automations (pause / resume), Runs (timeline), Activity log |
+| Orbit | Requests (what customers asked and how it went), Paired phones (disconnect), **Knowledge** (the guides Orbit answers from; edit, then *Publish to Orbit* to re-index) |
+| Website | Website content: announcement bar, hero, every section heading, FAQ, closing call to action, footer, sign-in panel, page title and description. Write `{brand}` to insert the brand name |
+| Settings | General (brand, tagline, support email, portal URL, email sender), Sign-up & limits (registration on/off, password length, per-customer limits, upload sizes), AI & models, Automations, Data assistant, Orbit (on/off and its limits), Orbit Remote (on/off, pairing and session times), Features |
+| Team & access | Admins, Roles (permissions per area: view / manage), Admin activity (who changed what; secret values are never recorded) |
+| System | Health (database, AI service, Ollama, real-time server, scheduler, queue workers, email, storage, failed jobs, read-only server environment), Failed jobs (retry / delete) |
+
+**Roles.** `super_admin` can do everything; only a super admin manages super admins, and the last active one cannot be
+removed. Preset roles `support` (read-only), `operations` (customers, connections, automations, Orbit, system) and
+`content_editor` (website content and Orbit knowledge) can be changed, and you can add your own. Nobody can change
+their own roles or deactivate themselves.
+
+**Settings apply immediately.** They are stored in the platform database; the web app uses a change at once and queue
+workers before their next job, without a restart. A setting that was never changed uses the default from
+`laravel/config` or `.env`. Each settings page has *Restore defaults*. The portal and website read the public ones from
+`GET /api/platform/config` and `GET /api/site/content`.
+
+**What stays in `.env` and why.** Values needed before the database is reachable or that are secrets:
+`APP_KEY` (encrypts stored database passwords and API keys), `DB_*`, `QUEUE_CONNECTION`, `CACHE_STORE`,
+`SESSION_DRIVER`, `BROADCAST_CONNECTION` / `REVERB_*`, mail transport (`MAIL_MAILER`, host and credentials) and
+`AI_SERVICE_KEY`. *System › Health* lists them read-only with the reason. Customer database credentials and provider
+keys are never in `.env`: customers add them in the portal.
+
+**Health checks need a restart once.** Queue workers report to *System › Health* from code loaded at start-up, so after
+updating restart them (`php artisan queue:restart` under a process manager, or stop and start them).
+
+---
+
+## 7. Core Security & Guardrails
 
 The application enforces strict non-negotiable security rules:
 
@@ -343,7 +402,7 @@ The application enforces strict non-negotiable security rules:
 
 ---
 
-## 7. Automated Test Suites
+## 8. Automated Test Suites
 
 The codebase includes comprehensive test suites across all tiers:
 
@@ -386,7 +445,7 @@ npm test
 
 ---
 
-## 8. Configuration & Environment Reference
+## 9. Configuration & Environment Reference
 
 ### Key Environment Variables (`.env` and `laravel/.env`)
 
@@ -405,6 +464,9 @@ npm test
 | `MEDIA_PUBLIC_URL` | `http://127.0.0.1:8000` (set by `run_all.sh`) | your public API host | Base URL for generated/uploaded images stored in `storage/app/public` (`php artisan storage:link`) |
 | `FRONTEND_URL` | `http://localhost:5173` | your portal URL | Used for the review links in approval emails |
 | `ORBIT_REMOTE_PUBLIC_URL` | *(empty)* | your portal URL | Address phones open from the Orbit Remote QR code (empty: the computer's address, or its Wi-Fi address instead of `localhost`) |
+
+Values that also appear in the admin panel's Settings (`AI_SERVICE_URL`, `FRONTEND_URL`, the brand, limits, Orbit
+switches, feature flags ...) are only defaults: a value saved in the panel takes precedence.
 
 ---
 

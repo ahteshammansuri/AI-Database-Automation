@@ -244,7 +244,7 @@ class ApprovalController extends Controller
             'rejection_feedback' => $feedback,
         ]);
 
-        $maxRetries = 3;
+        $maxRetries = max(1, (int) config('automation.max_regenerations', 3));
 
         $rejectedCount = ContentVersion::where('execution_id', $execution->id)
             ->where('status', 'REJECTED')

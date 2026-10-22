@@ -2171,7 +2171,7 @@ class AgentToolRegistry
 
     protected static function validateLeadTime(string $genTime, string $pubTime): array
     {
-        $min = \App\Services\Automation\ScheduleCalculator::MIN_GAP_MINUTES;
+        $min = \App\Services\Automation\ScheduleCalculator::minGapMinutes();
         $diff = \App\Services\Automation\ScheduleCalculator::gapMinutes($genTime, $pubTime);
         if ($diff === null) {
             return ['valid' => false, 'error' => 'Times must be HH:MM (24-hour).'];

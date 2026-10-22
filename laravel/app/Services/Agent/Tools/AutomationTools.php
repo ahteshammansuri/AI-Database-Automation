@@ -294,7 +294,7 @@ class AutomationTools
         if ($a->schedule_type === ScheduleCalculator::TYPE_NONE) {
             return ['success' => false, 'error' => 'This is the manual-publishing container; use Manual Publishing to post a record.'];
         }
-        $gap = max(ScheduleCalculator::MIN_GAP_MINUTES, (int) (ScheduleCalculator::gapMinutes($a->generation_time, $a->publication_time) ?? 30));
+        $gap = max(ScheduleCalculator::minGapMinutes(), (int) (ScheduleCalculator::gapMinutes($a->generation_time, $a->publication_time) ?? 30));
         $execution = AutomationExecution::create([
             'user_id' => $user->id,
             'automation_id' => $a->id,

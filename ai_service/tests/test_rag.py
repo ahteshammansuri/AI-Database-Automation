@@ -98,3 +98,47 @@ def test_real_product_guides_exist_and_cover_the_portal():
 
     names = {p.rsplit("/", 1)[-1] for p in rag_service._product_doc_paths()}
     assert {"product_context_rag.md", "automations_guide.md", "security_guide.md", "portal_tour.md"} <= names
+
+
+def test_published_guides_replace_bundled_ones_and_reindex(tmp_path, monkeypatch):
+    """Guides an admin publishes become Orbit's product knowledge; publishing nothing falls back to the bundled guides."""
+    from ai_service.app.rag.service import rag_service
+
+    monkeypatch.setattr(settings, "INDEX_DIR", str(tmp_path / "idx"))
+    bundled = tmp_path / "bundled.md"
+    bundled.write_text("# Bundled\n\n## Old\nThe bundled guide.\n")
+    monkeypatch.setattr(rag_service, "_product_doc_paths", lambda: [str(bundled)])
+    assert rag_service.product_guides_status()["source"] == "bundled"
+
+    res = client.post("/v1/rag/product-guides", headers=AUTH_HEADERS, json={"guides": [
+        {"name": "billing_guide", "title": "Billing", "content": "## Plans\nThe Pro plan allows unlimited automations."},
+        {"name": "faq", "title": "FAQ", "content": "# FAQ\n\n## Refunds\nRefunds are processed within 5 days."},
+    ]})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["source"] == "published" and body["guides"] == 2 and body["chunks"] >= 2
+    files = sorted(p.name for p in (tmp_path / "product_guides").glob("*.md"))
+    assert files == ["billing_guide.md", "faq.md"]
+    # A title is added as the top heading only when the content has none.
+    assert (tmp_path / "product_guides" / "billing_guide.md").read_text().startswith("# Billing\n")
+    assert (tmp_path / "product_guides" / "faq.md").read_text().count("# FAQ") == 1
+
+    found = rag_service.retrieve_for_agent(4243, "how many automations does the pro plan allow")
+    sources = {c["source_id"].split(":")[1] for c in found["chunks"] if c["scope"] == "product"}
+    assert sources and sources <= {"billing_guide", "faq"}
+
+    status = client.get("/v1/rag/product-guides/status", headers=AUTH_HEADERS).json()
+    assert status["source"] == "published" and status["guides"] == 2 and status["version"] == body["version"]
+
+    # Unpublished guides are removed; publishing none restores the bundled set.
+    assert client.post("/v1/rag/product-guides", headers=AUTH_HEADERS, json={"guides": [
+        {"name": "faq", "content": "## Refunds\nRefunds take 5 days."}]}).json()["guides"] == 1
+    assert [p.name for p in (tmp_path / "product_guides").glob("*.md")] == ["faq.md"]
+    back = client.post("/v1/rag/product-guides", headers=AUTH_HEADERS, json={"guides": []}).json()
+    assert back["source"] == "bundled" and rag_service._read_manifest(0)["sources"][0].endswith("bundled.md")
+
+
+def test_published_guide_names_must_be_slugs_and_endpoint_needs_the_service_token():
+    bad = client.post("/v1/rag/product-guides", headers=AUTH_HEADERS, json={"guides": [{"name": "../etc/passwd", "content": "x"}]})
+    assert bad.status_code == 422
+    assert client.get("/v1/rag/product-guides/status").status_code in (401, 403)

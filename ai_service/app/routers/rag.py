@@ -113,3 +113,27 @@ def ingest_platform_corpus():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Corpus ingestion failed: {str(e)}")
 
+
+class ProductGuide(BaseModel):
+    name: str
+    title: str = ""
+    content: str
+
+
+class PublishGuidesRequest(BaseModel):
+    guides: list[ProductGuide]
+
+
+@router.post("/product-guides")
+def publish_product_guides(req: PublishGuidesRequest):
+    """Orbit's knowledge of the website, as published by an admin (Laravel admin panel). Re-indexes right away."""
+    try:
+        return {"success": True, **rag_service.publish_product_guides([g.model_dump() for g in req.guides])}
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@router.get("/product-guides/status")
+def product_guides_status():
+    return rag_service.product_guides_status()
+

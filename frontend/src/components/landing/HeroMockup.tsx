@@ -5,6 +5,7 @@ import {
   ShieldCheck, Sparkles, Workflow,
 } from "lucide-react";
 import { EASE } from "./motion";
+import { usePlatform } from "../../context/PlatformContext";
 
 const STEPS = [
   { icon: ScanSearch, title: "Read the schema", meta: "posts · 9 columns · 2 relations" },
@@ -25,6 +26,7 @@ const SIDEBAR = [
 
 /** A stylised, animated view of one automation run inside the portal (illustration). */
 export const HeroMockup: React.FC<{ step: number }> = ({ step }) => {
+  const { brand } = usePlatform();
   const approved = step >= 3;
   const published = step >= 5;
   return (
@@ -46,7 +48,7 @@ export const HeroMockup: React.FC<{ step: number }> = ({ step }) => {
             <span className="grid place-items-center w-6 h-6 rounded-lg bg-gradient-to-br from-indigo-500 to-cyan-400">
               <Database className="w-3.5 h-3.5" />
             </span>
-            DataAuto
+            {brand}
           </div>
           {SIDEBAR.map(({ icon: Icon, label, active }) => (
             <div

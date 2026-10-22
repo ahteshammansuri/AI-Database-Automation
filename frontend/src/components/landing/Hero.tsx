@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { motion, useInView, useReducedMotion, useScroll, useSpring, useTransform } from "framer-motion";
 import { ArrowRight, Lock, PlayCircle, ServerCog, ShieldCheck, Sparkles } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
+import { usePlatform } from "../../context/PlatformContext";
 import { OrbitMascotCharacter, CharacterState } from "../agent/OrbitMascotCharacter";
 import { HeroMockup } from "./HeroMockup";
 import { EASE } from "./motion";
@@ -18,8 +19,16 @@ const fadeUp = (delay: number) => ({
   transition: { duration: 0.9, delay, ease: EASE },
 });
 
+/** Icon and colour for each point under the buttons, in order (points are edited in the admin panel). */
+const POINT_ICONS = [
+  { Icon: ServerCog, color: "text-cyan-300" },
+  { Icon: Lock, color: "text-violet-300" },
+  { Icon: ShieldCheck, color: "text-emerald-300" },
+];
+
 export const Hero: React.FC = () => {
   const { isAuthenticated } = useAuth();
+  const { content } = usePlatform();
   const reduced = useReducedMotion();
   const stage = useRef<HTMLDivElement>(null);
   const inView = useInView(stage, { margin: "0px 0px -10% 0px" });
@@ -59,7 +68,7 @@ export const Hero: React.FC = () => {
             className="group inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] pl-1.5 pr-3.5 py-1.5 text-[13px] text-slate-300 hover:border-indigo-400/40 hover:bg-white/[0.07] transition-colors"
           >
             <span className="rounded-full bg-gradient-to-r from-indigo-500 to-violet-500 px-2 py-0.5 text-[11px] font-semibold text-white">New</span>
-            Meet Orbit, the voice-first operator for your portal
+            {content.hero_badge}
             <ArrowRight className="w-3.5 h-3.5 text-slate-400 transition-transform group-hover:translate-x-0.5" />
           </motion.a>
 
@@ -67,14 +76,13 @@ export const Hero: React.FC = () => {
             {...fadeUp(0.08)}
             className="mt-7 text-[2.7rem] leading-[1.02] sm:text-[4rem] lg:text-[5.1rem] font-extrabold tracking-[-0.045em] text-white"
           >
-            Put your database
+            {content.hero_title}
             <br />
-            <span className="landing-shimmer-text">on autopilot.</span>
+            <span className="landing-shimmer-text">{content.hero_highlight}</span>
           </motion.h1>
 
           <motion.p {...fadeUp(0.16)} className="mt-6 text-[17px] sm:text-xl leading-relaxed text-slate-400 max-w-2xl mx-auto">
-            DataAuto connects to your MySQL database, understands every table, and writes on-brand content into it with
-            your own AI: on schedule, approved by a person, and validated before every write.
+            {content.hero_subtitle}
           </motion.p>
 
           <motion.div {...fadeUp(0.24)} className="mt-9 flex flex-col sm:flex-row items-center justify-center gap-3">
@@ -82,14 +90,14 @@ export const Hero: React.FC = () => {
               to={isAuthenticated ? "/dashboard" : "/register"}
               className="group relative inline-flex w-full sm:w-auto items-center justify-center gap-2 rounded-full bg-white px-7 py-3.5 text-[15px] font-semibold text-slate-950 shadow-[0_0_0_1px_rgba(255,255,255,0.1),0_18px_50px_-12px_rgba(129,140,248,0.75)] transition-transform hover:-translate-y-0.5"
             >
-              {isAuthenticated ? "Open your dashboard" : "Start for free"}
+              {isAuthenticated ? "Open your dashboard" : content.hero_primary_cta}
               <ArrowRight className="w-4 h-4 transition-transform group-hover:translate-x-1" />
             </Link>
             <a
               href="#how-it-works"
               className="group inline-flex w-full sm:w-auto items-center justify-center gap-2 rounded-full border border-white/15 bg-white/[0.03] px-7 py-3.5 text-[15px] font-semibold text-white hover:bg-white/[0.08] hover:border-white/25 transition-colors"
             >
-              <PlayCircle className="w-4 h-4 text-indigo-300" /> See how it works
+              <PlayCircle className="w-4 h-4 text-indigo-300" /> {content.hero_secondary_cta}
             </a>
           </motion.div>
 
@@ -97,9 +105,10 @@ export const Hero: React.FC = () => {
             {...fadeUp(0.32)}
             className="mt-9 flex flex-wrap items-center justify-center gap-x-7 gap-y-3 text-[13px] text-slate-400"
           >
-            <li className="flex items-center gap-2"><ServerCog className="w-4 h-4 text-cyan-300" /> Runs on local Ollama, no paid API</li>
-            <li className="flex items-center gap-2"><Lock className="w-4 h-4 text-violet-300" /> Credentials encrypted at rest</li>
-            <li className="flex items-center gap-2"><ShieldCheck className="w-4 h-4 text-emerald-300" /> Every write validated and audited</li>
+            {content.hero_points.map((point, i) => {
+              const { Icon, color } = POINT_ICONS[i % POINT_ICONS.length];
+              return <li key={i} className="flex items-center gap-2"><Icon className={`w-4 h-4 ${color}`} /> {point.text}</li>;
+            })}
           </motion.ul>
         </div>
 

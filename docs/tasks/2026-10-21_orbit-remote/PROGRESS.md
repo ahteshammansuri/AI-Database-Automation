@@ -27,3 +27,14 @@
   OrbitRemoteTest 15/15. Two-device probe: 16/16 checks passed before the stack went down (pairing, QR -> Wi-Fi
   address, QR decodes, phone face, live link, validation, password refusal, request relay, mirrored states, eyes).
   Bug found and fixed: double claim under React StrictMode (single-flight claim).
+- R8 DONE (2026-10-21):
+  - Two-device browser test (desktop tab + emulated iPhone), http: 18/19 (the 1 was correct: over http the phone has
+    no microphone, so holding opens Type). https (npm run dev:https, 5174): 10/10 incl. secure context, live socket
+    through /app proxy, hold -> phone listening + "Listening on iPhone" pill + web Orbit listening, disconnect.
+    QR decoded (OpenCV) to http://192.168.1.19:5173/orbit/remote#code=...
+  - Fixes from testing: single-flight claim (StrictMode double mount refused the 2nd claim); phone listening now has
+    the same precedence as holding the web Orbit (was ignored while a task ran); tighter head crop; dashboard names
+    itself for the phone ("On Dashboard"); "Portal" fallback hidden.
+  - Laravel full suite: 204 passed, 23 failed, 1 skipped; failing set identical to before this feature (environmental).
+  - QA user + sessions deleted; its running Orbit task cancelled first.
+  - Not verifiable here: real speech recognition on a physical phone (headless Chrome has no speech service).

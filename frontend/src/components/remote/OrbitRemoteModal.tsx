@@ -6,6 +6,7 @@ import { PhoneOrbitMock } from "./PhoneOrbitMock";
 import { useOrbitRemote } from "../../context/OrbitRemoteContext";
 import { orbitPresence } from "../../services/orbitPresence";
 import { formatCountdown, micNeedsHttps, remoteFaceState } from "../../services/orbitRemoteProtocol";
+import { BrandName } from "../../context/PlatformContext";
 
 const ENDED_TEXT: Record<string, string> = {
   disconnected_from_phone: "The phone disconnected.",
@@ -170,7 +171,7 @@ export const OrbitRemoteModal: React.FC = () => {
                 {r.link.reach === "local" && (
                   <p className="mt-2 flex items-start gap-1.5 text-[12px] leading-relaxed text-amber-700">
                     <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" /> A phone cannot open “localhost”, and no Wi-Fi address was found on this computer.
-                    Open DataAuto with this computer's network address, or set ORBIT_REMOTE_PUBLIC_URL.
+                    Open <BrandName /> with this computer's network address, or set ORBIT_REMOTE_PUBLIC_URL.
                   </p>
                 )}
               </div>
@@ -180,7 +181,7 @@ export const OrbitRemoteModal: React.FC = () => {
                   <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
                   <span>
                     Phones only allow the microphone on secure (https) pages. On this address you can still type to Orbit from the phone.
-                    For voice, open DataAuto over https (in development: <code className="font-mono font-semibold">npm run dev:https</code>).
+                    For voice, open <BrandName /> over https (in development: <code className="font-mono font-semibold">npm run dev:https</code>).
                   </span>
                 </p>
               )}
@@ -245,7 +246,7 @@ export const OrbitRemoteModal: React.FC = () => {
             <div>
               <h3 className="text-[17px] font-bold text-slate-950">Your phone is working with another tab</h3>
               <p className="mx-auto mt-1 max-w-md text-[13.5px] text-slate-500">
-                {r.session?.device_label || "Your phone"} sends its requests to DataAuto in another tab or window. You can move it here.
+                {r.session?.device_label || "Your phone"} sends its requests to <BrandName /> in another tab or window. You can move it here.
               </p>
             </div>
             <div className="flex flex-wrap justify-center gap-2">

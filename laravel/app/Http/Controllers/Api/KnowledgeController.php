@@ -27,10 +27,11 @@ class KnowledgeController extends Controller
 
     public function upload(Request $request)
     {
+        $mb = (int) config('platform.knowledge_max_upload_mb', 10);
         $request->validate([
-            'file' => 'required|file|max:10240|extensions:md,markdown,txt,pdf', // 10MB max
+            'file' => 'required|file|max:' . ($mb * 1024) . '|extensions:md,markdown,txt,pdf', // admin setting (MB)
             'title' => 'nullable|string|max:255',
-        ]);
+        ], ['file.max' => "The file must be {$mb} MB or smaller."]);
 
         $file = $request->file('file');
         $extension = strtolower($file->getClientOriginalExtension());

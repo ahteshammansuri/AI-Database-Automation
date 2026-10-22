@@ -11,8 +11,19 @@ use PDO;
 
 class DataChangeService
 {
+    // Defaults; the live limits are admin settings (Settings > Data assistant).
     private const MAX_WRITE_ROWS = 100;
     private const MAX_DELETE_ROWS = 50;
+
+    private static function maxWriteRows(): int
+    {
+        return max(1, (int) config('data_agent.max_write_rows', self::MAX_WRITE_ROWS));
+    }
+
+    private static function maxDeleteRows(): int
+    {
+        return max(1, (int) config('data_agent.max_delete_rows', self::MAX_DELETE_ROWS));
+    }
 
     public function __construct(
         protected TargetConnector $targetConnector,
@@ -68,7 +79,7 @@ class DataChangeService
         }
 
         $whereClause = !empty($whereSql) ? 'WHERE ' . implode(' AND ', $whereSql) : '';
-        $sql = "SELECT * FROM {$qTable} {$whereClause} LIMIT " . (self::MAX_WRITE_ROWS + 1);
+        $sql = "SELECT * FROM {$qTable} {$whereClause} LIMIT " . (self::maxWriteRows() + 1);
 
         $pdo = $this->targetConnector->getReadOnlyPdo($connection);
         $stmt = $pdo->prepare($sql);
@@ -84,8 +95,8 @@ class DataChangeService
             ];
         }
 
-        if ($count > self::MAX_WRITE_ROWS) {
-            throw new DataException('MAX_ROWS_EXCEEDED', "Update matches more than the maximum allowed " . self::MAX_WRITE_ROWS . " rows ({$count} found). Narrow your criteria.");
+        if ($count > self::maxWriteRows()) {
+            throw new DataException('MAX_ROWS_EXCEEDED', "Update matches more than the maximum allowed " . self::maxWriteRows() . " rows ({$count} found). Narrow your criteria.");
         }
 
         $pks = array_column($targetRows, $primaryKey);
@@ -175,7 +186,7 @@ class DataChangeService
         }
 
         $whereClause = 'WHERE ' . implode(' AND ', $whereSql);
-        $sql = "SELECT * FROM {$qTable} {$whereClause} LIMIT " . (self::MAX_DELETE_ROWS + 1);
+        $sql = "SELECT * FROM {$qTable} {$whereClause} LIMIT " . (self::maxDeleteRows() + 1);
 
         $pdo = $this->targetConnector->getReadOnlyPdo($connection);
         $stmt = $pdo->prepare($sql);
@@ -191,8 +202,8 @@ class DataChangeService
             ];
         }
 
-        if ($count > self::MAX_DELETE_ROWS) {
-            throw new DataException('MAX_ROWS_EXCEEDED', "Delete matches {$count} rows, exceeding maximum limit of " . self::MAX_DELETE_ROWS . " rows.");
+        if ($count > self::maxDeleteRows()) {
+            throw new DataException('MAX_ROWS_EXCEEDED', "Delete matches {$count} rows, exceeding maximum limit of " . self::maxDeleteRows() . " rows.");
         }
 
         $pks = array_column($targetRows, $primaryKey);

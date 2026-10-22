@@ -362,3 +362,31 @@ Device token failures: **401** `{message, reason}` with reason `not_connected`, 
 text, sent_at`), `orbit.remote_ended`. Channel `private-orbit-remote.{id}`: server event `.remote.signal`
 (`paired` / `command` / `ended`); client events `state`, `gaze`, `speech` (tab → phone) and `listening`, `hello`
 (phone → tab). See `frontend/src/services/orbitRemoteProtocol.ts`.
+
+## Admin panel: public settings and account states (2026-10-21)
+
+The admin panel (`/admin`, Filament, session guard `admin`) is not part of the REST API. What it changes reaches the
+portal through these endpoints and response codes.
+
+**Public (no auth, `throttle:120,1`, `Cache-Control: no-cache`)**
+| Endpoint | Result |
+| --- | --- |
+| `GET /api/platform/config` | `{platform: {brand_name, tagline, support_email, registration_open, registration_closed_message, password_min_length, knowledge_max_upload_mb, media_max_upload_mb}, automation: {min_gap_minutes}, orbit: {enabled, remote_enabled}, features: {...}}`. Only settings marked public; never keys, URLs of internal services or credentials. |
+| `GET /api/site/content` | Website texts: `announcement_*`, `hero_*` (incl. `hero_points[]`), `{product,how,orbit,security,use_cases}_{eyebrow,title,highlight,title_end,subtitle}`, `auth_*`, `faq_*` and `faqs[] {question, answer}`, `closing_*`, `footer_*`, `meta_title`, `meta_description`. `{brand}` is already replaced by the brand name. |
+
+**Responses caused by admin settings or actions**
+| When | Response |
+| --- | --- |
+| Sign-ups closed | `POST /api/auth/register` **403** `{message, errors.email[0], reason: "registration_closed"}` |
+| Password shorter than the configured minimum | `POST /api/auth/register` **422** `errors.password` |
+| Account suspended | `POST /api/auth/login` **422** `errors.email` ("This account is suspended…"); any authenticated call **403** `{message, reason: "suspended"}`. Suspending also revokes every token (calls then get **401**). |
+| Per-customer limit reached | `POST /api/connections`, `POST /api/automations` **422** `errors.name` |
+| Orbit turned off | `POST /api/agent/conversations/{id}/messages`, `/agent/tasks/{id}/correct`, `/agent/tasks/{id}/continue` **503** `{message, reason: "orbit_disabled"}` |
+| Orbit Remote turned off (or Orbit off) | `POST /api/orbit-remote/sessions` and `POST /api/orbit-remote/claim` **403**; device calls **401** `reason: "disabled"` |
+| Phone ended by an admin action | device calls **401** with `reason` `signed_out_by_admin`, `suspended`, `disconnected_by_admin` or `account_deleted` |
+
+**Internal AI service (X-Service-Token)**
+| Endpoint | Body | Result |
+| --- | --- | --- |
+| `POST /v1/rag/product-guides` | `guides: [{name (slug), title, content}]` | Replaces Orbit's published product guides and re-indexes: `{success, guides, vectors, chunks, version, indexed_at, embedding_backend, source}`. An empty list falls back to the built-in `docs/orbit-agent` guides. **422** for a name that is not a slug. |
+| `GET /v1/rag/product-guides/status` | | `{source: "published"|"bundled", guides, chunks, version, indexed_at, embedding_backend}` |

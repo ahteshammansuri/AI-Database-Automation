@@ -4,6 +4,7 @@ import { ArrowRight, Lock, Mail, ShieldCheck } from "lucide-react";
 import { AuthShell } from "../components/ui/AuthShell";
 import { FieldError, FormAlert } from "../components/ui/kit";
 import { useAuth } from "../context/AuthContext";
+import { usePlatform } from "../context/PlatformContext";
 import { api } from "../services/api";
 import { ariaFor, clearError, focusFirstError, invalid, rules, serverFieldErrors, validate, type FieldErrors } from "../lib/validation";
 
@@ -16,7 +17,10 @@ const FIELD_ID: Record<string, string> = { email: "login-email", password: "logi
 export const LoginPage: React.FC = () => {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  // Left by an ended session (signed out by an administrator, suspended account).
+  const [error, setError] = useState<string | null>(() => sessionStorage.getItem("auth_notice"));
+  useEffect(() => sessionStorage.removeItem("auth_notice"), []);
+  const { brand } = usePlatform();
   const [errors, setErrors] = useState<FieldErrors>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -64,8 +68,8 @@ export const LoginPage: React.FC = () => {
   return (
     <AuthShell
       title="Welcome back"
-      subtitle="Sign in to your DataAuto workspace."
-      footer={<>New to DataAuto? <Link to="/register" className="font-semibold text-indigo-600 hover:text-indigo-700">Create a workspace</Link></>}
+      subtitle={`Sign in to your ${brand} workspace.`}
+      footer={<>New to {brand}? <Link to="/register" className="font-semibold text-indigo-600 hover:text-indigo-700">Create a workspace</Link></>}
     >
       <form onSubmit={handleSubmit} noValidate className="space-y-4">
         <FormAlert message={error} onClose={() => setError(null)} />

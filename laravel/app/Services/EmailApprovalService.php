@@ -26,7 +26,7 @@ class EmailApprovalService
         $version->loadMissing('execution.automation.connection');
         $automation = $version->execution->automation;
 
-        $frontendUrl = rtrim((string) env('FRONTEND_URL', 'http://localhost:5173'), '/');
+        $frontendUrl = rtrim((string) config('app.frontend_url', 'http://localhost:5173'), '/');
         $reviewUrl = "{$frontendUrl}/approvals/{$tokenRecord->token}";
 
         $sent = false;

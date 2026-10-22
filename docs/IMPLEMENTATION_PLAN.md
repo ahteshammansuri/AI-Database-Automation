@@ -172,3 +172,18 @@ Plan and resumable status: `docs/tasks/2026-10-16_orbit-agent-upgrade/PLAN.md` a
 | O8 | Decider policy: long requests, validation feedback, confirmations, tours, accuracy | DONE |
 | O9 | Character: smooth blink, idle personality, petting, smoother lip-sync, limb motion, landing squash | DONE (tested, rendered) |
 | O10 | Tests, docs, real-browser run | see PROGRESS.md |
+
+## Admin panel (2026-10-21)
+
+Filament v5 panel at `/admin` for the platform's operators (see `docs/tasks/2026-10-21_admin-panel/`).
+
+| # | Item | Status |
+|---|---|---|
+| A1 | Separate admins + guard, roles and permissions (spatie), `admin:create`, `admin:sync-permissions`, admin activity log, 2FA | DONE (tested) |
+| A2 | Settings in the database applied over config at boot and before each queue job; constants moved to config; settings pages | DONE (tested) |
+| A3 | Website content (announcement, hero, section headings, FAQ, closing, footer, sign-in panel, SEO) | DONE (tested, browser) |
+| A4 | Customers with usage and account actions; connections, automations, runs, Orbit requests, paired phones, activity logs; overview dashboard | DONE (browser) |
+| A5 | Orbit knowledge guides: edit, publish to the AI service, live status | DONE (tested, browser, real embedder) |
+| A6 | System health and failed jobs | DONE (tested, browser) |
+| A7 | Portal and website read the settings and content | DONE (tsc, lint, unit tests, browser) |
+| A8 | Feature tests (`AdminPanelTest`, 22), full suites, docs | DONE (see PROGRESS.md) |

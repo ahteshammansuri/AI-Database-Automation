@@ -16,6 +16,8 @@ import { useRefreshAfterOrbit } from "../hooks/useRefreshAfterOrbit";
 import { orbitTargets } from "../services/orbitTargets";
 import { useSearchParams } from "react-router-dom";
 import { ContentPreview } from "../components/content/ContentPreview";
+import { WysiwygEditor } from "../components/content/WysiwygEditor";
+import { looksLikeHtml } from "../components/content/RichText";
 import { formatInstant, relativeFromNow } from "../lib/schedule";
 
 const TRIGGER_LABEL: Record<string, string> = { SCHEDULE: "Scheduled", MANUAL: "Run now", MANUAL_PUBLISH: "Manual post" };
@@ -1126,7 +1128,16 @@ export const ExecutionsPage: React.FC = () => {
                                 <span>{key}</span>
                                 <span className="text-slate-400 font-sans font-normal text-[10px]">Editable Field</span>
                               </label>
-                              {typeof val === "string" && val.length > 80 ? (
+                              {typeof val === "string" && looksLikeHtml(val) ? (
+                                <WysiwygEditor
+                                  id={recordFieldId(key)}
+                                  value={val}
+                                  onChange={(newVal) => setRecordField(key, newVal)}
+                                  minHeight="180px"
+                                  compact
+                                  error={recordErrors[key]}
+                                />
+                              ) : typeof val === "string" && val.length > 80 ? (
                                 <textarea
                                   id={recordFieldId(key)}
                                   value={val}

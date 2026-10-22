@@ -8,23 +8,43 @@ import { OrbitShowcase } from "../components/landing/OrbitShowcase";
 import { SecuritySection } from "../components/landing/SecuritySection";
 import { UseCases } from "../components/landing/UseCases";
 import { Faq, FinalCta, LandingFooter } from "../components/landing/Closing";
+import { usePlatform } from "../context/PlatformContext";
 
 /**
  * Public product page. Every claim on it matches what the product really does (see AGENTS.md,
  * docs/DECISIONS.md ADR-010 and docs/CAPABILITIES.md); demos are labelled as illustrations.
  */
 export const LandingPage: React.FC = () => {
+  const { content } = usePlatform();
+
   useEffect(() => {
-    const prevTitle = document.title;
     const root = document.documentElement;
     const prevScroll = root.style.scrollBehavior;
-    document.title = "DataAuto · AI automation for your own database";
     root.style.scrollBehavior = "smooth";
     return () => {
-      document.title = prevTitle;
       root.style.scrollBehavior = prevScroll;
     };
   }, []);
+
+  // Title and description for search engines, as set in the admin panel (Website content).
+  useEffect(() => {
+    const prevTitle = document.title;
+    let meta = document.querySelector<HTMLMetaElement>('meta[name="description"]');
+    const created = !meta;
+    if (!meta) {
+      meta = document.createElement("meta");
+      meta.name = "description";
+      document.head.appendChild(meta);
+    }
+    const prevDescription = meta.content;
+    document.title = content.meta_title;
+    meta.content = content.meta_description;
+    return () => {
+      document.title = prevTitle;
+      if (created) meta?.remove();
+      else if (meta) meta.content = prevDescription;
+    };
+  }, [content.meta_title, content.meta_description]);
 
   return (
     // overflow-x-clip (not hidden) keeps the pinned "How it works" story working.

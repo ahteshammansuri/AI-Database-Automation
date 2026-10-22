@@ -12,8 +12,8 @@ class AiServiceClient
 
     public function __construct()
     {
-        $this->baseUrl = rtrim(env('AI_SERVICE_URL', 'http://127.0.0.1:8001'), '/');
-        $this->serviceToken = env('AI_SERVICE_KEY', 'platform_secret_internal_key_2026');
+        $this->baseUrl = rtrim((string) config('services.ai.url', 'http://127.0.0.1:8001'), '/');
+        $this->serviceToken = (string) config('services.ai.key', 'platform_secret_internal_key_2026');
     }
 
     protected function client()
@@ -241,6 +241,33 @@ class AiServiceClient
         }
 
         return '';
+    }
+
+    /**
+     * Replace Orbit's product knowledge with the guides published from the admin panel (the AI service re-indexes).
+     */
+    public function publishProductGuides(array $guides): array
+    {
+        $res = $this->client()->post("{$this->baseUrl}/v1/rag/product-guides", ['guides' => array_values($guides)]);
+
+        if (!$res->successful()) {
+            throw new Exception((string) ($res->json('detail') ?? "HTTP {$res->status()}"));
+        }
+
+        return $res->json();
+    }
+
+    /**
+     * Which guides Orbit is using (published or built-in) and when they were indexed. Null when unreachable.
+     */
+    public function productGuidesStatus(): ?array
+    {
+        try {
+            $res = $this->agentClient(4)->get("{$this->baseUrl}/v1/rag/product-guides/status");
+            return $res->successful() ? $res->json() : null;
+        } catch (\Throwable) {
+            return null;
+        }
     }
 
     /**

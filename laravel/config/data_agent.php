@@ -13,6 +13,7 @@ return [
     'llm_sample_rows' => 5,               // rows a model may see, and only when privacy mode allows
     'explain_max_rows' => (int) env('DATA_AGENT_EXPLAIN_MAX_ROWS', 2000000),
     'explain_max_cost' => (float) env('DATA_AGENT_EXPLAIN_MAX_COST', 5000000),
+    'max_result_rows' => 200,             // rows a data question may return
     'max_write_rows' => 100,
     'max_delete_rows' => 50,
     'change_request_ttl_minutes' => 15,

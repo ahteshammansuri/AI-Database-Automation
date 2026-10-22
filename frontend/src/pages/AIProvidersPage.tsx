@@ -12,6 +12,7 @@ import { useOrbitTarget } from "../hooks/useOrbitTarget";
 import { orbitTargets } from "../services/orbitTargets";
 import { actionTarget, fieldTarget } from "../services/orbitSurfaces";
 import { pageStateService } from "../services/pageStateService";
+import { BrandName } from "../context/PlatformContext";
 
 export const AIProvidersPage: React.FC = () => {
   const [providers, setProviders] = useState<AIProviderInfo[]>([]);
@@ -227,14 +228,14 @@ export const AIProvidersPage: React.FC = () => {
             </span>
             <h3 className="mt-4 text-[22px] font-bold tracking-[-0.02em] text-white">Run models on your own machine with Ollama</h3>
             <p className="mt-2 max-w-xl text-[14px] leading-relaxed text-slate-400">
-              DataAuto talks to Ollama at <code className="rounded bg-white/10 px-1.5 py-0.5 font-mono text-emerald-300">http://localhost:11434</code>. Pull a writing model and the embedding model, then pick them below.
+              <BrandName /> talks to Ollama at <code className="rounded bg-white/10 px-1.5 py-0.5 font-mono text-emerald-300">http://localhost:11434</code>. Pull a writing model and the embedding model, then pick them below.
             </p>
             <a href="https://ollama.com" target="_blank" rel="noreferrer" className="mt-4 inline-flex items-center gap-1.5 text-[13px] font-semibold text-indigo-300 hover:text-white">
               ollama.com <ExternalLink className="h-3.5 w-3.5" />
             </a>
           </div>
           <div className="overflow-x-auto rounded-2xl border border-white/10 bg-black/40 p-4 font-mono text-[12.5px] leading-7 text-emerald-300">
-            <div className="text-slate-500"># install, then pull the models DataAuto uses</div>
+            <div className="text-slate-500"># install, then pull the models <BrandName /> uses</div>
             <div>curl -fsSL https://ollama.com/install.sh | sh</div>
             <div>ollama pull qwen2.5:3b</div>
             <div>ollama pull nomic-embed-text</div>

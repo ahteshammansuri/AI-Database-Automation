@@ -1,13 +1,13 @@
 import React, { useRef, useState } from "react";
 import { AnimatePresence, motion, useMotionValueEvent, useScroll, useSpring } from "framer-motion";
 import { CheckCircle2, Database, Image, Link2, Lock, Mail, ScanSearch, Sparkles, Type, Clock3 } from "lucide-react";
-import { SectionHeading, Accent } from "./primitives";
+import { ManagedHeading } from "./primitives";
 import { EASE } from "./motion";
 
 const STEPS = [
   {
     title: "Connect your database",
-    body: "Add a MySQL connection from the portal. DataAuto tests it first, encrypts the password, and starts every connection in read-only mode.",
+    body: "Add a MySQL connection from the portal. The platform tests it first, encrypts the password, and starts every connection in read-only mode.",
   },
   {
     title: "Let it learn the schema",
@@ -241,11 +241,7 @@ export const HowItWorks: React.FC = () => {
   return (
     <section id="how-it-works" data-nav-theme="light" className="relative bg-white scroll-mt-16">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 pt-24 sm:pt-32">
-        <SectionHeading
-          eyebrow="How it works"
-          title={<>From connection to published, <Accent>in five steps</Accent></>}
-          subtitle="Set it up once in the portal. After that, the work happens on schedule in the background, with a person in the loop where it matters."
-        />
+        <ManagedHeading section="how" />
       </div>
 
       {/* Desktop: a pinned story that advances as you scroll */}

@@ -137,6 +137,13 @@ class AutomationController extends Controller
 
     public function store(Request $request)
     {
+        // Per-customer limit set by a platform admin (0 = none). Manual-publishing containers do not count.
+        $limit = (int) config('platform.max_automations_per_customer', 0);
+        if ($limit > 0 && Automation::where('user_id', $request->user()->id)->where('schedule_type', '!=', ScheduleCalculator::TYPE_NONE)->count() >= $limit) {
+            $msg = "Your account can have up to {$limit} automations. Delete one to add another.";
+            return response()->json(['message' => $msg, 'errors' => ['name' => [$msg]]], 422);
+        }
+
         [$errors, $validated] = $this->validateConfiguration($request);
 
         $connection = DbConnection::where('user_id', $request->user()->id)
@@ -294,7 +301,7 @@ class AutomationController extends Controller
             ->where('id', $id)
             ->firstOrFail();
 
-        $gap = max(ScheduleCalculator::MIN_GAP_MINUTES, (int) (ScheduleCalculator::gapMinutes($automation->generation_time, $automation->publication_time) ?? 30));
+        $gap = max(ScheduleCalculator::minGapMinutes(), (int) (ScheduleCalculator::gapMinutes($automation->generation_time, $automation->publication_time) ?? 30));
         $execution = AutomationExecution::create([
             'user_id' => $request->user()->id,
             'automation_id' => $automation->id,

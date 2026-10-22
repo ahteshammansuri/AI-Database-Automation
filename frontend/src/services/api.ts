@@ -98,6 +98,12 @@ async function request<T>(endpoint: string, options?: RequestOptions): Promise<T
         err.status = response.status;
         err.errors = errData?.errors ?? null;
         err.data = errData;
+        // The session ended on the server (signed out by an administrator, account suspended or deleted).
+        const ended = (response.status === 401 && token && !endpoint.startsWith("/auth/"))
+          || (response.status === 403 && errData?.reason === "suspended");
+        if (ended) {
+          window.dispatchEvent(new CustomEvent("auth:ended", { detail: { reason: errData?.reason ?? "unauthenticated", message: errData?.message } }));
+        }
         throw err;
       }
 
@@ -138,6 +144,11 @@ let lastHeartbeatTime = 0;
 let lastHeartbeatPromise: Promise<any> | null = null;
 
 export const api = {
+  // Platform settings and website texts (public, managed in the admin panel)
+  // Always re-checked with the server, so an administrator's change shows on the next load.
+  getPlatformConfig: (fresh = false) => request<any>("/platform/config", { forceRefresh: fresh, cache: "no-store" }),
+  getSiteContent: (fresh = false) => request<any>("/site/content", { forceRefresh: fresh, cache: "no-store" }),
+
   // Auth
   register: (data: any) => request<any>("/auth/register", { method: "POST", body: JSON.stringify(data) }),
   login: (data: any) => request<any>("/auth/login", { method: "POST", body: JSON.stringify(data) }),

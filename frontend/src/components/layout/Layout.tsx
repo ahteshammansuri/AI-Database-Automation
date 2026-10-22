@@ -9,9 +9,14 @@ import { FloatingMascot } from "../agent/FloatingMascot";
 import { OrbitRemoteProvider } from "../../context/OrbitRemoteContext";
 import { OrbitRemoteModal } from "../remote/OrbitRemoteModal";
 import { PhoneListeningPill } from "../remote/PhoneListeningPill";
+import { AnnouncementBar } from "../common/AnnouncementBar";
+import { usePlatform } from "../../context/PlatformContext";
 
 export const Layout: React.FC = () => {
   const location = useLocation();
+  // Administrators can turn Orbit and Orbit Remote off (the server refuses them too).
+  const { orbit } = usePlatform().config;
+  const remoteOn = orbit.enabled && orbit.remote_enabled;
   const [pendingCount, setPendingCount] = useState<number>(0);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [mobileNavOpen, setMobileNavOpen] = useState<boolean>(false);
@@ -53,6 +58,7 @@ export const Layout: React.FC = () => {
         {/* Soft grid + glow behind the top of every page, as on the landing page */}
         <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 h-80 portal-canvas-grid" />
         <div aria-hidden className="pointer-events-none absolute -top-40 right-0 h-80 w-[36rem] rounded-full bg-indigo-400/10 blur-3xl" />
+        <AnnouncementBar />
         <Navbar onRefresh={fetchGlobalStats} isRefreshing={isRefreshing} onOpenMenu={() => setMobileNavOpen(true)} menuOpen={mobileNavOpen} />
         <main className="relative flex-1 overflow-y-auto overflow-x-hidden px-4 py-6 sm:px-6 sm:py-8 lg:px-10 lg:py-10">
           <div className="max-w-7xl mx-auto">
@@ -75,11 +81,15 @@ export const Layout: React.FC = () => {
       </div>
 
       {/* Voice-First Floating Autonomous Mascot AI Agent */}
-      <FloatingMascot />
+      {orbit.enabled && <FloatingMascot />}
 
       {/* Orbit Remote: pair a phone, and show when it is listening */}
-      <OrbitRemoteModal />
-      <PhoneListeningPill />
+      {remoteOn && (
+        <>
+          <OrbitRemoteModal />
+          <PhoneListeningPill />
+        </>
+      )}
     </div>
     </OrbitRemoteProvider>
   );

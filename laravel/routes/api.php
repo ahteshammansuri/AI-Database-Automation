@@ -30,6 +30,10 @@ use App\Http\Middleware\AuthenticateOrbitRemoteDevice;
 // Public Health Check
 Route::get('/health', fn () => response()->json(['status' => 'healthy', 'service' => 'laravel-control-plane']));
 
+// Public platform settings and website content (managed in the admin panel)
+Route::get('/platform/config', [\App\Http\Controllers\Api\PlatformController::class, 'config'])->middleware('throttle:120,1');
+Route::get('/site/content', [\App\Http\Controllers\Api\PlatformController::class, 'content'])->middleware('throttle:120,1');
+
 // Public Authentication
 Route::post('/auth/register', [AuthController::class, 'register']);
 Route::post('/auth/login', [AuthController::class, 'login']);
@@ -54,7 +58,7 @@ Route::middleware([AuthenticateOrbitRemoteDevice::class, 'throttle:180,1'])->pre
     Route::post('/end', [OrbitRemoteDeviceController::class, 'end']);
 });
 
-Route::middleware('auth:sanctum')->group(function () {
+Route::middleware(['auth:sanctum', \App\Http\Middleware\EnsureCustomerActive::class])->group(function () {
     // Current user & session
     Route::get('/auth/me', [AuthController::class, 'me']);
     Route::post('/auth/logout', [AuthController::class, 'logout']);
@@ -140,10 +144,10 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/agent/conversations', [AgentController::class, 'index']);
     Route::post('/agent/conversations', [AgentController::class, 'store']);
     Route::get('/agent/conversations/{id}', [AgentController::class, 'show']);
-    Route::post('/agent/conversations/{id}/messages', [AgentController::class, 'postMessage']);
+    Route::post('/agent/conversations/{id}/messages', [AgentController::class, 'postMessage'])->middleware(\App\Http\Middleware\EnsureOrbitEnabled::class);
     Route::get('/agent/tasks/{id}', [AgentController::class, 'getTask']);
     Route::post('/agent/tasks/{id}/interrupt', [AgentController::class, 'interrupt']);
-    Route::post('/agent/tasks/{id}/correct', [AgentController::class, 'correct']);
+    Route::post('/agent/tasks/{id}/correct', [AgentController::class, 'correct'])->middleware(\App\Http\Middleware\EnsureOrbitEnabled::class);
     Route::post('/agent/tasks/{id}/confirm', [AgentController::class, 'confirm']);
     Route::get('/agent/tasks/{id}/timeline', [AgentController::class, 'timeline']);
     Route::get('/agent/preferences', [AgentController::class, 'getPreferences']);
@@ -152,7 +156,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/agent/ui-actions/{correlationId}/ack', [AgentController::class, 'uiAck']);
     Route::post('/agent/heartbeat', [AgentController::class, 'heartbeat']);
     Route::get('/agent/surfaces', [AgentController::class, 'surfaces']);
-    Route::post('/agent/tasks/{id}/continue', [AgentController::class, 'continueAfterSecret']);
+    Route::post('/agent/tasks/{id}/continue', [AgentController::class, 'continueAfterSecret'])->middleware(\App\Http\Middleware\EnsureOrbitEnabled::class);
 
     // Natural-Language Data Agent (ADR-010, Section 3-5)
     Route::post('/data-agent/ask', [DataAgentController::class, 'ask']);

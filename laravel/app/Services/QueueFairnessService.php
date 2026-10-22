@@ -19,14 +19,21 @@ class QueueFairnessService
      */
     public const DEFAULT_TENANT_CONCURRENCY_CAP = 3;
 
+    /** Runs of one customer that may execute at once (admin panel: Settings > Automations). */
+    public static function concurrencyCap(): int
+    {
+        return max(1, (int) config('automation.tenant_concurrency', self::DEFAULT_TENANT_CONCURRENCY_CAP));
+    }
+
     /**
      * Fair round-robin dispatch across tenants for runs due in the same cohort.
      *
      * Each item is either ['automation' => Automation, 'occurrence' => array] (from the
      * ScheduleCalculator) or a bare Automation, in which case today's local occurrence is used.
      */
-    public function dispatchDueCohort(Collection $dueItems, int $concurrencyCap = self::DEFAULT_TENANT_CONCURRENCY_CAP): array
+    public function dispatchDueCohort(Collection $dueItems, ?int $concurrencyCap = null): array
     {
+        $concurrencyCap ??= self::concurrencyCap();
         if ($dueItems->isEmpty()) {
             return ['dispatched' => 0, 'queued' => 0];
         }
@@ -135,8 +142,9 @@ class QueueFairnessService
      * Dispatch scheduled runs that were held back by the per-tenant concurrency cap, oldest first,
      * once that tenant has free capacity. Runs already handed to the queue carry a lease and are skipped.
      */
-    public function dispatchWaitingRuns(int $concurrencyCap = self::DEFAULT_TENANT_CONCURRENCY_CAP): int
+    public function dispatchWaitingRuns(?int $concurrencyCap = null): int
     {
+        $concurrencyCap ??= self::concurrencyCap();
         $waiting = AutomationExecution::where('status', 'QUEUED')
             ->whereNull('lease_expires_at')
             ->orderBy('id')

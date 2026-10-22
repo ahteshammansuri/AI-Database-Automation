@@ -16,13 +16,16 @@ use Illuminate\Support\Facades\RateLimiter;
  */
 class OrbitRemoteDeviceController extends Controller
 {
-    /** Spoken or typed requests per minute from one phone. */
+    /** Spoken or typed requests per minute from one phone (default; admin setting orbit.remote_commands_per_minute). */
     private const COMMANDS_PER_MINUTE = 20;
 
     public function __construct(private OrbitRemoteService $remote) {}
 
     public function claim(Request $request): JsonResponse
     {
+        if (!OrbitRemoteService::enabled()) {
+            return response()->json(['message' => 'Orbit Remote is turned off by the administrator.', 'errors' => ['code' => ['Orbit Remote is turned off by the administrator.']]], 403);
+        }
         $data = $request->validate(
             ['code' => ['required', 'string', 'min:32', 'max:128', 'regex:/^[A-Za-z0-9_-]+$/']],
             ['code.*' => 'This QR code is not valid. Show a new one on your computer and scan it again.']
@@ -49,7 +52,7 @@ class OrbitRemoteDeviceController extends Controller
         $session = $this->session($request);
 
         $key = 'orbit-remote-command:' . $session->id;
-        if (RateLimiter::tooManyAttempts($key, self::COMMANDS_PER_MINUTE)) {
+        if (RateLimiter::tooManyAttempts($key, max(1, (int) config('orbit.remote_commands_per_minute', self::COMMANDS_PER_MINUTE)))) {
             return response()->json([
                 'message' => 'That is a lot of requests in a short time. Wait a moment, then try again.',
                 'errors' => ['text' => ['That is a lot of requests in a short time. Wait a moment, then try again.']],

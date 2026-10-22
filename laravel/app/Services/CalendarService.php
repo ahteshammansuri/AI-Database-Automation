@@ -92,7 +92,7 @@ class CalendarService
         }
 
         $targetTime = Carbon::parse($newDateTime);
-        $leadTime = max(\App\Services\Automation\ScheduleCalculator::MIN_GAP_MINUTES, (int) ($automation->lead_time_minutes ?? 30));
+        $leadTime = max(\App\Services\Automation\ScheduleCalculator::minGapMinutes(), (int) ($automation->lead_time_minutes ?? 30));
         $minAllowed = now()->addMinutes($leadTime);
 
         if ($targetTime->lt($minAllowed)) {

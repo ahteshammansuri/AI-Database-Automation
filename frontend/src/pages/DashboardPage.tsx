@@ -14,8 +14,10 @@ import { useToast } from "../context/ToastContext";
 import { useOrbitSurface } from "../hooks/useOrbitSurface";
 import { OrbitRemoteCard } from "../components/remote/OrbitRemoteCard";
 import { pageStateService } from "../services/pageStateService";
+import { usePlatform } from "../context/PlatformContext";
 
 export const DashboardPage: React.FC = () => {
+  const { orbit } = usePlatform().config;
   const [stats, setStats] = useState<any | null>(null);
   const [automations, setAutomations] = useState<any[]>([]);
   const [executions, setExecutions] = useState<any[]>([]);
@@ -230,7 +232,7 @@ export const DashboardPage: React.FC = () => {
               <span className="landing-shimmer-text">Your database is on autopilot.</span>
             </h1>
             <p className="mt-4 max-w-xl text-[15px] leading-relaxed text-slate-400">
-              Schedules, drafts, approvals and publishing for your connected databases, in one place. Ask Orbit in the corner if you want a hand.
+              Schedules, drafts, approvals and publishing for your connected databases, in one place.{orbit.enabled && " Ask Orbit in the corner if you want a hand."}
             </p>
             <div className="mt-7 flex flex-wrap gap-2.5">
               <Link to="/automations/new" className="da-btn px-5 py-2.5 text-[13.5px] bg-white text-slate-950 shadow-glow hover:-translate-y-px hover:bg-indigo-50">
@@ -292,7 +294,7 @@ export const DashboardPage: React.FC = () => {
       </motion.section>
 
       {/* Orbit Remote: talk to Orbit from a phone */}
-      <OrbitRemoteCard />
+      {orbit.enabled && orbit.remote_enabled && <OrbitRemoteCard />}
 
       {/* Getting started */}
       {showOnboarding && (

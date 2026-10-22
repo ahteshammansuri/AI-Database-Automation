@@ -145,6 +145,63 @@ class RAGService:
                 return sorted(os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".md"))
         return []
 
+    def _published_guide_dir(self) -> str:
+        """Guides published from the admin panel (Laravel) live next to the indexes, in the AI service's own storage."""
+        return os.path.join(os.path.dirname(os.path.abspath(settings.INDEX_DIR)), "product_guides")
+
+    def _published_guide_paths(self) -> List[str]:
+        folder = self._published_guide_dir()
+        if not os.path.isdir(folder):
+            return []
+        return sorted(os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".md"))
+
+    def publish_product_guides(self, guides: List[Dict[str, str]]) -> Dict[str, Any]:
+        """
+        Replace Orbit's product knowledge with the guides an admin published (name, title, content), then re-index.
+        Names are slugs; anything else is refused. An empty list removes the published set (the bundled guides apply).
+        """
+        wanted = {}
+        for g in guides:
+            name = str(g.get("name", "")).strip()
+            if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,80}", name):
+                raise ValueError(f"Invalid guide name: {name!r}")
+            content = str(g.get("content", "")).strip()
+            title = str(g.get("title", "")).strip()
+            if title and not content.startswith("# "):
+                content = f"# {title}\n\n{content}"
+            wanted[f"{name}.md"] = content + "\n"
+        folder = self._published_guide_dir()
+        os.makedirs(folder, exist_ok=True)
+        for f in os.listdir(folder):
+            if f.endswith(".md") and f not in wanted:
+                os.remove(os.path.join(folder, f))
+        for f, content in wanted.items():
+            with open(os.path.join(folder, f), "w", encoding="utf-8") as fh:
+                fh.write(content)
+        vectors = self.ensure_product_context_indexed()
+        manifest = self._read_manifest(0)
+        return {
+            "guides": len(wanted),
+            "vectors": vectors,
+            "chunks": manifest.get("chunks", 0),
+            "version": manifest.get("version"),
+            "indexed_at": manifest.get("indexed_at"),
+            "embedding_backend": manifest.get("embedding_backend"),
+            "source": "published" if wanted else "bundled",
+        }
+
+    def product_guides_status(self) -> Dict[str, Any]:
+        manifest = self._read_manifest(0)
+        published = self._published_guide_paths()
+        return {
+            "source": "published" if published else "bundled",
+            "guides": len(published) if published else len(self._product_doc_paths()),
+            "chunks": manifest.get("chunks", 0),
+            "version": manifest.get("version"),
+            "indexed_at": manifest.get("indexed_at"),
+            "embedding_backend": manifest.get("embedding_backend"),
+        }
+
     def _manifest_path(self, user_id: int) -> str:
         return os.path.join(settings.INDEX_DIR, f"user_{user_id}", "manifest.json")
 
@@ -162,7 +219,8 @@ class RAGService:
         """
         if isinstance(doc_paths, str):
             doc_paths = [doc_paths]
-        paths = [p for p in (doc_paths or self._product_doc_paths()) if os.path.exists(p)]
+        # Guides published from the admin panel replace the bundled ones in docs/orbit-agent.
+        paths = [p for p in (doc_paths or self._published_guide_paths() or self._product_doc_paths()) if os.path.exists(p)]
         if not paths:
             logger.warning("Product guides not found; product RAG is empty.")
             return 0

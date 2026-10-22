@@ -27,10 +27,9 @@ class FeatureFlagService
             $flagName = 'FEATURE_' . $flagName;
         }
 
-        $default = self::DEFAULT_FLAGS[$flagName] ?? false;
-        $val = env($flagName, $default);
-
-        return filter_var($val, FILTER_VALIDATE_BOOLEAN);
+        // config/features.php holds the defaults; admins switch flags in the admin panel (Settings > Features).
+        $key = strtolower(substr($flagName, strlen('FEATURE_')));
+        return filter_var(config("features.{$key}", self::DEFAULT_FLAGS[$flagName] ?? false), FILTER_VALIDATE_BOOLEAN);
     }
 
     /**
@@ -40,8 +39,8 @@ class FeatureFlagService
     {
         $flags = [];
         foreach (self::DEFAULT_FLAGS as $flag => $default) {
-            $enabled = filter_var(env($flag, $default), FILTER_VALIDATE_BOOLEAN);
             $cleanKey = strtolower(str_replace('FEATURE_', '', $flag));
+            $enabled = filter_var(config("features.{$cleanKey}", $default), FILTER_VALIDATE_BOOLEAN);
             $flags[$cleanKey] = [
                 'key' => $flag,
                 'name' => ucwords(str_replace('_', ' ', $cleanKey)),

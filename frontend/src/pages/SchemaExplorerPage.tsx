@@ -13,6 +13,7 @@ import { useOrbitSurface } from "../hooks/useOrbitSurface";
 import { orbitTargets } from "../services/orbitTargets";
 import { fieldTarget } from "../services/orbitSurfaces";
 import { pageStateService } from "../services/pageStateService";
+import { BrandName } from "../context/PlatformContext";
 
 export const SchemaExplorerPage: React.FC = () => {
   const [searchParams] = useSearchParams();
@@ -317,7 +318,7 @@ export const SchemaExplorerPage: React.FC = () => {
       <PageHeader
         eyebrow="Workspace"
         title="Schema explorer"
-        description="Every table DataAuto found in your database, how it is classified, and what it can be used for."
+        description={<>Every table <BrandName /> found in your database, how it is classified, and what it can be used for.</>}
         actions={
           connections.length > 0 ? (
             <>

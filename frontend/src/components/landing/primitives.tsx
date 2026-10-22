@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { animate, motion, useInView, useReducedMotion } from "framer-motion";
 import { EASE } from "./motion";
+import { usePlatform } from "../../context/PlatformContext";
 
 
 /** Fades and lifts its children into place the first time they scroll into view. */
@@ -51,6 +52,26 @@ export const SectionHeading: React.FC<{
     )}
   </Reveal>
 );
+
+/** A section heading whose texts are edited in the admin panel (Website content), by section key. */
+export const ManagedHeading: React.FC<{
+  section: string;
+  dark?: boolean;
+  align?: "center" | "left";
+  className?: string;
+}> = ({ section, dark, align, className }) => {
+  const t = usePlatform().section(section);
+  return (
+    <SectionHeading
+      dark={dark}
+      align={align}
+      className={className}
+      eyebrow={t.eyebrow}
+      title={<>{t.title} <Accent dark={dark}>{t.highlight}</Accent>{t.titleEnd ? ` ${t.titleEnd}` : ""}</>}
+      subtitle={t.subtitle || undefined}
+    />
+  );
+};
 
 /** A card with a soft light that follows the pointer (hover), and a gentle lift. */
 export const SpotlightCard: React.FC<{

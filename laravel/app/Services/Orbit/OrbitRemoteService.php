@@ -24,6 +24,7 @@ use Illuminate\Validation\ValidationException;
  */
 class OrbitRemoteService
 {
+    // Defaults; the live values are admin settings (Settings > Orbit Remote), read through the methods below.
     public const PAIRING_TTL_SECONDS = 180;
     public const SESSION_TTL_HOURS = 12;
     public const IDLE_MINUTES = 120;
@@ -34,6 +35,26 @@ class OrbitRemoteService
     public const MAX_TEXT = 1000;
 
     private const SEEN_WRITE_SECONDS = 15;
+
+    public static function enabled(): bool
+    {
+        return (bool) config('orbit.remote_enabled', true) && (bool) config('orbit.enabled', true);
+    }
+
+    public static function pairingSeconds(): int
+    {
+        return max(60, (int) config('orbit.remote_pairing_seconds', self::PAIRING_TTL_SECONDS));
+    }
+
+    public static function sessionHours(): int
+    {
+        return max(1, (int) config('orbit.remote_session_hours', self::SESSION_TTL_HOURS));
+    }
+
+    public static function idleMinutes(): int
+    {
+        return max(5, (int) config('orbit.remote_idle_minutes', self::IDLE_MINUTES));
+    }
 
     private const SECRET_PATTERNS = [
         '/(?:password|passwd|pass\s?code|pass|secret)\s*(?:is|to|:|equals|=)\s*["\']?([^\s,;\'")]+)/i',
@@ -59,7 +80,7 @@ class OrbitRemoteService
             'public_id' => Str::lower(Str::random(32)),
             'status' => 'pending',
             'pairing_code_hash' => hash('sha256', $code),
-            'pairing_expires_at' => now()->addSeconds(self::PAIRING_TTL_SECONDS),
+            'pairing_expires_at' => now()->addSeconds(self::pairingSeconds()),
             'desktop_instance' => $instance,
             'desktop_token_id' => $tokenId,
             'desktop_label' => self::browserLabel($userAgent, 'computer'),
@@ -99,7 +120,7 @@ class OrbitRemoteService
                 'device_ip' => $ip,
                 'claimed_at' => now(),
                 'last_device_seen_at' => now(),
-                'expires_at' => now()->addHours(self::SESSION_TTL_HOURS),
+                'expires_at' => now()->addHours(self::sessionHours()),
             ]);
             return [$session, $token];
         });
@@ -146,7 +167,7 @@ class OrbitRemoteService
             return [null, $session->end_reason ?: 'ended'];
         }
         $idleSince = $session->last_device_seen_at ?? $session->claimed_at;
-        if (($session->expires_at && $session->expires_at->isPast()) || ($idleSince && $idleSince->lt(now()->subMinutes(self::IDLE_MINUTES)))) {
+        if (($session->expires_at && $session->expires_at->isPast()) || ($idleSince && $idleSince->lt(now()->subMinutes(self::idleMinutes())))) {
             $this->end($session, 'expired');
             return [null, 'expired'];
         }
@@ -183,7 +204,7 @@ class OrbitRemoteService
         }
         if (!$this->desktopOnline($session)) {
             throw ValidationException::withMessages(['text' => [
-                'Your computer is not connected right now. Open DataAuto there, then try again.',
+                'Your computer is not connected right now. Open ' . config('platform.brand_name') . ' there, then try again.',
             ]]);
         }
 

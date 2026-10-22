@@ -7,6 +7,7 @@ import { DatePicker } from "../components/ui/DatePicker";
 import { TimePicker } from "../components/ui/TimePicker";
 import { TimezoneSelect } from "../components/ui/TimezoneSelect";
 import { ContentPreview } from "../components/content/ContentPreview";
+import { WysiwygEditor } from "../components/content/WysiwygEditor";
 import { browserTimeZone, todayIn, nowTimeIn, addMinutesHHMM, zonedIso, formatInstant, relativeFromNow } from "../lib/schedule";
 import { ConnectionProfile, SchemaResponse, SchemaTable, SchemaColumn } from "../types";
 import { SearchableSelect } from "../components/common/SearchableSelect";
@@ -16,6 +17,7 @@ import { clearError, focusFirstError, invalid, serverFieldErrors, type FieldErro
 import { InlineAiFieldAssist } from "../components/common/InlineAiFieldAssist";
 import { useOrbitSurface } from "../hooks/useOrbitSurface";
 import { orbitTargets } from "../services/orbitTargets";
+import { usePlatform } from "../context/PlatformContext";
 
 /** Input id for a column (or custom field, schedule, target picker) so its message sits under it. */
 const manualFieldId = (field: string) =>
@@ -27,6 +29,7 @@ const issueText = (column: string, message: string) =>
 
 export const ManualSchedulePage: React.FC = () => {
   const navigate = useNavigate();
+  const mediaMb = usePlatform().config.platform.media_max_upload_mb;
 
   // State
   const [connections, setConnections] = useState<ConnectionProfile[]>([]);
@@ -1048,17 +1051,28 @@ export const ManualSchedulePage: React.FC = () => {
                               <span className="text-[10px] text-slate-400 font-mono">{col.data_type}</span>
                             </div>
                           </div>
-                          <textarea
-                            id={manualFieldId(colName)}
-                            rows={isLongText ? 8 : 3}
-                            aria-required={!col.nullable}
-                            aria-invalid={!!fieldErrors[colName]}
-                            aria-describedby={fieldErrors[colName] ? `${manualFieldId(colName)}-error` : undefined}
-                            value={formData[colName] !== undefined ? formData[colName] : ""}
-                            onChange={(e) => handleFieldChange(colName, e.target.value)}
-                            placeholder={`Enter ${colName}...`}
-                            className={`da-input leading-relaxed${invalid(fieldErrors[colName])}`}
-                          />
+                          {isLongText ? (
+                            <WysiwygEditor
+                              id={manualFieldId(colName)}
+                              value={formData[colName] !== undefined ? String(formData[colName]) : ""}
+                              onChange={(newVal) => handleFieldChange(colName, newVal)}
+                              placeholder={`Write formatted article or content for ${colName}...`}
+                              minHeight="240px"
+                              error={fieldErrors[colName]}
+                            />
+                          ) : (
+                            <textarea
+                              id={manualFieldId(colName)}
+                              rows={3}
+                              aria-required={!col.nullable}
+                              aria-invalid={!!fieldErrors[colName]}
+                              aria-describedby={fieldErrors[colName] ? `${manualFieldId(colName)}-error` : undefined}
+                              value={formData[colName] !== undefined ? formData[colName] : ""}
+                              onChange={(e) => handleFieldChange(colName, e.target.value)}
+                              placeholder={`Enter ${colName}...`}
+                              className={`da-input leading-relaxed${invalid(fieldErrors[colName])}`}
+                            />
+                          )}
                           <FieldError id={manualFieldId(colName)} message={fieldErrors[colName]} />
                         </div>
                       );
@@ -1105,7 +1119,7 @@ export const ManualSchedulePage: React.FC = () => {
                             <span className="text-xs font-semibold text-slate-800">
                               {uploadingCol === colName ? "Uploading…" : "Upload an image"}
                             </span>
-                            <span className="text-[10px] text-slate-400">PNG, JPG, WebP or GIF up to 10 MB · stored as a URL</span>
+                            <span className="text-[10px] text-slate-400">PNG, JPG, WebP or GIF up to {mediaMb} MB · stored as a URL</span>
                           </label>
 
                           {/* Live Thumbnail Preview */}

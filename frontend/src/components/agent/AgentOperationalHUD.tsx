@@ -14,6 +14,7 @@ import { dockClearance } from "../../hooks/useMascotTravel";
 import soundManager from "../../services/soundEffects";
 import { FieldError } from "../ui/kit";
 import { rules, validateField } from "../../lib/validation";
+import { usePlatform } from "../../context/PlatformContext";
 
 export interface AgentOperationalHUDProps {
   isOpen: boolean;
@@ -59,6 +60,7 @@ export const AgentOperationalHUD: React.FC<AgentOperationalHUDProps> = ({
     submitSecureCredentials, sendMessage, isLoading, startNewConversation,
   } = useAssistant();
   const remote = useOrbitRemote();
+  const remoteOn = usePlatform().config.orbit.remote_enabled;
 
   const [showTyping, setShowTyping] = useState(!voiceSupported);
   const [typed, setTyped] = useState("");
@@ -137,13 +139,13 @@ export const AgentOperationalHUD: React.FC<AgentOperationalHUDProps> = ({
               </div>
             </div>
             <div className="flex items-center gap-1.5">
-              <button type="button" onClick={remote.openModal}
+              {remoteOn && <button type="button" onClick={remote.openModal}
                 title={remote.phase === "connected" ? `Phone connected: ${remote.session?.device_label || "your phone"}` : "Use Orbit from your phone"}
                 aria-label={remote.phase === "connected" ? "Phone connected (manage)" : "Use Orbit from your phone"}
                 className={`relative p-1.5 rounded-xl border ${remote.phase === "connected" ? "bg-emerald-500/15 text-emerald-300 border-emerald-400/40" : "bg-slate-800 text-slate-400 border-slate-700 hover:text-white"}`}>
                 <Smartphone className="w-3.5 h-3.5" />
                 {remote.phase === "connected" && <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-emerald-400 ring-2 ring-slate-950" />}
-              </button>
+              </button>}
               <button type="button" onClick={toggleVoiceResponses}
                 title={voiceResponsesEnabled ? "Orbit speaks replies (click to mute voice)" : "Voice replies off (click to enable)"}
                 className={`p-1.5 rounded-xl border ${voiceResponsesEnabled ? "bg-slate-800 text-cyan-300 border-cyan-500/30" : "bg-rose-500/15 text-rose-300 border-rose-500/40"}`}>

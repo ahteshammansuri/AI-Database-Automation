@@ -107,7 +107,7 @@ class DataAgentService
 
     /** Attempts per question: the first query plus up to two corrections with the real error. */
     protected const MAX_SQL_ATTEMPTS = 3;
-    protected const MAX_ROWS = 200;
+    protected const MAX_ROWS = 200; // default; live value: config data_agent.max_result_rows (admin setting)
 
     /**
      * Answer a question with a SELECT written by the user's model, accepted only if the read gate
@@ -155,7 +155,7 @@ class DataAgentService
                     'tables_considered' => array_keys($slice['tables'] ?? []), 'connection' => $connInfo];
             }
 
-            $gate = $this->aiClient->validateSelect($sql, $dialect, $readable, self::MAX_ROWS, $relations, $primaryKeys, null, $question);
+            $gate = $this->aiClient->validateSelect($sql, $dialect, $readable, max(10, (int) config('data_agent.max_result_rows', self::MAX_ROWS)), $relations, $primaryKeys, null, $question);
             if (!empty($gate['gate_unavailable'])) {
                 return $this->failure('AI_SERVICE_UNREACHABLE', 'The query safety check is not reachable, so nothing was run.', $connInfo, $previous);
             }
@@ -201,7 +201,7 @@ class DataAgentService
             // A top-N that ended inside a tie hides tied rows: run the same validated query wider.
             $tie = self::tieInfo($read['rows'] ?? []);
             if ($tie && $tie['all_tied'] && ($read['row_count'] ?? 0) >= (int) ($gate['limit'] ?? PHP_INT_MAX) && (int) ($gate['limit'] ?? 0) < 50) {
-                $wide = $this->aiClient->validateSelect($sql, $dialect, $readable, self::MAX_ROWS, $relations, $primaryKeys, 50);
+                $wide = $this->aiClient->validateSelect($sql, $dialect, $readable, max(10, (int) config('data_agent.max_result_rows', self::MAX_ROWS)), $relations, $primaryKeys, 50);
                 $wideRead = !empty($wide['valid']) ? $this->readExecutor->execute($connection, (string) $wide['sql'], [], $revealPii) : null;
                 if (!empty($wideRead['success'])) {
                     [$read, $gate] = [$wideRead, $wide + ['notes' => $gate['notes'] ?? []]];

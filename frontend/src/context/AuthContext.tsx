@@ -50,6 +50,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     initAuth();
   }, []);
 
+  useEffect(() => {
+    const onEnded = (e: Event) => {
+      if (!localStorage.getItem("auth_token")) return;
+      const detail = (e as CustomEvent<{ reason?: string; message?: string }>).detail ?? {};
+      sessionStorage.setItem(
+        "auth_notice",
+        detail.reason === "suspended" && detail.message ? detail.message : "Your session ended. Please sign in again.",
+      );
+      localStorage.removeItem("auth_token");
+      setToken(null);
+      setUser(null);
+    };
+    window.addEventListener("auth:ended", onEnded);
+    return () => window.removeEventListener("auth:ended", onEnded);
+  }, []);
+
   const login = (newToken: string, newUser: User) => {
     localStorage.setItem("auth_token", newToken);
     setToken(newToken);

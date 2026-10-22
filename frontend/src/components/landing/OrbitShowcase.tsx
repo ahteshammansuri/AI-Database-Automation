@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useInView, useReducedMotion } from "framer-motion";
 import { CheckCircle2, Hand, KeyRound, Languages, Loader2, Mic, MousePointerClick } from "lucide-react";
 import { OrbitMascotCharacter, CharacterState } from "../agent/OrbitMascotCharacter";
-import { Accent, Reveal, SectionHeading } from "./primitives";
+import { ManagedHeading, Reveal } from "./primitives";
 import { EASE } from "./motion";
 
 type Scenario = { user: string; steps: { text: string; pose: CharacterState }[]; reply: string; end: CharacterState };
@@ -90,13 +90,7 @@ export const OrbitShowcase: React.FC = () => {
 
       <div ref={ref} className="relative max-w-7xl mx-auto px-4 sm:px-6 grid lg:grid-cols-2 gap-14 lg:gap-20 items-center">
         <div>
-          <SectionHeading
-            dark
-            align="left"
-            eyebrow="Meet Orbit"
-            title={<>An operator that works <Accent dark>on screen, in front of you</Accent></>}
-            subtitle="Orbit lives in the corner of your portal. Tell it what you need and it uses the same pages, forms and buttons you would, with your model deciding each step and the server checking every one."
-          />
+          <ManagedHeading section="orbit" dark align="left" />
           <div className="mt-10 grid sm:grid-cols-2 gap-x-8 gap-y-7">
             {POINTS.map((p, i) => (
               <Reveal key={p.title} delay={0.06 * i}>

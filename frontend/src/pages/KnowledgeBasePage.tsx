@@ -10,11 +10,13 @@ import { api } from "../services/api";
 import { KnowledgeDocument } from "../types";
 import { StatusPill } from "../components/common/StatusPill";
 import { CardHeader, EmptyState, FieldError, Loading, PageHeader } from "../components/ui/kit";
+import { usePlatform } from "../context/PlatformContext";
 import { ariaFor, clearError, focusFirstError, invalid, knowledgeFileRules, rules, serverFieldErrors, validate, validateField, type FieldErrors } from "../lib/validation";
 import { useToast } from "../context/ToastContext";
 import { pageStateService } from "../services/pageStateService";
 
 export const KnowledgeBasePage: React.FC = () => {
+  const maxMb = usePlatform().config.platform.knowledge_max_upload_mb;
   const { toast, confirm } = useToast();
   const [docs, setDocs] = useState<KnowledgeDocument[]>([]);
   const [showRagExplainer, setShowRagExplainer] = useState(true);
@@ -138,7 +140,7 @@ export const KnowledgeBasePage: React.FC = () => {
   /** A chosen or dropped file: checked right away, so a wrong type is explained before uploading. */
   const chooseFile = (file: File | null) => {
     setUploadFile(file);
-    const problem = file ? validateField("file", { file }, { file: knowledgeFileRules }) : null;
+    const problem = file ? validateField("file", { file }, { file: knowledgeFileRules(maxMb) }) : null;
     setErrors((x) => (problem ? { ...x, file: problem } : clearError(x, "file")));
     if (file && !problem && !uploadTitle) setUploadTitle(file.name.replace(/\.[^/.]+$/, ""));
   };
@@ -153,7 +155,7 @@ export const KnowledgeBasePage: React.FC = () => {
 
   const handleUpload = async (e: React.FormEvent) => {
     e.preventDefault();
-    const found = validate({ title: uploadTitle, file: uploadFile }, { title: [rules.maxLength(255, "Title")], file: knowledgeFileRules });
+    const found = validate({ title: uploadTitle, file: uploadFile }, { title: [rules.maxLength(255, "Title")], file: knowledgeFileRules(maxMb) });
     setErrors((x) => ({ ...clearError(clearError(x, "title"), "file"), ...found }));
     if (Object.keys(found).length || !uploadFile) {
       focusFirstError(found, (f) => UPLOAD_FIELD_ID[f]);
@@ -268,7 +270,7 @@ export const KnowledgeBasePage: React.FC = () => {
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
         {/* Upload */}
         <div className="da-card space-y-5 p-6">
-          <CardHeader icon={Upload} title="Add a document" description="Markdown, TXT or PDF, up to 10 MB" />
+          <CardHeader icon={Upload} title="Add a document" description={`Markdown, TXT or PDF, up to ${maxMb} MB`} />
           <form onSubmit={handleUpload} noValidate className="space-y-4">
             <div>
               <label className="da-label" htmlFor="kb-title">Title</label>

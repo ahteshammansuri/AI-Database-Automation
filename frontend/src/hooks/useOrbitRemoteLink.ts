@@ -15,6 +15,11 @@ export const ENDED_MESSAGES: Record<string, string> = {
   disconnected_from_computer: "The computer disconnected this phone.",
   disconnected_from_phone: "You disconnected this phone.",
   signed_out: "You signed out on the computer, so this phone was disconnected.",
+  signed_out_by_admin: "An administrator signed this account out, so this phone was disconnected.",
+  suspended: "This account is suspended, so this phone was disconnected.",
+  disconnected_by_admin: "An administrator disconnected this phone.",
+  account_deleted: "This account no longer exists.",
+  disabled: "Orbit Remote is turned off by the administrator.",
 };
 
 export interface RemoteLink {

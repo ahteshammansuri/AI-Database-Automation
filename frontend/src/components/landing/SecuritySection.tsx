@@ -3,8 +3,9 @@ import { motion, useReducedMotion } from "framer-motion";
 import {
   Ban, Brain, Database, EyeOff, Fingerprint, Globe2, KeyRound, Lock, Monitor, Server, ShieldCheck, UserCheck, X,
 } from "lucide-react";
-import { Accent, Reveal, SectionHeading, SpotlightCard } from "./primitives";
+import { ManagedHeading, Reveal, SpotlightCard } from "./primitives";
 import { EASE } from "./motion";
+import { BrandName } from "../../context/PlatformContext";
 
 const TIERS = [
   {
@@ -64,7 +65,7 @@ const Flow: React.FC<{ vertical?: boolean; className?: string }> = ({ vertical =
   );
 };
 
-const Node: React.FC<{ icon: React.ElementType; title: string; note: string; accent: string }> = ({ icon: I, title, note, accent }) => (
+const Node: React.FC<{ icon: React.ElementType; title: React.ReactNode; note: React.ReactNode; accent: string }> = ({ icon: I, title, note, accent }) => (
   <div className="rounded-2xl border border-white/10 bg-white/[0.05] px-3 py-2.5 sm:px-4 sm:py-3">
     <div className="flex items-center gap-2 sm:gap-2.5">
       <span className={`grid place-items-center w-7 h-7 sm:w-8 sm:h-8 shrink-0 rounded-xl ${accent}`}><I className="w-4 h-4" /></span>
@@ -84,14 +85,14 @@ const Architecture: React.FC = () => (
       </p>
       <div className="my-auto pt-8 grid grid-cols-2 gap-x-3 sm:gap-x-5 text-left">
         <div />
-        <Node icon={Monitor} title="Your browser" note="The DataAuto portal" accent="bg-sky-500/15 text-sky-300" />
+        <Node icon={Monitor} title="Your browser" note={<>The <BrandName /> portal</>} accent="bg-sky-500/15 text-sky-300" />
         <div />
         <Flow />
         <div className="flex items-center gap-0">
           <div className="flex-1"><Node icon={Brain} title="AI service" note="Models, retrieval, structured output" accent="bg-violet-500/15 text-violet-300" /></div>
           <div className="w-5"><Flow vertical={false} /></div>
         </div>
-        <Node icon={Server} title="DataAuto server" note="Accounts, ownership, schedules, approvals, all database access" accent="bg-indigo-500/15 text-indigo-300" />
+        <Node icon={Server} title={<><BrandName /> server</>} note="Accounts, ownership, schedules, approvals, all database access" accent="bg-indigo-500/15 text-indigo-300" />
         <div className="flex flex-col items-center">
           <div className="w-px h-10 border-l border-dashed border-rose-400/50" />
         </div>
@@ -110,11 +111,7 @@ const Architecture: React.FC = () => (
 export const SecuritySection: React.FC = () => (
   <section id="security" data-nav-theme="light" className="relative bg-[#F7F8FC] py-24 sm:py-32 scroll-mt-16">
     <div className="max-w-7xl mx-auto px-4 sm:px-6">
-      <SectionHeading
-        eyebrow="Security"
-        title={<>Safe by design. <Accent>Enforced by the server,</Accent> not the model.</>}
-        subtitle="Every rule here is checked in the backend for every request and every background job. The AI can suggest; it never decides what runs."
-      />
+      <ManagedHeading section="security" />
 
       <div className="mt-16 grid sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-5">
         {TIERS.map((t, i) => (

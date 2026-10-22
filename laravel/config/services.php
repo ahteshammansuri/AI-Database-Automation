@@ -35,4 +35,10 @@ return [
         ],
     ],
 
+    // Internal Python AI service (Laravel calls it; it never touches customer databases).
+    'ai' => [
+        'url' => env('AI_SERVICE_URL', 'http://127.0.0.1:8001'),
+        'key' => env('AI_SERVICE_KEY', 'platform_secret_internal_key_2026'),
+    ],
+
 ];

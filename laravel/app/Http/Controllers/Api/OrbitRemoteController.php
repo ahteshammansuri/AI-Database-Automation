@@ -22,6 +22,9 @@ class OrbitRemoteController extends Controller
     /** New pairing code (replaces any earlier code or connected phone). The code is returned only here, once. */
     public function store(Request $request): JsonResponse
     {
+        if (!OrbitRemoteService::enabled()) {
+            return response()->json(['message' => 'Orbit Remote is turned off by the administrator.'], 403);
+        }
         $data = $request->validate(['instance' => self::INSTANCE_RULE], ['instance.*' => 'Reload the page and try again.']);
         [$session, $code] = $this->remote->startPairing(
             $request->user(), $data['instance'], $this->tokenId($request), $request->userAgent(), $request->ip()
@@ -30,7 +33,7 @@ class OrbitRemoteController extends Controller
         return response()->json([
             'session' => $this->remote->forDesktop($session, $data['instance']),
             'code' => $code,
-            'pairing_ttl_seconds' => OrbitRemoteService::PAIRING_TTL_SECONDS,
+            'pairing_ttl_seconds' => OrbitRemoteService::pairingSeconds(),
             'lan_addresses' => $this->remote->lanAddresses(),
             'public_url' => config('orbit.remote_public_url') ?: null,
         ], 201);
@@ -62,7 +65,7 @@ class OrbitRemoteController extends Controller
             return response()->json(['message' => 'This phone is no longer connected.', 'session' => $this->remote->forDesktop($session)], 410);
         }
         if (!$this->remote->attachDesktop($session, $data['instance'], $this->tokenId($request))) {
-            return response()->json(['message' => 'Your phone is controlling DataAuto in another tab or window.'], 409);
+            return response()->json(['message' => 'Your phone is controlling ' . config('platform.brand_name') . ' in another tab or window.'], 409);
         }
         return response()->json(['session' => $this->remote->forDesktop($session->fresh(), $data['instance'])]);
     }
@@ -89,7 +92,7 @@ class OrbitRemoteController extends Controller
             return response()->json(['message' => 'This phone is no longer connected.', 'session' => $this->remote->forDesktop($session)], 410);
         }
         if ($session->desktop_instance !== $data['instance']) {
-            return response()->json(['message' => 'Your phone is controlling DataAuto in another tab or window.'], 409);
+            return response()->json(['message' => 'Your phone is controlling ' . config('platform.brand_name') . ' in another tab or window.'], 409);
         }
 
         $keys = ['face', 'emotion', 'status', 'caption', 'caption_kind', 'speaking', 'working', 'needs', 'task', 'page'];
@@ -109,7 +112,7 @@ class OrbitRemoteController extends Controller
         ]);
         $session = $this->owned($request, $publicId);
         if ($session->desktop_instance !== $data['instance']) {
-            return response()->json(['message' => 'Your phone is controlling DataAuto in another tab or window.'], 409);
+            return response()->json(['message' => 'Your phone is controlling ' . config('platform.brand_name') . ' in another tab or window.'], 409);
         }
         $command = OrbitRemoteCommand::where('session_id', $session->id)->findOrFail($commandId);
         $status = $this->remote->acknowledge($session, $command, $data['status'], $data['reason'] ?? null);

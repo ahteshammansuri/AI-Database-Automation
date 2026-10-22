@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { FileText, HelpCircle, LayoutTemplate, ShoppingBag } from "lucide-react";
-import { Accent, Reveal, SectionHeading } from "./primitives";
+import { ManagedHeading, Reveal } from "./primitives";
 import { EASE } from "./motion";
 
 const CASES = [
@@ -73,11 +73,7 @@ export const UseCases: React.FC = () => {
   return (
     <section data-nav-theme="light" className="relative bg-white py-24 sm:py-32">
       <div className="max-w-7xl mx-auto px-4 sm:px-6">
-        <SectionHeading
-          eyebrow="Use cases"
-          title={<>Built for content that <Accent>lives in tables</Accent></>}
-          subtitle="Blog posts are the showcase, but the same engine works for any eligible table. You decide how every column is filled."
-        />
+        <ManagedHeading section="use_cases" />
         <Reveal className="mt-12 flex justify-center">
           <div role="tablist" className="inline-flex flex-wrap justify-center gap-1 rounded-2xl bg-slate-100 p-1.5">
             {CASES.map((x, i) => (

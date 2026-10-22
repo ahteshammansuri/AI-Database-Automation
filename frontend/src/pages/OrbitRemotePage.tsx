@@ -11,6 +11,7 @@ import {
   MAX_REQUEST, REMOTE_PATH, codeFromHash, micNeedsHttps, remoteFaceState, remoteGazeDirection, remoteStatusLine,
 } from "../services/orbitRemoteProtocol";
 import { redactSecretsFromUtterance } from "../services/secretRedactor";
+import { BrandName, usePlatform } from "../context/PlatformContext";
 
 /**
  * Orbit Remote on the phone (opened from the QR code on the dashboard). Shows only Orbit's face. Hold it and speak:
@@ -88,7 +89,7 @@ const Brand: React.FC<{ subtitle?: string | null }> = ({ subtitle }) => (
     </span>
     <span className="min-w-0">
       <span className="block text-[14px] font-bold leading-tight tracking-[-0.01em]">Orbit Remote</span>
-      <span className="block truncate text-[11.5px] text-slate-400">{subtitle || "DataAuto"}</span>
+      <span className="block truncate text-[11.5px] text-slate-400">{subtitle || <BrandName />}</span>
     </span>
   </div>
 );
@@ -132,14 +133,18 @@ function initialRemote(): { code: string | null; token: string | null; phase: "c
 }
 
 export const OrbitRemotePage: React.FC = () => {
+  const { brand } = usePlatform();
   const [initial] = useState(initialRemote);
   const [token, setToken] = useState<string | null>(initial.token);
   const [phase, setPhase] = useState<"claiming" | "ready" | "invalid">(initial.phase);
   const [claimError, setClaimError] = useState<string | null>(null);
 
+  useEffect(() => {
+    document.title = `Orbit Remote · ${brand}`;
+  }, [brand]);
+
   // Claim the one-time code from the QR link, and drop it from the address bar straight away.
   useEffect(() => {
-    document.title = "Orbit Remote · DataAuto";
     const code = initial.code;
     if (!code) return;
     let alive = true;
@@ -167,7 +172,7 @@ export const OrbitRemotePage: React.FC = () => {
       <Notice
         face={claimError ? "warning" : "curious"}
         title={claimError ? "That code didn't work" : "Scan the code on your computer"}
-        text={claimError ?? "Open DataAuto on your computer, choose “Connect your phone” on the dashboard, and scan the QR code with this phone's camera."}
+        text={claimError ?? `Open ${brand} on your computer, choose “Connect your phone” on the dashboard, and scan the QR code with this phone's camera.`}
       />
     );
   }
@@ -175,6 +180,7 @@ export const OrbitRemotePage: React.FC = () => {
 };
 
 const RemoteConsole: React.FC<{ token: string }> = ({ token }) => {
+  const { brand } = usePlatform();
   const link = useOrbitRemoteLink(token);
   const { sendListening, end: endLink } = link;
   const size = useFaceSize();
@@ -430,13 +436,13 @@ const RemoteConsole: React.FC<{ token: string }> = ({ token }) => {
             <p className="rounded-2xl border border-rose-400/25 bg-rose-500/10 px-3.5 py-2.5 text-left text-[13px] text-rose-100" role="alert">
               {notice
                 ?? (rejectedLate ? "That request reached your computer too late, so it was not run. Try again."
-                : ackLate ? "Your computer has not picked this up yet. Is DataAuto open there?"
+                : ackLate ? `Your computer has not picked this up yet. Is ${brand} open there?`
                 : voice.error)}
             </p>
           )}
           {!link.desktopOnline && link.connection !== "connecting" && (
             <p className="flex items-start gap-2 rounded-2xl border border-white/10 bg-white/[0.04] px-3.5 py-2.5 text-left text-[13px] text-slate-300">
-              <WifiOff className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400" /> Open DataAuto on your computer (the tab you paired from). Orbit works there.
+              <WifiOff className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400" /> Open {brand} on your computer (the tab you paired from). Orbit works there.
             </p>
           )}
           {needsHttps && (

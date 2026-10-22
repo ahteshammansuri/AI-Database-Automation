@@ -8,10 +8,14 @@ use App\Models\Automation;
 use App\Models\AutomationExecution;
 use App\Models\ContentVersion;
 use App\Models\ApprovalToken;
+use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
 class ApprovalFlowTest extends TestCase
 {
+    // Its rows must not outlive the test: the scheduler tests count every run in the table.
+    use RefreshDatabase;
+
     public function test_approval_review_and_single_use_token_lifecycle(): void
     {
         $user = User::factory()->create();

@@ -12,6 +12,7 @@ import { api } from "../services/api";
 import { ConnectionProfile, SchemaResponse, KnowledgeDocument, AIProviderInfo } from "../types";
 import { SearchableSelect } from "../components/common/SearchableSelect";
 import { FieldError, ModalShell, PageHeader } from "../components/ui/kit";
+import { usePlatform } from "../context/PlatformContext";
 import { ariaFor, clearError, focusFirstError, invalid, knowledgeFileRules, rules, serverFieldErrors, validate, type FieldErrors } from "../lib/validation";
 import { InlineAiFieldAssist } from "../components/common/InlineAiFieldAssist";
 import { useToast } from "../context/ToastContext";
@@ -20,7 +21,7 @@ import { FieldMappingStep } from "../components/automation/FieldMappingStep";
 import { FieldPlan, Mapping, Mode as ColumnMode, PlanColumn, explain, mappingFor, mappingProblems, modeOf, modeOptions, serializeMappings } from "../components/automation/fieldPlan";
 import { ScheduleStep, ScheduleConfig, ApprovalConfig } from "../components/automation/ScheduleStep";
 import { ContentPreview } from "../components/content/ContentPreview";
-import { MIN_GAP_MINUTES, browserTimeZone, gapMinutes, todayIn, addDays, formatTime12 } from "../lib/schedule";
+import { browserTimeZone, gapMinutes, todayIn, addDays, formatTime12 } from "../lib/schedule";
 
 type Mode = "AI_GENERATED" | "MANUAL";
 interface GenerationOptions {
@@ -79,6 +80,8 @@ const builderFocusId = (f: string) => (BUILDER_FIELD[f]?.id.startsWith("schedule
 
 export const AutomationBuilderPage: React.FC = () => {
   const navigate = useNavigate();
+  const { config } = usePlatform();
+  const minGap = config.automation.min_gap_minutes;
   const [searchParams] = useSearchParams();
   const { toast } = useToast();
   const { user } = useAuth();
@@ -387,7 +390,7 @@ export const AutomationBuilderPage: React.FC = () => {
 
   const handleUploadDocumentInline = async (e: React.FormEvent) => {
     e.preventDefault();
-    const found = validate({ title: newDocTitle, file: newDocFile }, { title: [rules.maxLength(255, "Title")], file: knowledgeFileRules });
+    const found = validate({ title: newDocTitle, file: newDocFile }, { title: [rules.maxLength(255, "Title")], file: knowledgeFileRules(config.platform.knowledge_max_upload_mb) });
     setDocErrors(found);
     if (Object.keys(found).length || !newDocFile) {
       focusFirstError(found, (f) => (f === "file" ? "doc-file" : "doc-title"));
@@ -509,7 +512,7 @@ export const AutomationBuilderPage: React.FC = () => {
         reviewer_email: [rules.email("Reviewer email"), rules.maxLength(255, "Reviewer email")],
       });
       const gap = gapMinutes(schedule.generation_time, schedule.publication_time);
-      if (gap === null || gap < MIN_GAP_MINUTES) return { fields, message: `Publication must be at least ${MIN_GAP_MINUTES} minutes after generation.`, inline: true };
+      if (gap === null || gap < minGap) return { fields, message: `Publication must be at least ${minGap} minutes after generation.`, inline: true };
       if (!scheduleValid) return { fields, message: "Fix the schedule fields marked in red first.", inline: true };
       return { fields, message: Object.values(fields)[0] ?? null };
     }

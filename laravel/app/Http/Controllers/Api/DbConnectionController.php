@@ -41,6 +41,13 @@ class DbConnectionController extends Controller
 
     public function store(Request $request)
     {
+        // Per-customer limit set by a platform admin (0 = none).
+        $limit = (int) config('platform.max_connections_per_customer', 0);
+        if ($limit > 0 && DbConnection::where('user_id', $request->user()->id)->count() >= $limit) {
+            $msg = "Your account can have up to {$limit} database connections. Remove one to add another.";
+            return response()->json(['message' => $msg, 'errors' => ['name' => [$msg]]], 422);
+        }
+
         // Support either Connection URI or Manual parameters
         $validated = $request->validate(array_merge(self::targetRules(false), [
             'name' => 'required|string|max:120',

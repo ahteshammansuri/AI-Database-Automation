@@ -17,9 +17,10 @@ class MediaController extends Controller
 {
     public function upload(Request $request, MediaService $media): JsonResponse
     {
+        $mb = (int) config('platform.media_max_upload_mb', 10);
         $request->validate([
-            'file' => 'required|file|max:10240|mimetypes:image/jpeg,image/png,image/webp,image/gif',
-        ]);
+            'file' => 'required|file|max:' . ($mb * 1024) . '|mimetypes:image/jpeg,image/png,image/webp,image/gif',
+        ], ['file.max' => "The image must be {$mb} MB or smaller."]);
 
         try {
             $asset = $media->importMedia($request->user()->id, (string) file_get_contents($request->file('file')->getRealPath()));

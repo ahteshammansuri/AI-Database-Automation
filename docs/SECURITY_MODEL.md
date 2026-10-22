@@ -129,3 +129,15 @@ The backend enforces the access mode regardless of the database user's privilege
 | Unwanted actions | The phone sends a request; the computer runs it through Orbit's normal gate (permissions, confirmations by the panel Confirm button). Requests are refused when the computer is offline or when they reach it more than 30 s late (server clock). Rate limits: claim 12/min per IP, requests 20/min per phone. |
 | Phone page running portal actions | `/orbit/remote` is routed outside the portal providers, so it never heartbeats or runs Orbit UI actions even if the same browser is signed in. |
 | Audit | `ORBIT_REMOTE_PAIRING_CREATED`, `ORBIT_REMOTE_PAIRED`, `ORBIT_REMOTE_COMMAND` (id, kind, length), `ORBIT_REMOTE_ENDED`. |
+
+## Admin panel, 2026-10-21
+
+| Threat | Control |
+| --- | --- |
+| A customer reaching admin functions | Separate `admins` table and session guard `admin`; Sanctum tokens and the `web` guard never authenticate `/admin`. No default admin: the first one is created on the server (`php artisan admin:create`). Inactive admins are refused (403). Optional authenticator-app 2FA with recovery codes (secrets encrypted at rest). |
+| Over-broad admin access | 23 permissions (view / manage per area). Every resource, page and action checks them on the server (deny by default when a permission is missing). Only super admins manage super admins; the last active super admin cannot be deleted; nobody changes their own roles or deactivates themselves. |
+| Secrets shown in the panel | Connection passwords, provider keys, device tokens and pairing codes are never displayed ("stored encrypted, never shown"). Failed jobs show only the job name and the first line of the error (no payload, no stack trace with arguments). *System › Health* lists server settings with secrets as "Set (never shown)". |
+| Settings used to weaken safety | The data policy (ADR-010: no DDL, previews, pinned updates, delete mode per connection) is code, not a setting. Settings are validated on the server with ranges and cross-checks; secrets (`APP_KEY`, database and mail credentials, `AI_SERVICE_KEY`) cannot be set from the panel. Public endpoints expose only settings marked public. |
+| Untraceable changes | Admin activity log (who, what, before → after; secret fields recorded only as "changed") for settings, content, admins, roles, customer actions, Orbit knowledge, failed-job actions and sign-ins. Actions on a customer's account or resources (suspend, reactivate, sign out everywhere, force read-only, pause, resume) are also written to that customer's audit log; deleting an account is recorded in the admin activity log. |
+| Admin edits to Orbit's knowledge | Guides are retrieval context only: Orbit's permissions are decided by the gate in Laravel, never by guide text. Guide names are slugs (validated in Laravel and the AI service) and are written only inside the AI service's own storage. |
+| Suspended or deleted customers | Suspension revokes all tokens, ends the paired phone and blocks sign-in and every API call (403 `suspended`); deletion signs out, removes knowledge vectors and files, then the account and its owned data. |

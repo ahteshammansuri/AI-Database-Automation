@@ -23,7 +23,13 @@ use Illuminate\Support\Str;
  */
 class MediaService
 {
-    public const MAX_FILE_SIZE = 10485760; // 10 MB
+    public const MAX_FILE_SIZE = 10485760; // 10 MB default; see maxBytes()
+
+    /** Largest image accepted (admin panel: Settings > Sign-up & limits). */
+    public static function maxBytes(): int
+    {
+        return max(1, (int) config('platform.media_max_upload_mb', 10)) * 1024 * 1024;
+    }
 
     public const ALLOWED_MIMES = [
         'image/jpeg' => 'jpg',
@@ -69,8 +75,8 @@ class MediaService
             throw new Exception("Media content cannot be empty.");
         }
 
-        if (strlen($content) > self::MAX_FILE_SIZE) {
-            throw new Exception("Media file size (" . strlen($content) . " bytes) exceeds limit of " . self::MAX_FILE_SIZE . " bytes.");
+        if (strlen($content) > self::maxBytes()) {
+            throw new Exception("Media file size (" . strlen($content) . " bytes) exceeds limit of " . self::maxBytes() . " bytes.");
         }
 
         // Validate MIME type via magic bytes
@@ -238,7 +244,7 @@ class MediaService
             ],
         ]);
 
-        $content = @file_get_contents($url, false, $ctx, 0, self::MAX_FILE_SIZE + 1024);
+        $content = @file_get_contents($url, false, $ctx, 0, self::maxBytes() + 1024);
         if ($content === false) {
             throw new Exception("Failed to fetch remote media from URL: '{$url}'.");
         }

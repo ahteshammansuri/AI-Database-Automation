@@ -109,6 +109,8 @@ platform_data.db
 storage/uploads/*
 !storage/uploads/.gitkeep
 storage/faiss_index/*
+# Orbit guides published from the admin panel (runtime data)
+ai_service/storage/product_guides/
 !storage/faiss_index/.gitkeep
 storage/logs/*.log
 storage/scratch/

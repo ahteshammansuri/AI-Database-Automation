@@ -4,15 +4,17 @@ import { ArrowRight, CheckCircle2, Lock, Mail, User as UserIcon } from "lucide-r
 import { AuthShell } from "../components/ui/AuthShell";
 import { FieldError, FormAlert } from "../components/ui/kit";
 import { useAuth } from "../context/AuthContext";
+import { usePlatform } from "../context/PlatformContext";
 import { api } from "../services/api";
 import { ariaFor, clearError, focusFirstError, invalid, rules, serverFieldErrors, validate, type FieldErrors } from "../lib/validation";
 
-const SCHEMA = {
+/** The password minimum is set in the admin panel; the server applies the same rule. */
+const schemaFor = (minPassword: number) => ({
   name: [rules.required("Name"), rules.maxLength(255, "Name")],
   email: [rules.required("Email"), rules.email(), rules.maxLength(255, "Email")],
-  password: [rules.required("Password"), rules.minLength(8, "Password"), rules.maxLength(255, "Password")],
+  password: [rules.required("Password"), rules.minLength(minPassword, "Password"), rules.maxLength(255, "Password")],
   password_confirmation: [rules.required("Confirm password", "Repeat your password to confirm it."), rules.sameAs("password", "The passwords do not match.")],
-};
+});
 const FIELD_ID: Record<string, string> = { name: "reg-name", email: "reg-email", password: "reg-password", password_confirmation: "reg-confirm" };
 
 export const RegisterPage: React.FC = () => {
@@ -26,6 +28,8 @@ export const RegisterPage: React.FC = () => {
 
   const { login, isAuthenticated } = useAuth();
   const navigate = useNavigate();
+  const { config } = usePlatform();
+  const minPassword = config.platform.password_min_length;
 
   useEffect(() => {
     if (isAuthenticated) {
@@ -36,7 +40,7 @@ export const RegisterPage: React.FC = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    const found = validate({ name, email, password, password_confirmation: passwordConfirmation }, SCHEMA);
+    const found = validate({ name, email, password, password_confirmation: passwordConfirmation }, schemaFor(minPassword));
     setErrors(found);
     if (Object.keys(found).length) {
       focusFirstError(found, (f) => FIELD_ID[f]);
@@ -72,7 +76,24 @@ export const RegisterPage: React.FC = () => {
     }
   };
 
-  const strength = password.length === 0 ? 0 : password.length < 8 ? 1 : /[A-Z]/.test(password) && /\d/.test(password) && password.length >= 12 ? 3 : 2;
+  const strength = password.length === 0 ? 0 : password.length < minPassword ? 1 : /[A-Z]/.test(password) && /\d/.test(password) && password.length >= Math.max(12, minPassword) ? 3 : 2;
+
+  if (!config.platform.registration_open) {
+    return (
+      <AuthShell
+        title="Sign-ups are paused"
+        subtitle={config.platform.registration_closed_message}
+      >
+        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-[14px] leading-relaxed text-slate-600">
+          New workspaces cannot be created right now.
+          {config.platform.support_email && (
+            <> Questions? Write to <a href={`mailto:${config.platform.support_email}`} className="font-semibold text-indigo-600 hover:text-indigo-700">{config.platform.support_email}</a>.</>
+          )}
+        </div>
+        <Link to="/login" className="da-btn da-btn-primary mt-5 w-full py-3 text-[14px]">Sign in <ArrowRight className="h-4 w-4" /></Link>
+      </AuthShell>
+    );
+  }
 
   return (
     <AuthShell
@@ -109,7 +130,7 @@ export const RegisterPage: React.FC = () => {
               <Lock className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
               <input id="reg-password" type="password" autoComplete="new-password" value={password}
                 onChange={(e) => { setPassword(e.target.value); setErrors((x) => clearError(clearError(x, "password"), "password_confirmation")); }}
-                placeholder="8+ characters" className={`da-input py-3 pl-10${invalid(errors.password)}`} {...ariaFor("reg-password", errors.password)} />
+                placeholder={`${minPassword}+ characters`} className={`da-input py-3 pl-10${invalid(errors.password)}`} {...ariaFor("reg-password", errors.password)} />
             </div>
             <FieldError id="reg-password" message={errors.password} />
           </div>

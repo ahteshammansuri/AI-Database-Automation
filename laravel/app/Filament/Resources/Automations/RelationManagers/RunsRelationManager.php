@@ -1,0 +1,22 @@
+<?php
+
+namespace App\Filament\Resources\Automations\RelationManagers;
+
+use App\Filament\Concerns\ReadOnlyRelationManager;
+use App\Filament\Resources\Runs\RunResource;
+use App\Models\AutomationExecution;
+use Filament\Tables\Table;
+
+class RunsRelationManager extends ReadOnlyRelationManager
+{
+    protected static string $relationship = 'executions';
+
+    protected static string $permission = 'automations.view';
+
+    protected static ?string $title = 'Runs';
+
+    public function table(Table $table): Table
+    {
+        return RunResource::table($table)->recordUrl(fn (AutomationExecution $record) => RunResource::getUrl('view', ['record' => $record]));
+    }
+}

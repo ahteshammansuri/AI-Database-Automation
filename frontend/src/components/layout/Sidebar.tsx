@@ -4,6 +4,7 @@ import { motion } from "framer-motion";
 import { Database, ShieldCheck, X } from "lucide-react";
 import { orbitTargets } from "../../services/orbitTargets";
 import { NAV_GROUPS } from "./navConfig";
+import { usePlatform } from "../../context/PlatformContext";
 
 interface SidebarProps {
   pendingApprovalsCount?: number;
@@ -15,6 +16,7 @@ interface SidebarProps {
 /** Dark "ink" navigation, the same surface as the landing page hero. Every link is an Orbit target. */
 export const Sidebar: React.FC<SidebarProps> = ({ pendingApprovalsCount = 0, mobileOpen = false, onClose }) => {
   const location = useLocation();
+  const { brand, config } = usePlatform();
 
   return (
     <>
@@ -40,13 +42,13 @@ export const Sidebar: React.FC<SidebarProps> = ({ pendingApprovalsCount = 0, mob
 
         {/* Brand */}
         <div className="relative flex items-center gap-3 px-5 pt-5 pb-4">
-          <Link to="/dashboard" className="group flex items-center gap-2.5" aria-label="DataAuto dashboard">
+          <Link to="/dashboard" className="group flex items-center gap-2.5" aria-label={`${brand} dashboard`}>
             <span className="grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-400 shadow-[0_8px_24px_-8px_rgba(99,102,241,0.8)] transition-transform duration-500 group-hover:rotate-[8deg] group-hover:scale-105">
               <Database className="h-[18px] w-[18px] text-white" />
             </span>
             <span>
-              <span className="block text-[16px] font-bold tracking-tight text-white">DataAuto</span>
-              <span className="block text-[11px] font-medium text-slate-500">Database automation</span>
+              <span className="block text-[16px] font-bold tracking-tight text-white">{brand}</span>
+              <span className="block text-[11px] font-medium text-slate-500">{config.platform.tagline}</span>
             </span>
           </Link>
           <button

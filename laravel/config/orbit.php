@@ -29,4 +29,12 @@ return [
     // Orbit Remote: the address phones open from the pairing QR code (e.g. https://app.example.com). Leave empty to
     // use the address the computer has open (or this machine's Wi-Fi address when that is "localhost").
     'remote_public_url' => env('ORBIT_REMOTE_PUBLIC_URL'),
+
+    // Orbit on/off for every customer (the admin panel's kill switch), and Orbit Remote (phone pairing) limits.
+    'enabled' => true,
+    'remote_enabled' => true,
+    'remote_pairing_seconds' => 180,
+    'remote_session_hours' => 12,
+    'remote_idle_minutes' => 120,
+    'remote_commands_per_minute' => 20,
 ];

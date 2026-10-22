@@ -3,8 +3,9 @@ import { motion } from "framer-motion";
 import {
   ArrowRight, BookOpen, CalendarClock, Check, FileText, GitMerge, History, KeyRound, Mail, PenLine, ScanSearch,
 } from "lucide-react";
-import { SectionHeading, SpotlightCard, Accent } from "./primitives";
+import { ManagedHeading, SpotlightCard } from "./primitives";
 import { useCycle, EASE } from "./motion";
+import { BrandName } from "../../context/PlatformContext";
 
 const Icon: React.FC<{ icon: React.ElementType; tone: string }> = ({ icon: I, tone }) => (
   <span className={`grid place-items-center w-10 h-10 rounded-2xl ${tone}`}>
@@ -83,7 +84,7 @@ const KnowledgeVisual: React.FC = () => (
 const ApprovalVisual: React.FC = () => (
   <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
     <div className="flex items-center gap-2 text-[11px] text-slate-500">
-      <Mail className="w-3.5 h-3.5" /> DataAuto · Review needed
+      <Mail className="w-3.5 h-3.5" /> <BrandName /> · Review needed
     </div>
     <div className="mt-1.5 text-[14px] font-semibold text-slate-900 leading-snug">5 indexing mistakes that slow MySQL down</div>
     <div className="mt-3 flex gap-2">
@@ -195,7 +196,7 @@ const CARDS: { span: string; icon: React.ElementType; tone: string; title: strin
     icon: ScanSearch,
     tone: "bg-indigo-50 text-indigo-600",
     title: "It understands your schema",
-    body: "DataAuto reads your tables, columns, keys and relationships, then labels every table: where it can write, which tables are references, and which sensitive ones stay locked.",
+    body: "It reads your tables, columns, keys and relationships, then labels every table: where it can write, which tables are references, and which sensitive ones stay locked.",
     visual: <SchemaVisual />,
   },
   {
@@ -260,11 +261,7 @@ export const FeatureBento: React.FC = () => (
   <section id="features" data-nav-theme="light" className="relative z-10 -mt-10 rounded-t-[40px] bg-[#F7F8FC] pt-24 sm:pt-32 pb-24 sm:pb-32 scroll-mt-16">
     <div aria-hidden className="absolute inset-x-0 top-0 h-[520px] landing-grid-light rounded-t-[40px]" />
     <div className="relative max-w-7xl mx-auto px-4 sm:px-6">
-      <SectionHeading
-        eyebrow="The product"
-        title={<>Everything between your idea and <Accent>a published row</Accent></>}
-        subtitle="DataAuto handles the whole path: understanding the database, writing with your knowledge, getting a person's OK, and committing safely on time."
-      />
+      <ManagedHeading section="product" />
       <div className="mt-16 grid sm:grid-cols-2 lg:grid-cols-6 gap-4 sm:gap-5">
         {CARDS.map((c, i) => (
           <motion.div

@@ -3,18 +3,23 @@ import { Link } from "react-router-dom";
 import { AnimatePresence, motion, useMotionValueEvent, useScroll, useSpring } from "framer-motion";
 import { ArrowRight, Database, LayoutDashboard, Menu, X } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
+import { usePlatform } from "../../context/PlatformContext";
 import { EASE } from "./motion";
 import { NAV_LINKS } from "./navLinks";
+import { AnnouncementBar } from "../common/AnnouncementBar";
 
 
-export const Logo: React.FC<{ light?: boolean }> = ({ light = true }) => (
-  <Link to="/" className="flex items-center gap-2.5 group" aria-label="DataAuto home">
+export const Logo: React.FC<{ light?: boolean }> = ({ light = true }) => {
+  const { brand } = usePlatform();
+  return (
+  <Link to="/" className="flex items-center gap-2.5 group" aria-label={`${brand} home`}>
     <span className="relative grid place-items-center w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-400 shadow-[0_8px_24px_-8px_rgba(99,102,241,0.8)] transition-transform duration-500 group-hover:rotate-[8deg] group-hover:scale-105">
       <Database className="w-[18px] h-[18px] text-white" />
     </span>
-    <span className={`text-[17px] font-bold tracking-tight ${light ? "text-white" : "text-slate-900"}`}>DataAuto</span>
+    <span className={`text-[17px] font-bold tracking-tight ${light ? "text-white" : "text-slate-900"}`}>{brand}</span>
   </Link>
-);
+  );
+};
 
 /** Transparent over the hero, frosted glass once the page scrolls; thin progress line on top. */
 export const LandingNav: React.FC = () => {
@@ -37,6 +42,7 @@ export const LandingNav: React.FC = () => {
 
   return (
     <header className="fixed inset-x-0 top-0 z-50">
+      <AnnouncementBar />
       <motion.div
         aria-hidden
         style={{ scaleX: progress }}

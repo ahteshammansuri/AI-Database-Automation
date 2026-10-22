@@ -7,6 +7,7 @@ import { useLiveEvents } from "../../context/LiveEventsContext";
 import { api } from "../../services/api";
 import { navFor } from "./navConfig";
 import { RemoteNavButton } from "../remote/RemoteNavButton";
+import { usePlatform } from "../../context/PlatformContext";
 
 interface NavbarProps {
   onRefresh?: () => void;
@@ -20,6 +21,7 @@ export const Navbar: React.FC<NavbarProps> = ({ onRefresh, isRefreshing = false,
   const { user, logout } = useAuth();
   const { status: liveStatus } = useLiveEvents();
   const navigate = useNavigate();
+  const { orbit } = usePlatform().config;
   const location = useLocation();
   const here = navFor(location.pathname);
   const [accountOpen, setAccountOpen] = useState(false);
@@ -114,7 +116,7 @@ export const Navbar: React.FC<NavbarProps> = ({ onRefresh, isRefreshing = false,
           </button>
         )}
 
-        <RemoteNavButton />
+        {orbit.enabled && orbit.remote_enabled && <RemoteNavButton />}
 
         <Link to="/automations/new" className="da-btn da-btn-primary px-3 sm:px-4" aria-label="Create automation">
           <Plus className="h-4 w-4" />

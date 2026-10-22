@@ -7,8 +7,9 @@ import { TimezoneSelect } from "../ui/TimezoneSelect";
 import { CalendarMonth, DayMarker } from "../ui/CalendarMonth";
 import { FieldError } from "../ui/kit";
 import { ariaFor, invalid } from "../../lib/validation";
+import { usePlatform } from "../../context/PlatformContext";
 import {
-  MIN_GAP_MINUTES, WEEKDAYS, addDays, addMinutesHHMM, daysBetween, formatDateShort, formatGap, formatInstant,
+  WEEKDAYS, addDays, addMinutesHHMM, daysBetween, formatDateShort, formatGap, formatInstant,
   formatTime12, gapMinutes, isoWeekday, monthMatrix, publishesNextDay, relativeFromNow, runDates, todayIn,
 } from "../../lib/schedule";
 
@@ -60,6 +61,7 @@ const END_PRESETS = [3, 7, 14, 30];
 export const ScheduleStep: React.FC<Props> = ({
   schedule, onScheduleChange, approval, onApprovalChange, userEmail, targetTable, excludeAutomationId, onValidity, fieldErrors, onFieldEdited,
 }) => {
+  const minGap = usePlatform().config.automation.min_gap_minutes;
   const s = schedule;
   const today = todayIn(s.timezone);
   const set = (patch: Partial<ScheduleConfig>) => {
@@ -68,7 +70,7 @@ export const ScheduleStep: React.FC<Props> = ({
   };
 
   const gap = gapMinutes(s.generation_time, s.publication_time);
-  const gapError = gap === null ? "Choose both times." : gap === 0 ? "Publication must be after generation." : gap < MIN_GAP_MINUTES ? `Publication must be at least ${MIN_GAP_MINUTES} minutes after generation (now ${gap} min).` : null;
+  const gapError = gap === null ? "Choose both times." : gap === 0 ? "Publication must be after generation." : gap < minGap ? `Publication must be at least ${minGap} minutes after generation (now ${gap} min).` : null;
 
   // Server-side validation and summary (debounced)
   const [server, setServer] = useState<{ valid: boolean; errors: Record<string, string>; summary: any; occurrences: any[] } | null>(null);
@@ -149,7 +151,7 @@ export const ScheduleStep: React.FC<Props> = ({
 
   const setGeneration = (t: string) => {
     const g = gapMinutes(t, s.publication_time);
-    set({ generation_time: t, publication_time: g === null || g < MIN_GAP_MINUTES ? addMinutesHHMM(t, 30) : s.publication_time });
+    set({ generation_time: t, publication_time: g === null || g < minGap ? addMinutesHHMM(t, Math.max(30, minGap)) : s.publication_time });
   };
 
   const setFrequency = (f: Frequency) => {
@@ -305,7 +307,7 @@ export const ScheduleStep: React.FC<Props> = ({
             invalid={!!publicationError}
             ariaLabel="Publication time"
             quickOptions={[15, 30, 60, 120].map((m) => ({ label: `+${formatGap(m)}`, value: addMinutesHHMM(s.generation_time, m) }))}
-            hint={`Must be at least ${MIN_GAP_MINUTES} minutes after generation.`}
+            hint={`Must be at least ${minGap} minutes after generation.`}
           />
           <FieldError id="schedule-publication" message={publicationError} />
           {!publicationError && (

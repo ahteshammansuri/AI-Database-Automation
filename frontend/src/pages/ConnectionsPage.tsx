@@ -20,6 +20,7 @@ import { useRefreshAfterOrbit } from "../hooks/useRefreshAfterOrbit";
 import { actionTarget, fieldTarget } from "../services/orbitSurfaces";
 import { ariaFor, focusFirstError, invalid, rules, serverFieldErrors, validate, type FieldErrors, type Rule } from "../lib/validation";
 import { pageStateService } from "../services/pageStateService";
+import { BrandName } from "../context/PlatformContext";
 
 interface SupportedEngine {
   id: string;
@@ -609,7 +610,7 @@ export const ConnectionsPage: React.FC = () => {
       <PageHeader
         eyebrow="Workspace"
         title="Database connections"
-        description="Connect the databases DataAuto works with. Every connection is tested before it is saved, credentials are encrypted at rest, and new connections start read-only."
+        description={<>Connect the databases <BrandName /> works with. Every connection is tested before it is saved, credentials are encrypted at rest, and new connections start read-only.</>}
         actions={
           <button ref={addButtonRef} id="connection-form-anchor" type="button" onClick={openCreateModal} className="da-btn da-btn-primary">
             <Plus className="h-4 w-4" /> Connect database
@@ -978,7 +979,7 @@ export const ConnectionsPage: React.FC = () => {
               <div className="mt-3 flex items-start gap-2 rounded-xl border border-amber-200/70 bg-amber-50 p-3 text-[11.5px] leading-relaxed text-amber-900">
                 <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
                 <span>
-                  Tip: use a database user limited to the mode you choose (for example <code className="font-mono font-bold">fx_ro</code> for read-only). DataAuto enforces the mode
+                  Tip: use a database user limited to the mode you choose (for example <code className="font-mono font-bold">fx_ro</code> for read-only). <BrandName /> enforces the mode
                   either way and never assumes the database user is restricted. This mode governs the data assistant; automations and Manual Publishing add only the new rows you configure.
                 </span>
               </div>

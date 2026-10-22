@@ -21,10 +21,17 @@ use DateTimeZone;
  */
 class ScheduleCalculator
 {
+    /** Default minimum review window; the live value is minGapMinutes() (admin panel: Settings > Automations). */
     public const MIN_GAP_MINUTES = 15;
     public const TYPES = ['ONE_TIME', 'DAILY', 'WEEKLY'];
     /** Container automations used by manual publishing; never run by the scheduler. */
     public const TYPE_NONE = 'NONE';
+
+    /** Minutes publication must follow generation (an admin setting; never below 5). */
+    public static function minGapMinutes(): int
+    {
+        return max(5, (int) config('automation.min_gap_minutes', self::MIN_GAP_MINUTES));
+    }
 
     /** Upper bound for forward searches (weekly schedules need at most 7 days; this covers long gaps). */
     private const SEARCH_HORIZON_DAYS = 400;
@@ -450,8 +457,8 @@ class ScheduleCalculator
             $gap = self::gapMinutes($gen, $pub);
             if ($gap === 0) {
                 $errors['publication_time'] = 'Publication time must be after the generation time.';
-            } elseif ($gap < self::MIN_GAP_MINUTES) {
-                $errors['publication_time'] = 'Publication time must be at least ' . self::MIN_GAP_MINUTES . " minutes after generation time (current gap: {$gap} minutes).";
+            } elseif ($gap < self::minGapMinutes()) {
+                $errors['publication_time'] = 'Publication time must be at least ' . self::minGapMinutes() . " minutes after generation time (current gap: {$gap} minutes).";
             }
         }
 

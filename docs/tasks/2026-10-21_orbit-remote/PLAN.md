@@ -42,4 +42,4 @@ audit log entries for pairing created / paired / ended / commands.
 | R5 | Desktop UI: QR modal (countdown, refresh, LAN address, HTTPS note, connected state, disconnect), dashboard card, Orbit panel button | DONE (browser check in R8) |
 | R6 | Phone page `/orbit/remote`: claim, face, hold-to-talk, type, stop, status/captions, offline/expired states, wake lock, haptics | DONE |
 | R7 | Dev HTTPS for phone microphones (`npm run dev:https`) + Reverb over the same origin; docs | DONE |
-| R8 | Verify: tsc, lint, unit tests, Laravel tests, two-browser end-to-end (desktop + emulated phone), screenshots | IN PROGRESS |
+| R8 | Verify: tsc, lint, unit tests, Laravel tests, two-browser end-to-end (desktop + emulated phone), screenshots | DONE |

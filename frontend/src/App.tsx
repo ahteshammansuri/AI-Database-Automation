@@ -1,6 +1,7 @@
 import React from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider } from "./context/AuthContext";
+import { PlatformProvider } from "./context/PlatformContext";
 import { ToastProvider } from "./context/ToastContext";
 import { LiveEventsProvider } from "./context/LiveEventsContext";
 import { AssistantProvider } from "./context/AssistantContext";
@@ -125,13 +126,15 @@ const PortalApp: React.FC = () => {
 export const App: React.FC = () => {
   return (
     <ErrorBoundary>
-      <BrowserRouter>
-        <Routes>
-          {/* Orbit Remote on a paired phone (opened from the QR code) */}
-          <Route path="/orbit/remote" element={<OrbitRemotePage />} />
-          <Route path="*" element={<PortalApp />} />
-        </Routes>
-      </BrowserRouter>
+      <PlatformProvider>
+        <BrowserRouter>
+          <Routes>
+            {/* Orbit Remote on a paired phone (opened from the QR code) */}
+            <Route path="/orbit/remote" element={<OrbitRemotePage />} />
+            <Route path="*" element={<PortalApp />} />
+          </Routes>
+        </BrowserRouter>
+      </PlatformProvider>
     </ErrorBoundary>
   );
 };

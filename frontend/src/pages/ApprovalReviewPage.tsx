@@ -7,6 +7,7 @@ import { ContentPreview } from "../components/content/ContentPreview";
 import { formatInstant, relativeFromNow } from "../lib/schedule";
 import { FieldError } from "../components/ui/kit";
 import { invalid, rules, serverFieldErrors, validateField } from "../lib/validation";
+import { BrandName } from "../context/PlatformContext";
 
 const POLICY_TEXT: Record<string, string> = {
   AUTO_PUBLISH_LATEST: "If nobody decides by then, this version will be published automatically.",
@@ -153,7 +154,7 @@ export const ApprovalReviewPage: React.FC = () => {
             <span className="grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-400 shadow-[0_8px_24px_-8px_rgba(99,102,241,0.8)]">
               <ShieldCheck className="h-[18px] w-[18px]" />
             </span>
-            <span className="text-[16px] font-bold tracking-tight">DataAuto</span>
+            <span className="text-[16px] font-bold tracking-tight"><BrandName /></span>
           </div>
           <div className="mt-8 flex flex-wrap items-center gap-2 text-[12px]">
             <span className="rounded-full border border-white/15 bg-white/[0.06] px-3 py-1 font-semibold text-indigo-200">Review before publishing</span>

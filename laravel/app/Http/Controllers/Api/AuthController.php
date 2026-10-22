@@ -13,10 +13,17 @@ class AuthController extends Controller
 {
     public function register(Request $request)
     {
+        // Sign-up can be closed by a platform admin (Settings > Sign-up & limits).
+        if (!config('platform.registration_open', true)) {
+            $message = (string) config('platform.registration_closed_message', 'New sign-ups are paused for now.');
+            return response()->json(['message' => $message, 'errors' => ['email' => [$message]], 'reason' => 'registration_closed'], 403);
+        }
+
+        $min = max(8, (int) config('platform.password_min_length', 8));
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'email' => 'required|string|email|max:255|unique:users,email',
-            'password' => 'required|string|min:8|max:255|confirmed',
+            'password' => "required|string|min:{$min}|max:255|confirmed",
         ]);
 
         $user = User::create([
@@ -54,6 +61,13 @@ class AuthController extends Controller
         if (!$user || !Hash::check($validated['password'], $user->password)) {
             throw ValidationException::withMessages([
                 'password' => ['The email or password is incorrect.'],
+            ]);
+        }
+
+        if ($user->isSuspended()) {
+            $support = config('platform.support_email');
+            throw ValidationException::withMessages([
+                'email' => ['This account is suspended.' . ($support ? " Contact {$support} for help." : '')],
             ]);
         }
 

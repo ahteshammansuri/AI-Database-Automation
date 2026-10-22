@@ -1,9 +1,11 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { motion } from "framer-motion";
-import { CheckCircle2, Clock, Eye, ArrowRight, Edit3, Send, RotateCcw, Save, FileText, Calendar, Database, RefreshCw, Workflow } from "lucide-react";
+import { CheckCircle2, Clock, Eye, ArrowRight, Edit3, Send, RotateCcw, Save, FileText, Calendar, Database, RefreshCw, Workflow, Sparkles } from "lucide-react";
 import { api } from "../services/api";
 import { ContentPreview } from "../components/content/ContentPreview";
+import { WysiwygEditor } from "../components/content/WysiwygEditor";
+import { looksLikeHtml } from "../components/content/RichText";
 import { formatInstant } from "../lib/schedule";
 import { Card, EmptyState, FieldError, Loading, ModalShell, PageHeader } from "../components/ui/kit";
 import { draftPayloadErrors, draftRelationColumns, focusFirstError, invalid, rules, serverFieldErrors, validateField, type FieldErrors } from "../lib/validation";
@@ -433,125 +435,194 @@ export const ApprovalsPage: React.FC = () => {
               ))}
             </div>
 
-            {activeTab === "edit" && (
-              <div className="space-y-4">
-                {(editPayload.title !== undefined || editPayload.name !== undefined) && (
-                  <div>
-                    {(() => {
-                      const key = editPayload.title !== undefined ? "title" : "name";
-                      return (
-                        <>
-                          <label className="da-label" htmlFor={draftFieldId(key)}>Title</label>
-                          <input
-                            id={draftFieldId(key)}
-                            type="text"
-                            value={editPayload[key] ?? ""}
-                            onChange={(e) => handleFieldChange(key, e.target.value)}
-                            aria-invalid={!!editErrors[key]}
-                            aria-describedby={editErrors[key] ? `${draftFieldId(key)}-error` : undefined}
-                            className={`da-input font-semibold${invalid(editErrors[key])}`}
-                          />
-                          <FieldError id={draftFieldId(key)} message={editErrors[key]} />
-                        </>
-                      );
-                    })()}
-                  </div>
-                )}
-                {editPayload.slug !== undefined && (
-                  <div>
-                    <div className="mb-1.5 flex items-center justify-between">
-                      <label className="text-[12.5px] font-semibold text-slate-700" htmlFor={draftFieldId("slug")}>URL slug</label>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const t = editPayload.title || editPayload.name || "";
-                          handleFieldChange("slug", t.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, ""));
-                        }}
-                        className="text-[12px] font-semibold text-indigo-600 hover:text-indigo-800"
-                      >
-                        Regenerate from title
-                      </button>
+            {activeTab === "edit" && (() => {
+              // Intelligently identify candidate keys
+              const titleKey = ["title", "name", "headline", "subject", "heading"].find((k) => editPayload[k] !== undefined);
+              const slugKey = ["slug", "url_slug"].find((k) => editPayload[k] !== undefined);
+
+              // Candidate for body: explicit content/body field, or description if no explicit body field is defined
+              const explicitBodyKey = ["content", "body", "article", "post_content", "html", "long_description", "text"].find((k) => editPayload[k] !== undefined);
+              const bodyKey = explicitBodyKey || (editPayload.description !== undefined ? "description" : undefined);
+
+              // Summary: excerpt or summary, or description if description wasn't used as the body
+              const summaryKey = ["excerpt", "summary", "short_description", "intro", "teaser", "lead", "abstract", "snippet"].find((k) => editPayload[k] !== undefined)
+                || (editPayload.description !== undefined && bodyKey !== "description" ? "description" : undefined);
+
+              const handledKeys = new Set([titleKey, slugKey, summaryKey, bodyKey].filter(Boolean) as string[]);
+              const otherKeys = Object.keys(editPayload).filter((k) => !handledKeys.has(k) && !k.startsWith("__"));
+
+              return (
+                <div className="space-y-5">
+                  {/* Title */}
+                  {titleKey && (
+                    <div>
+                      <label className="da-label" htmlFor={draftFieldId(titleKey)}>Title</label>
+                      <input
+                        id={draftFieldId(titleKey)}
+                        type="text"
+                        value={editPayload[titleKey] ?? ""}
+                        onChange={(e) => handleFieldChange(titleKey, e.target.value)}
+                        aria-invalid={!!editErrors[titleKey]}
+                        aria-describedby={editErrors[titleKey] ? `${draftFieldId(titleKey)}-error` : undefined}
+                        className={`da-input font-semibold text-slate-900${invalid(editErrors[titleKey])}`}
+                      />
+                      <FieldError id={draftFieldId(titleKey)} message={editErrors[titleKey]} />
                     </div>
-                    <input id={draftFieldId("slug")} type="text" value={editPayload.slug ?? ""} onChange={(e) => handleFieldChange("slug", e.target.value)}
-                      aria-invalid={!!editErrors.slug} aria-describedby={editErrors.slug ? `${draftFieldId("slug")}-error` : undefined}
-                      className={`da-input font-mono${invalid(editErrors.slug)}`} />
-                    <FieldError id={draftFieldId("slug")} message={editErrors.slug} />
-                  </div>
-                )}
-                {(editPayload.excerpt !== undefined || editPayload.description !== undefined) && (
-                  <div>
-                    {(() => {
-                      const key = editPayload.excerpt !== undefined ? "excerpt" : "description";
-                      return (
-                        <>
-                          <label className="da-label" htmlFor={draftFieldId(key)}>Summary</label>
-                          <textarea
-                            id={draftFieldId(key)}
-                            rows={3}
-                            value={editPayload[key] ?? ""}
-                            onChange={(e) => handleFieldChange(key, e.target.value)}
-                            aria-invalid={!!editErrors[key]}
-                            aria-describedby={editErrors[key] ? `${draftFieldId(key)}-error` : undefined}
-                            className={`da-input leading-relaxed${invalid(editErrors[key])}`}
-                          />
-                          <FieldError id={draftFieldId(key)} message={editErrors[key]} />
-                        </>
-                      );
-                    })()}
-                  </div>
-                )}
-                {(editPayload.content !== undefined || editPayload.body !== undefined) && (
-                  <div>
-                    <div className="mb-1.5 flex items-center justify-between">
-                      <label className="text-[12.5px] font-semibold text-slate-700">Content (Markdown or HTML)</label>
-                      <span className="font-mono text-[11.5px] text-slate-400">
-                        {(editPayload.content || editPayload.body || "").split(/\s+/).filter(Boolean).length} words
-                      </span>
+                  )}
+
+                  {/* Slug */}
+                  {slugKey && (
+                    <div>
+                      <div className="mb-1.5 flex items-center justify-between">
+                        <label className="text-[12.5px] font-semibold text-slate-700" htmlFor={draftFieldId(slugKey)}>URL slug</label>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const t = titleKey ? editPayload[titleKey] || "" : "";
+                            handleFieldChange(slugKey, t.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, ""));
+                          }}
+                          className="text-[12px] font-semibold text-indigo-600 hover:text-indigo-800"
+                        >
+                          Regenerate from title
+                        </button>
+                      </div>
+                      <input
+                        id={draftFieldId(slugKey)}
+                        type="text"
+                        value={editPayload[slugKey] ?? ""}
+                        onChange={(e) => handleFieldChange(slugKey, e.target.value)}
+                        aria-invalid={!!editErrors[slugKey]}
+                        aria-describedby={editErrors[slugKey] ? `${draftFieldId(slugKey)}-error` : undefined}
+                        className={`da-input font-mono${invalid(editErrors[slugKey])}`}
+                      />
+                      <FieldError id={draftFieldId(slugKey)} message={editErrors[slugKey]} />
                     </div>
-                    {(() => {
-                      const key = editPayload.content !== undefined ? "content" : "body";
-                      return (
-                        <>
-                          <textarea
-                            id={draftFieldId(key)}
-                            rows={10}
-                            aria-label="Content"
-                            value={editPayload[key] ?? ""}
-                            onChange={(e) => handleFieldChange(key, e.target.value)}
-                            aria-invalid={!!editErrors[key]}
-                            aria-describedby={editErrors[key] ? `${draftFieldId(key)}-error` : undefined}
-                            className={`da-input leading-relaxed${invalid(editErrors[key])}`}
-                          />
-                          <FieldError id={draftFieldId(key)} message={editErrors[key]} />
-                        </>
-                      );
-                    })()}
-                  </div>
-                )}
-                <div className="border-t border-slate-100 pt-4">
-                  <div className="da-eyebrow mb-3">Other columns</div>
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                    {Object.keys(editPayload)
-                      .filter((k) => !["title", "name", "slug", "excerpt", "description", "content", "body"].includes(k))
-                      .map((key) => (
-                        <div key={key}>
-                          <label className="mb-1 block font-mono text-[12px] font-semibold text-slate-600" htmlFor={draftFieldId(key)}>{key}</label>
-                          <input
-                            id={draftFieldId(key)}
-                            type="text"
-                            value={typeof editPayload[key] === "object" && editPayload[key] !== null ? JSON.stringify(editPayload[key]) : String(editPayload[key] ?? "")}
-                            onChange={(e) => handleFieldChange(key, e.target.value)}
-                            aria-invalid={!!editErrors[key]}
-                            aria-describedby={editErrors[key] ? `${draftFieldId(key)}-error` : undefined}
-                            className={`da-input py-2${invalid(editErrors[key])}`}
-                          />
-                          <FieldError id={draftFieldId(key)} message={editErrors[key]} />
+                  )}
+
+                  {/* Summary / Excerpt (if present) */}
+                  {summaryKey && (
+                    <div>
+                      <div className="mb-1.5 flex items-center justify-between">
+                        <label className="da-label mb-0" htmlFor={draftFieldId(summaryKey)}>Summary / Excerpt</label>
+                        <span className="font-mono text-[11px] text-slate-400">
+                          {String(editPayload[summaryKey] ?? "").length} chars
+                        </span>
+                      </div>
+                      {looksLikeHtml(String(editPayload[summaryKey] ?? "")) ? (
+                        <WysiwygEditor
+                          id={draftFieldId(summaryKey)}
+                          value={String(editPayload[summaryKey] ?? "")}
+                          onChange={(val) => handleFieldChange(summaryKey, val)}
+                          minHeight="140px"
+                          compact
+                          error={editErrors[summaryKey]}
+                        />
+                      ) : (
+                        <textarea
+                          id={draftFieldId(summaryKey)}
+                          rows={3}
+                          value={editPayload[summaryKey] ?? ""}
+                          onChange={(e) => handleFieldChange(summaryKey, e.target.value)}
+                          aria-invalid={!!editErrors[summaryKey]}
+                          aria-describedby={editErrors[summaryKey] ? `${draftFieldId(summaryKey)}-error` : undefined}
+                          className={`da-input leading-relaxed${invalid(editErrors[summaryKey])}`}
+                        />
+                      )}
+                      <FieldError id={draftFieldId(summaryKey)} message={editErrors[summaryKey]} />
+                    </div>
+                  )}
+
+                  {/* Main Article Content / Body (WYSIWYG Editor) */}
+                  {bodyKey && (
+                    <div>
+                      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <label className="text-[13px] font-bold text-slate-800 flex items-center gap-1.5" htmlFor={draftFieldId(bodyKey)}>
+                            <Sparkles className="h-3.5 w-3.5 text-indigo-600" />
+                            <span>{bodyKey === "description" ? "Article Content (description)" : "Article Content"}</span>
+                          </label>
+                          <p className="text-[12px] text-slate-500">
+                            WYSIWYG visual editor: format headings, links, and text directly, or switch to HTML source mode.
+                          </p>
                         </div>
-                      ))}
-                  </div>
+                      </div>
+
+                      <WysiwygEditor
+                        id={draftFieldId(bodyKey)}
+                        value={String(editPayload[bodyKey] ?? "")}
+                        onChange={(val) => handleFieldChange(bodyKey, val)}
+                        minHeight="320px"
+                        maxHeight="600px"
+                        error={editErrors[bodyKey]}
+                      />
+                      <FieldError id={draftFieldId(bodyKey)} message={editErrors[bodyKey]} />
+                    </div>
+                  )}
+
+                  {/* Other columns */}
+                  {otherKeys.length > 0 && (
+                    <div className="border-t border-slate-100 pt-4">
+                      <div className="da-eyebrow mb-3">Other columns</div>
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                        {otherKeys.map((key) => {
+                          const val = editPayload[key];
+                          const isLong = typeof val === "string" && (val.length > 150 || looksLikeHtml(val));
+
+                          if (isLong) {
+                            return (
+                              <div key={key} className="sm:col-span-2">
+                                <label className="mb-1 block font-mono text-[12px] font-semibold text-slate-600" htmlFor={draftFieldId(key)}>
+                                  {key}
+                                </label>
+                                {looksLikeHtml(val) ? (
+                                  <WysiwygEditor
+                                    id={draftFieldId(key)}
+                                    value={val}
+                                    onChange={(newVal) => handleFieldChange(key, newVal)}
+                                    minHeight="180px"
+                                    compact
+                                    error={editErrors[key]}
+                                  />
+                                ) : (
+                                  <textarea
+                                    id={draftFieldId(key)}
+                                    rows={4}
+                                    value={val}
+                                    onChange={(e) => handleFieldChange(key, e.target.value)}
+                                    aria-invalid={!!editErrors[key]}
+                                    aria-describedby={editErrors[key] ? `${draftFieldId(key)}-error` : undefined}
+                                    className={`da-input text-xs font-mono${invalid(editErrors[key])}`}
+                                  />
+                                )}
+                                <FieldError id={draftFieldId(key)} message={editErrors[key]} />
+                              </div>
+                            );
+                          }
+
+                          return (
+                            <div key={key}>
+                              <label className="mb-1 block font-mono text-[12px] font-semibold text-slate-600" htmlFor={draftFieldId(key)}>
+                                {key}
+                              </label>
+                              <input
+                                id={draftFieldId(key)}
+                                type="text"
+                                value={typeof val === "object" && val !== null ? JSON.stringify(val) : String(val ?? "")}
+                                onChange={(e) => handleFieldChange(key, e.target.value)}
+                                aria-invalid={!!editErrors[key]}
+                                aria-describedby={editErrors[key] ? `${draftFieldId(key)}-error` : undefined}
+                                className={`da-input py-2${invalid(editErrors[key])}`}
+                              />
+                              <FieldError id={draftFieldId(key)} message={editErrors[key]} />
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
             {activeTab === "preview" && (
               <ContentPreview

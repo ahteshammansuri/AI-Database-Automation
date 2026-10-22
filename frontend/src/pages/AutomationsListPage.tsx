@@ -13,6 +13,7 @@ import { useOrbitSurface } from "../hooks/useOrbitSurface";
 import { useRefreshAfterOrbit } from "../hooks/useRefreshAfterOrbit";
 import { pageStateService } from "../services/pageStateService";
 import { formatInstant, relativeFromNow } from "../lib/schedule";
+import { BrandName } from "../context/PlatformContext";
 
 export const AutomationsListPage: React.FC = () => {
   const navigate = useNavigate();
@@ -269,7 +270,7 @@ export const AutomationsListPage: React.FC = () => {
         <EmptyState
           icon={Workflow}
           title="No automations yet"
-          description="Build your first AI-written or manual publishing pipeline. DataAuto will write, ask for approval and publish on schedule."
+          description={<>Build your first AI-written or manual publishing pipeline. <BrandName /> will write, ask for approval and publish on schedule.</>}
           action={<Link to="/automations/new" className="da-btn da-btn-primary"><Plus className="h-4 w-4" /> Create automation</Link>}
         />
       ) : (
