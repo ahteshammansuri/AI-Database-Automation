@@ -110,7 +110,7 @@ class OrbitRemoteTest extends TestCase
         OrbitRemoteSession::where('public_id', $id)->update(['last_desktop_seen_at' => now()->subMinutes(5)]);
         $this->withToken($device)->postJson('/api/orbit-remote/device/commands', ['kind' => 'say', 'text' => 'open connections'])
             ->assertStatus(422)
-            ->assertJsonPath('errors.text.0', 'Your computer is not connected right now. Open DataAuto there, then try again.');
+            ->assertJsonPath('errors.text.0', 'Your computer is not connected right now. Open ' . config('platform.brand_name') . ' there, then try again.');
 
         $this->desktopHeartbeat($id, ['face' => 'thinking', 'status' => 'Thinking', 'task' => 'Open connections']);
         $sent = $this->withToken($device)->postJson('/api/orbit-remote/device/commands', ['kind' => 'say', 'text' => 'Open the connections page']);

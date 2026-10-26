@@ -19,7 +19,7 @@ class AuthController extends Controller
             return response()->json(['message' => $message, 'errors' => ['email' => [$message]], 'reason' => 'registration_closed'], 403);
         }
 
-        $min = max(8, (int) config('platform.password_min_length', 8));
+        $min = max(6, (int) config('platform.password_min_length', 6));
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'email' => 'required|string|email|max:255|unique:users,email',
@@ -44,6 +44,7 @@ class AuthController extends Controller
                 'id' => $user->id,
                 'name' => $user->name,
                 'email' => $user->email,
+                'timezone' => $user->timezone,
             ],
             'token' => $token,
         ], 201);
@@ -81,6 +82,7 @@ class AuthController extends Controller
                 'id' => $user->id,
                 'name' => $user->name,
                 'email' => $user->email,
+                'timezone' => $user->timezone,
             ],
             'token' => $token,
         ]);
@@ -93,6 +95,7 @@ class AuthController extends Controller
                 'id' => $request->user()->id,
                 'name' => $request->user()->name,
                 'email' => $request->user()->email,
+                'timezone' => $request->user()->timezone,
             ],
         ]);
     }

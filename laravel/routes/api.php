@@ -62,9 +62,18 @@ Route::middleware(['auth:sanctum', \App\Http\Middleware\EnsureCustomerActive::cl
     // Current user & session
     Route::get('/auth/me', [AuthController::class, 'me']);
     Route::post('/auth/logout', [AuthController::class, 'logout']);
+    Route::prefix('profile')->controller(\App\Http\Controllers\Api\ProfileController::class)->group(function () {
+        Route::get('/', 'show');
+        Route::put('/', 'update')->middleware('throttle:20,1');
+        Route::put('/password', 'password')->middleware('throttle:6,1');
+        Route::get('/usage', 'usage');
+        Route::delete('/sessions', 'revokeSessions');
+        Route::delete('/sessions/{id}', 'revokeSessions')->whereNumber('id');
+    });
 
     // Dynamic Dashboard Stats
     Route::get('/dashboard/stats', [DashboardController::class, 'stats']);
+    Route::get('/dashboard/next-up', [DashboardController::class, 'nextUp']);
 
     // Real-Time Event Catch-Up & Polling Fallback
     Route::get('/live/events', [LiveEventController::class, 'events']);
@@ -82,7 +91,30 @@ Route::middleware(['auth:sanctum', \App\Http\Middleware\EnsureCustomerActive::cl
     // Schema Discovery
     Route::get('/connections/{id}/schema', [SchemaController::class, 'introspect']);
     Route::get('/connections/{id}/lookup-values', [SchemaController::class, 'lookupRecords']);
+
+    // Data Explorer (browse) and Data Manager (changes: preview -> confirm -> undo)
+    Route::prefix('data')->controller(\App\Http\Controllers\Api\DataExplorerController::class)->group(function () {
+        Route::get('/connections/{id}/tables', 'tables')->whereNumber('id');
+        Route::get('/connections/{id}/tables/{table}/rows', 'rows')->whereNumber('id')->where('table', '[A-Za-z0-9_]+')->middleware('throttle:120,1');
+        Route::get('/connections/{id}/tables/{table}/links/{column}', 'linkOptions')->whereNumber('id')->where(['table' => '[A-Za-z0-9_]+', 'column' => '[A-Za-z0-9_]+']);
+        Route::get('/connections/{id}/tables/{table}/history', 'history')->whereNumber('id')->where('table', '[A-Za-z0-9_]+');
+        Route::post('/connections/{id}/tables/{table}/preview-insert', 'previewInsert')->whereNumber('id')->where('table', '[A-Za-z0-9_]+')->middleware('throttle:60,1');
+        Route::post('/connections/{id}/tables/{table}/preview-update', 'previewUpdate')->whereNumber('id')->where('table', '[A-Za-z0-9_]+')->middleware('throttle:60,1');
+        Route::post('/connections/{id}/tables/{table}/preview-delete', 'previewDelete')->whereNumber('id')->where('table', '[A-Za-z0-9_]+')->middleware('throttle:30,1');
+        Route::post('/connections/{id}/tables/{table}/sample-rows', 'sampleRows')->whereNumber('id')->where('table', '[A-Za-z0-9_]+')->middleware('throttle:20,1');
+        Route::post('/changes/{changeId}/confirm', 'confirm')->whereNumber('changeId')->middleware('throttle:60,1');
+        Route::post('/changes/{changeId}/cancel', 'cancel')->whereNumber('changeId');
+        Route::post('/changes/{changeId}/undo', 'undo')->whereNumber('changeId')->middleware('throttle:30,1');
+    });
+    Route::prefix('data/autopilots')->controller(\App\Http\Controllers\Api\DataAutopilotController::class)->group(function () {
+        Route::get('/', 'index');
+        Route::post('/', 'store')->middleware('throttle:30,1');
+        Route::put('/{id}', 'update')->whereNumber('id');
+        Route::delete('/{id}', 'destroy')->whereNumber('id');
+        Route::post('/{id}/run', 'runNow')->whereNumber('id')->middleware('throttle:10,1');
+    });
     Route::post('/connections/{id}/tables/{table}/annotate', [SchemaController::class, 'annotateTable']);
+    Route::put('/connections/{id}/tables/{table}/access', [SchemaController::class, 'setTableAccess']);
 
     // AI Providers
     Route::get('/ai-providers', [AiProviderController::class, 'index']);
@@ -100,9 +132,15 @@ Route::middleware(['auth:sanctum', \App\Http\Middleware\EnsureCustomerActive::cl
     Route::post('/knowledge', [KnowledgeController::class, 'upload']);
     Route::post('/knowledge/upload', [KnowledgeController::class, 'upload']);
     Route::post('/knowledge/query', [KnowledgeController::class, 'query']);
+    Route::post('/knowledge/suggest', [KnowledgeController::class, 'suggest'])->middleware('throttle:60,1');
     Route::delete('/knowledge/{id}', [KnowledgeController::class, 'destroy']);
 
     // Automations
+    // Drafts of the automation builder and manual publishing (one per customer and kind)
+    Route::get('/drafts/{kind}', [\App\Http\Controllers\Api\AutomationDraftController::class, 'show'])->whereIn('kind', ['automation', 'manual_publish']);
+    Route::put('/drafts/{kind}', [\App\Http\Controllers\Api\AutomationDraftController::class, 'save'])->whereIn('kind', ['automation', 'manual_publish'])->middleware('throttle:120,1');
+    Route::delete('/drafts/{kind}', [\App\Http\Controllers\Api\AutomationDraftController::class, 'destroy'])->whereIn('kind', ['automation', 'manual_publish']);
+
     Route::get('/automations', [AutomationController::class, 'index']);
     Route::post('/automations', [AutomationController::class, 'store']);
     Route::post('/automations/manual-publish', [AutomationController::class, 'manualPublish']);
@@ -139,6 +177,8 @@ Route::middleware(['auth:sanctum', \App\Http\Middleware\EnsureCustomerActive::cl
 
     // Audit Logs
     Route::get('/audit-logs', [AuditLogController::class, 'index']);
+    Route::get('/audit-logs/orbit', [AuditLogController::class, 'orbit']);
+    Route::get('/audit-logs/export', [AuditLogController::class, 'export'])->middleware('throttle:10,1');
 
     // Autonomous AI Agent Assistant
     Route::get('/agent/conversations', [AgentController::class, 'index']);

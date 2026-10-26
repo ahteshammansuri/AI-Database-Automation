@@ -11,6 +11,7 @@ use App\Services\Automation\DraftPayloadValidator;
 use App\Services\LiveEventService;
 use App\Services\SafeDatabaseExecutor;
 use App\Models\AuditLog;
+use App\Models\AiUsageEvent;
 use Illuminate\Http\Request;
 use Exception;
 
@@ -29,10 +30,17 @@ class ExecutionController extends Controller
             $query->where('automation_id', $request->automation_id);
         }
 
-        $pageSize = (int) $request->query('pageSize', 25);
+        $pageSize = max(5, min(100, (int) $request->query('pageSize', 25)));
         $executions = $query->orderBy('created_at', 'desc')->paginate($pageSize);
 
-        return response()->json($executions);
+        // Runs per status for the same automation filter (not the status filter), for the summary chips.
+        $summary = AutomationExecution::where('user_id', $request->user()->id)
+            ->when($request->filled('automation_id'), fn ($q) => $q->where('automation_id', $request->automation_id))
+            ->selectRaw('status, COUNT(*) AS n')
+            ->groupBy('status')
+            ->pluck('n', 'status');
+
+        return response()->json(array_merge($executions->toArray(), ['summary' => $summary]));
     }
 
     public function show(Request $request, $id)
@@ -42,8 +50,21 @@ class ExecutionController extends Controller
             ->with(['automation.connection', 'versions'])
             ->firstOrFail();
 
+        // AI calls made for this run (generation, rewrites, images), recorded per request.
+        $usage = AiUsageEvent::where('user_id', $request->user()->id)
+            ->where('subject_type', 'AutomationExecution')
+            ->where('subject_id', $execution->id)
+            ->get(['provider', 'model', 'kind', 'calls', 'prompt_tokens', 'completion_tokens']);
+
         // Signed approval tokens never leave the server except inside the review e-mail.
-        return response()->json($execution);
+        return response()->json(array_merge($execution->toArray(), [
+            'ai_usage' => [
+                'calls' => (int) $usage->sum('calls'),
+                'prompt_tokens' => (int) $usage->sum('prompt_tokens'),
+                'completion_tokens' => (int) $usage->sum('completion_tokens'),
+                'models' => $usage->map(fn ($u) => trim(($u->provider ? "{$u->provider} " : '') . ($u->model ?? '')))->filter()->unique()->values(),
+            ],
+        ]));
     }
 
     public function publishNow(Request $request, $id)

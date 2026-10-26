@@ -2,6 +2,7 @@ import os
 from fastapi import FastAPI, Request, HTTPException, status
 from fastapi.responses import JSONResponse
 from ai_service.app.config import settings
+from ai_service.app import usage
 from ai_service.app.routers.ai import router as ai_router
 from ai_service.app.routers.rag import router as rag_router
 from ai_service.app.routers.agent import router as agent_router
@@ -29,7 +30,10 @@ async def verify_service_token(request: Request, call_next):
             content={"detail": "Unauthorized: Invalid or missing X-Service-Token header."}
         )
 
+    calls = usage.begin()
     response = await call_next(request)
+    if calls:
+        response.headers[usage.HEADER] = usage.header_value(calls)
     return response
 
 

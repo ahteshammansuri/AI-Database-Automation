@@ -1,14 +1,30 @@
 {
-  "sources": [
-    "docs/orbit-agent/automations_guide.md",
-    "docs/orbit-agent/portal_tour.md",
-    "docs/orbit-agent/product_context_rag.md",
-    "docs/orbit-agent/security_guide.md"
+  "guides": [
+    {
+      "name": "product_context_rag",
+      "title": "Rowpilot and Orbit \u2014 Product Knowledge"
+    },
+    {
+      "name": "portal_tour",
+      "title": "Portal tour \u2014 what each page is and what Orbit can do there"
+    },
+    {
+      "name": "automations_guide",
+      "title": "Automations \u2014 how they work"
+    },
+    {
+      "name": "security_guide",
+      "title": "Security \u2014 what the platform enforces"
+    },
+    {
+      "name": "data_tools_guide",
+      "title": "Data tools \u2014 browsing, adding and changing rows"
+    }
   ],
-  "sha256": "a20d547ec2f1d1cf2fdae6658c041b2fe36c09ca033f6473121db60b64b5cc86",
-  "version": "a20d547ec2f1",
+  "sha256": "969c31330836f1243b90f1a079a9359cb965d58469e4450eb3288eda33315c04",
+  "version": "969c31330836",
   "embedding_backend": "ollama:nomic-embed-text",
   "dimension": 768,
-  "chunks": 65,
-  "indexed_at": "2026-10-21T06:13:18Z"
+  "chunks": 79,
+  "indexed_at": "2026-10-23T16:25:49Z"
 }

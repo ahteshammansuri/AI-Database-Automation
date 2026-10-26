@@ -1,5 +1,5 @@
 import React from "react";
-import { Clock, Calendar, Palette, Cpu, Sparkles } from "lucide-react";
+import { Clock, Calendar, Palette } from "lucide-react";
 import { SchemaColumn } from "../../types";
 import { SearchableSelect } from "./SearchableSelect";
 import { InlineAiFieldAssist } from "./InlineAiFieldAssist";
@@ -70,6 +70,12 @@ export const isColorType = (col: SchemaColumn | { name?: string }): boolean => {
   );
 };
 
+/** tinyint(1) / boolean / bit columns hold yes-or-no values. */
+export const isBooleanType = (col: SchemaColumn | { data_type?: string; type?: string }): boolean => {
+  const dt = (col?.data_type || "").toLowerCase();
+  return dt === "boolean" || dt === "bool" || dt === "bit" || /^tinyint\(1\)/i.test((col as any)?.type || "");
+};
+
 export const isRelationalColumn = (col: SchemaColumn | { name?: string; is_foreign_key?: boolean }): boolean => {
   const n = (col?.name || "").toLowerCase();
   return Boolean(col?.is_foreign_key) || n.endsWith("_id");
@@ -77,6 +83,7 @@ export const isRelationalColumn = (col: SchemaColumn | { name?: string; is_forei
 
 export const canFieldHaveAiAssist = (col: SchemaColumn | { name?: string; data_type?: string; enum_values?: string[] }): boolean => {
   if (isNumericType(col as any)) return false;
+  if (isBooleanType(col as any)) return false;
   if (isDateTimeType(col as any)) return false;
   if (isDateOnlyType(col as any)) return false;
   if (isColorType(col as any)) return false;
@@ -117,7 +124,8 @@ export const SchemaFieldControl: React.FC<SchemaFieldControlProps> = ({
   const a11y = id ? { id, "aria-invalid": invalid, "aria-describedby": invalid ? `${id}-error` : undefined } : {};
   const dataType = (column.data_type || "").toLowerCase();
 
-  const isRel = isRelational || isRelationalColumn(column);
+  // Only a caller that knows the linked table asks for the record picker (a name ending in _id is not proof).
+  const isRel = isRelational && !!referencedTable;
   const isEnum = Boolean(column.enum_values && column.enum_values.length > 0);
   const isColor = isColorType(column);
   const isDateTime = isDateTimeType(column);
@@ -135,22 +143,8 @@ export const SchemaFieldControl: React.FC<SchemaFieldControlProps> = ({
           invalid={invalid}
           value={value !== undefined ? value : ""}
           onChange={(val) => onChange(Number(val) || val)}
-          placeholder={loadingRelational ? "Fetching records..." : "Select related record..."}
-          options={
-            relationalOptions.length > 0
-              ? relationalOptions.map((opt) => ({
-                  value: opt.id,
-                  label: opt.label,
-                  badge: `ID: #${opt.id}`,
-                }))
-              : [
-                  {
-                    value: value || 1,
-                    label: referencedTable ? `${referencedTable} #1 (Default Record)` : "Record #1",
-                    badge: "Default",
-                  },
-                ]
-          }
+          placeholder={loadingRelational ? "Loading…" : relationalOptions.length ? `Choose a ${referencedTable} row` : `No ${referencedTable} rows found`}
+          options={relationalOptions.map((opt) => ({ value: opt.id, label: opt.label, badge: `#${opt.id}` }))}
         />
         {loadingRelational && (
           <div className="absolute right-8 top-3 text-[10px] text-indigo-600 font-medium animate-pulse pointer-events-none">
@@ -161,20 +155,36 @@ export const SchemaFieldControl: React.FC<SchemaFieldControlProps> = ({
     );
   }
 
+  // Yes / No for boolean columns (stored as 1 / 0).
+  if (isBooleanType(column)) {
+    const on = value === 1 || value === "1" || value === true;
+    const set = value !== null && value !== undefined && value !== "";
+    return (
+      <div id={id} role="radiogroup" aria-label={colName} aria-invalid={invalid || undefined}
+        className={`inline-flex rounded-xl border bg-slate-50 p-0.5 ${invalid ? "border-rose-300" : "border-slate-200"}`}>
+        {[{ v: 1, l: "Yes" }, { v: 0, l: "No" }].map((o) => {
+          const active = set && (o.v === 1) === on;
+          return (
+            <button key={o.v} type="button" role="radio" aria-checked={active} onClick={() => onChange(o.v)}
+              className={`rounded-lg px-4 py-1.5 text-[13px] font-semibold transition ${active ? "bg-white text-indigo-700 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>
+              {o.l}
+            </button>
+          );
+        })}
+      </div>
+    );
+  }
+
   // 2. Enum Dropdown Selector
   if (isEnum && column.enum_values) {
     return (
       <SearchableSelect
         id={id}
         invalid={invalid}
-        value={value || column.enum_values[0] || ""}
+        value={value ?? ""}
         onChange={(val) => onChange(String(val))}
-        placeholder="Select enum value..."
-        options={column.enum_values.map((v) => ({
-          value: v,
-          label: v,
-          badge: "Enum",
-        }))}
+        placeholder="Choose a value"
+        options={column.enum_values.map((v) => ({ value: v, label: v }))}
       />
     );
   }

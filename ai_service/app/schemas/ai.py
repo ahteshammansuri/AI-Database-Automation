@@ -3,7 +3,7 @@ from pydantic import BaseModel, Field
 
 
 class GenerateRequest(BaseModel):
-    provider: str = Field(default="mock", description="Provider: ollama, mock, openai, gemini, anthropic")
+    provider: str = Field(default="ollama", description="Provider: ollama, openai, gemini, anthropic")
     model: Optional[str] = Field(default=None, description="Model identifier")
     api_key: Optional[str] = Field(default=None, description="Optional user-provided cloud API key")
     prompt: str = Field(..., description="Main prompt instruction")
@@ -21,6 +21,7 @@ class GenerateRequest(BaseModel):
     )
     length: Optional[str] = Field(default="medium", description="Body length: short, medium or long")
     max_output_tokens: Optional[int] = Field(default=None, description="Override for the output token budget")
+    temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0, description="Creativity of the writing model (the customer's 'Writing content' role); provider default when empty")
 
 
 class GenerateResponse(BaseModel):

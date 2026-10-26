@@ -108,6 +108,32 @@ class DbConnection extends Model
      * Create an ephemeral, non-global PDO connection to this target customer database.
      * Must be explicitly closed / nulled by caller in finally block.
      */
+    /**
+     * A database error in plain words for customers (the server's raw message is technical and can mention internal
+     * hosts). Non-database errors are returned unchanged.
+     */
+    public static function explainFailure(\Throwable $e, ?self $connection = null): string
+    {
+        $raw = $e->getMessage();
+        if (!$e instanceof \PDOException && !str_contains($raw, 'SQLSTATE')) {
+            return $raw;
+        }
+        $where = $connection ? " “{$connection->name}” ({$connection->host}:{$connection->port})" : '';
+        return match (true) {
+            str_contains($raw, '[2002]') || str_contains($raw, 'Connection refused') || str_contains($raw, 'getaddrinfo')
+                => "Could not reach your database{$where}. Check that the server is running and the host and port are right.",
+            str_contains($raw, '[1045]') || str_contains($raw, 'Access denied')
+                => "Your database{$where} rejected the username or password.",
+            str_contains($raw, '[1049]') || str_contains($raw, 'Unknown database')
+                => 'The database ' . ($connection ? "“{$connection->database_name}”" : '') . ' does not exist on that server.',
+            str_contains($raw, '[2006]') || str_contains($raw, '[2013]') || str_contains($raw, 'gone away')
+                => "The connection to your database{$where} dropped. Try again.",
+            str_contains($raw, '[1142]') || str_contains($raw, 'command denied')
+                => 'The database user is not allowed to do this. Grant it the needed permission or use another user.',
+            default => 'Your database returned an error: ' . \Illuminate\Support\Str::limit(preg_replace('/^SQLSTATE\[[^\]]*\]:?\s*/', '', $raw), 200),
+        };
+    }
+
     public function createTargetPdo(): PDO
     {
         $dsn = "mysql:host={$this->host};port={$this->port};dbname={$this->database_name};charset=utf8mb4";

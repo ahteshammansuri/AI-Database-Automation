@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useMemo, useRef } from "react";
 import { useSearchParams, Link } from "react-router-dom";
 import { motion } from "framer-motion";
-import { TableProperties, Database, ShieldAlert, Key, Link as LinkIcon, Workflow, Cpu, ArrowRight, Search, CheckCircle2, FileEdit, Layers, RefreshCw, Bookmark, Check, AlertTriangle } from "lucide-react";
+import { TableProperties, Database, ShieldAlert, Workflow, Cpu, Search, CheckCircle2, FileEdit, Layers, RefreshCw, Bookmark, Check, AlertTriangle, Table2, Columns3, Rows3 } from "lucide-react";
 import { api } from "../services/api";
 import { ConnectionProfile, SchemaResponse, SchemaTable } from "../types";
 import { Card, EmptyState, FieldError, Loading, PageHeader } from "../components/ui/kit";
@@ -13,11 +13,17 @@ import { useOrbitSurface } from "../hooks/useOrbitSurface";
 import { orbitTargets } from "../services/orbitTargets";
 import { fieldTarget } from "../services/orbitSurfaces";
 import { pageStateService } from "../services/pageStateService";
-import { BrandName } from "../context/PlatformContext";
+import { BrandName, usePlatform } from "../context/PlatformContext";
+import { TableLinks } from "../components/schema/TableLinks";
+import { ColumnsTable } from "../components/schema/ColumnsTable";
+import { accessLabel, formatRows } from "../components/schema/schemaFacts";
+import { TableAccessControl } from "../components/schema/TableAccessControl";
 
 export const SchemaExplorerPage: React.FC = () => {
   const [searchParams] = useSearchParams();
   const connParam = searchParams.get("connectionId");
+  const tableParam = searchParams.get("table");
+  const { config } = usePlatform();
 
   const [connections, setConnections] = useState<ConnectionProfile[]>([]);
   const [selectedConnId, setSelectedConnId] = useState<number | null>(null);
@@ -64,10 +70,12 @@ export const SchemaExplorerPage: React.FC = () => {
             if (!isMounted) return;
             setSchema(data);
             if (data && Array.isArray(data.tables) && data.tables.length > 0) {
+              const asked = tableParam ? data.tables.find((t: any) => t.name === tableParam) : null;
               const firstRecommended = data.tables.find(
                 (t: any) => t.category === "RECOMMENDED" || t.eligibility_tier === "RECOMMENDED"
               );
-              const tableToPick = firstRecommended || data.tables[0];
+              const tableToPick = asked || firstRecommended || data.tables[0];
+              if (asked && asked !== firstRecommended && asked.category !== "RECOMMENDED") setActiveTab("ALL");
               setSelectedTable(tableToPick);
               setUserNote(tableToPick.ai_suggestion?.user_notes || "");
             }
@@ -88,6 +96,8 @@ export const SchemaExplorerPage: React.FC = () => {
     return () => {
       isMounted = false;
     };
+    // tableParam only picks the first table shown; changing it later must not reload the connection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connParam]);
 
   // ---- Orbit surface: pick connection/table from the real loaded options, note, rescan ---------
@@ -99,6 +109,8 @@ export const SchemaExplorerPage: React.FC = () => {
       tables: (schema?.tables || []).slice(0, 60).map((t: any) => ({ name: t.name, tier: t.category ?? t.tier, columns: t.columns?.length })),
       selected_table: selectedTable ? {
         name: selectedTable.name,
+        rows_access: selectedTable.data_class ?? null,
+        links_to: (selectedTable.relationships || []).map((r) => r.referenced_table),
         columns: (selectedTable.columns || []).slice(0, 40).map((c: any) => `${c.name}:${c.data_type ?? c.type}${c.is_nullable === false ? "*" : ""}`),
       } : null,
     }),
@@ -306,6 +318,21 @@ export const SchemaExplorerPage: React.FC = () => {
     };
   }, [schema]);
 
+  // Open a table from a link; show every table when the current tab hides it.
+  const openTable = (name: string) => {
+    const match = (schema?.tables || []).find((t) => t.name === name);
+    if (!match) return;
+    if (!filteredTables.some((t: any) => t.name === name)) {
+      setActiveTab("ALL");
+      setSearchQuery("");
+    }
+    setSelectedTable(match);
+    document.getElementById("schema-explorer-anchor")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  const selectedConnection = connections.find((c) => c.id === selectedConnId) as any;
+  const access = selectedTable ? accessLabel(selectedTable.data_class, selectedConnection?.access_mode) : null;
+
   const tierTabs = [
     { id: "RECOMMENDED", label: "Recommended", icon: CheckCircle2, count: counts.recommended, tone: "text-emerald-600", chip: "bg-emerald-100 text-emerald-700" },
     { id: "REVIEW_REQUIRED", label: "Review needed", icon: AlertTriangle, count: counts.review, tone: "text-amber-500", chip: "bg-amber-100 text-amber-700" },
@@ -405,7 +432,7 @@ export const SchemaExplorerPage: React.FC = () => {
             </div>
           </div>
 
-          <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[300px_1fr]">
+          <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[300px_minmax(0,1fr)]">
             {/* Table list */}
             <div className="da-card max-h-[720px] overflow-y-auto p-2.5">
               <div className="flex items-center justify-between px-3 pb-2 pt-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
@@ -439,9 +466,14 @@ export const SchemaExplorerPage: React.FC = () => {
                         }`}
                       >
                         {isSelected && <span className="absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-r-full bg-gradient-to-b from-indigo-500 to-violet-500" />}
-                        <span className="flex min-w-0 items-center gap-2">
-                          <TableProperties className={`h-4 w-4 shrink-0 ${isSelected ? "text-indigo-500" : "text-slate-400"}`} />
-                          <span className="truncate font-mono">{tableName}</span>
+                        <span className="flex min-w-0 items-start gap-2">
+                          <TableProperties className={`mt-0.5 h-4 w-4 shrink-0 ${isSelected ? "text-indigo-500" : "text-slate-400"}`} />
+                          <span className="min-w-0">
+                            <span className="block truncate font-mono">{tableName}</span>
+                            <span className="block truncate text-[11px] font-normal text-slate-400">
+                              {[formatRows(t.approx_rows), `${(t.columns || []).length} columns`].filter(Boolean).join(" · ")}
+                            </span>
+                          </span>
                         </span>
                         <span className={`da-chip ${badge.cls} shrink-0 px-2 text-[10.5px]`}>{badge.text}</span>
                       </button>
@@ -458,10 +490,10 @@ export const SchemaExplorerPage: React.FC = () => {
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
-                className="da-card space-y-6 p-6"
+                className="da-card min-w-0 space-y-6 p-6"
               >
                 <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                  <div className="min-w-0">
+                  <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-3">
                       <h3 className="truncate font-mono text-[22px] font-bold tracking-[-0.02em] text-slate-950">
                         {selectedTable.name || (selectedTable as any).table_name}
@@ -474,30 +506,74 @@ export const SchemaExplorerPage: React.FC = () => {
                         {humanStatus(selectedTable.category || "ALLOWLISTED")}
                       </span>
                     </div>
-                    {selectedTable.restriction_reason ? (
-                      <p className="mt-2 flex items-center gap-1.5 text-[13px] font-medium text-rose-600">
-                        <ShieldAlert className="h-4 w-4 shrink-0" /> {selectedTable.restriction_reason}
-                      </p>
-                    ) : (
-                      <p className="mt-2 flex items-center gap-1.5 text-[13px] font-medium text-emerald-700">
-                        <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" /> Eligible for automated content and scheduled writes
-                      </p>
+                  </div>
+                  <div className="flex shrink-0 flex-wrap items-center gap-2">
+                    {!selectedTable.is_sensitive && selectedTable.category !== "RESTRICTED" && (selectedTable.data_class ?? "writable") === "writable" && (
+                      <>
+                        <Link
+                          to={`/automations/new?connectionId=${selectedConnId}&table=${encodeURIComponent(selectedTable.name)}`}
+                          className="da-btn da-btn-primary"
+                        >
+                          <Workflow className="h-4 w-4" /> Create automation
+                        </Link>
+                        <Link to={`/manual-schedule?connectionId=${selectedConnId}&table=${encodeURIComponent(selectedTable.name)}`} className="da-btn da-btn-secondary">
+                          <FileEdit className="h-4 w-4 text-slate-500" /> Write manually
+                        </Link>
+                      </>
+                    )}
+                    {config.features?.data_explorer && selectedTable.data_class !== "blocked" && (
+                      <Link to={`/data?connection=${selectedConnId}&table=${encodeURIComponent(selectedTable.name)}`} className="da-btn da-btn-secondary">
+                        <Table2 className="h-4 w-4 text-slate-500" /> Browse rows
+                      </Link>
                     )}
                   </div>
-                  {!selectedTable.is_sensitive && selectedTable.category !== "RESTRICTED" && (
-                    <div className="flex shrink-0 flex-wrap items-center gap-2">
-                      <Link
-                        to={`/automations/new?connectionId=${selectedConnId}&table=${selectedTable.name || (selectedTable as any).table_name}`}
-                        className="da-btn da-btn-primary"
-                      >
-                        <Workflow className="h-4 w-4" /> Create automation
-                      </Link>
-                      <Link to="/manual-schedule" className="da-btn da-btn-secondary">
-                        <FileEdit className="h-4 w-4 text-slate-500" /> Write manually
-                      </Link>
-                    </div>
+                </div>
+                <div className="-mt-3 space-y-2">
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12.5px] text-slate-500">
+                    {formatRows(selectedTable.approx_rows) && (
+                      <span className="inline-flex items-center gap-1.5" title="An estimate from the database's own statistics">
+                        <Rows3 className="h-3.5 w-3.5" /> {formatRows(selectedTable.approx_rows)}
+                      </span>
+                    )}
+                    <span className="inline-flex items-center gap-1.5"><Columns3 className="h-3.5 w-3.5" /> {(selectedTable.columns || []).length} columns</span>
+                    {access && (
+                      <span className={`da-chip ${access.tone} px-2 text-[11px]`} title={access.help}>{access.text}</span>
+                    )}
+                  </div>
+                  {selectedTable.restriction_reason ? (
+                    <p className="flex items-center gap-1.5 text-[13px] font-medium text-rose-600">
+                      <ShieldAlert className="h-4 w-4 shrink-0" /> {selectedTable.restriction_reason}
+                    </p>
+                  ) : selectedTable.data_class === "read_only" ? (
+                    <p className="flex items-center gap-1.5 text-[13px] font-medium text-amber-700">
+                      <ShieldAlert className="h-4 w-4 shrink-0" /> View only on this connection: automations cannot write here.
+                    </p>
+                  ) : selectedTable.category === "RECOMMENDED" ? (
+                    <p className="flex items-center gap-1.5 text-[13px] font-medium text-emerald-700">
+                      <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" /> A good fit for automated content and scheduled writes
+                    </p>
+                  ) : (
+                    <p className="flex items-center gap-1.5 text-[13px] font-medium text-amber-700">
+                      <AlertTriangle className="h-4 w-4 shrink-0" /> Can be automated, but it is not a typical content table: check its columns first
+                    </p>
                   )}
                 </div>
+
+                {selectedConnId && selectedTable.data_class && selectedTable.data_class !== "blocked" && selectedTable.data_class_default && (
+                  <TableAccessControl
+                    key={`${selectedConnId}-${selectedTable.name}`}
+                    connectionId={selectedConnId}
+                    table={selectedTable.name}
+                    dataClass={selectedTable.data_class}
+                    defaultClass={selectedTable.data_class_default}
+                    connectionMode={selectedConnection?.access_mode}
+                    onChanged={(dataClass) => {
+                      const name = selectedTable.name;
+                      setSchema((cur) => cur ? { ...cur, tables: cur.tables.map((t) => (t.name === name ? { ...t, data_class: dataClass } : t)) } : cur);
+                      setSelectedTable((cur) => (cur && cur.name === name ? { ...cur, data_class: dataClass } : cur));
+                    }}
+                  />
+                )}
 
                 {/* AI classification */}
                 <div className="rounded-2xl border border-indigo-100 bg-gradient-to-br from-indigo-50/70 via-white to-violet-50/50 p-5">
@@ -546,73 +622,9 @@ export const SchemaExplorerPage: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Columns */}
-                <div>
-                  <h4 className="mb-3 text-[14px] font-bold text-slate-900">Columns · {selectedTable.columns.length}</h4>
-                  <div className="overflow-x-auto rounded-2xl border border-slate-200">
-                    <table className="da-table">
-                      <thead>
-                        <tr>
-                          <th>Column</th>
-                          <th>Type</th>
-                          <th>Nullable</th>
-                          <th>Key</th>
-                          <th>Default / values</th>
-                        </tr>
-                      </thead>
-                      <tbody className="font-mono text-[12.5px]">
-                        {selectedTable.columns.map((col) => (
-                          <tr key={col.name}>
-                            <td>
-                              <span className="flex items-center gap-1.5 font-semibold text-slate-900">
-                                {col.name}
-                                {col.is_primary_key && <span title="Primary key"><Key className="h-3 w-3 text-amber-500" /></span>}
-                                {col.is_foreign_key && <span title="Foreign key"><LinkIcon className="h-3 w-3 text-indigo-500" /></span>}
-                              </span>
-                            </td>
-                            <td className="font-medium text-indigo-600">{col.data_type}</td>
-                            <td>{col.nullable ? <span className="text-slate-400">null</span> : <span className="font-medium text-amber-700">not null</span>}</td>
-                            <td>
-                              <span className="flex gap-1">
-                                {col.is_primary_key && <span className="da-chip da-chip-amber px-1.5 font-mono text-[10.5px]">PK</span>}
-                                {col.is_foreign_key && <span className="da-chip da-chip-indigo px-1.5 font-mono text-[10.5px]">FK</span>}
-                                {col.is_unique && !col.is_primary_key && <span className="da-chip da-chip-violet px-1.5 font-mono text-[10.5px]">UNIQUE</span>}
-                                {!col.is_primary_key && !col.is_foreign_key && !col.is_unique && <span className="text-slate-300">—</span>}
-                              </span>
-                            </td>
-                            <td className="text-slate-500">
-                              {col.enum_values && col.enum_values.length > 0 ? (
-                                <span className="rounded-md bg-slate-100 px-1.5 py-0.5 text-[11.5px] text-slate-700">{col.enum_values.join(" · ")}</span>
-                              ) : col.default_value !== undefined && col.default_value !== null ? (
-                                String(col.default_value)
-                              ) : (
-                                <span className="text-slate-300">—</span>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
+                <TableLinks table={selectedTable} all={schema.tables} onOpen={openTable} />
 
-                {selectedTable.relationships && selectedTable.relationships.length > 0 && (
-                  <div>
-                    <h4 className="mb-3 flex items-center gap-2 text-[14px] font-bold text-slate-900">
-                      <LinkIcon className="h-4 w-4 text-indigo-600" /> Relationships · {selectedTable.relationships.length}
-                    </h4>
-                    <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-                      {selectedTable.relationships.map((rel, idx) => (
-                        <div key={idx} className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-slate-50/60 px-4 py-3 font-mono text-[12.5px] transition-colors hover:border-indigo-200 hover:bg-indigo-50/40">
-                          <span className="font-semibold text-indigo-700">{rel.foreign_key || rel.constrained_column}</span>
-                          <ArrowRight className="h-3.5 w-3.5 shrink-0 text-slate-400" />
-                          <span className="font-semibold text-slate-900">{rel.referenced_table}</span>
-                          <span className="text-slate-500">.{rel.referenced_column}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
+                <ColumnsTable table={selectedTable} onOpenTable={openTable} />
               </motion.div>
             ) : (
               <EmptyState icon={TableProperties} title="Pick a table" description="Choose a table on the left to see its columns, keys and relationships." />

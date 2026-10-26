@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { AlertCircle, ChevronDown, ChevronUp, Cpu, GitBranch, Image as ImageIcon, KeyRound, Link2, Lock, Settings2, Sparkles } from "lucide-react";
+import { AlertCircle, ArrowRight, CheckCircle2, ChevronDown, ChevronUp, Cpu, GitBranch, Image as ImageIcon, KeyRound, Link2, Lock, PlusCircle, Settings2, Sparkles } from "lucide-react";
 import { SearchableSelect } from "../common/SearchableSelect";
 import { SearchableRelationshipSelect } from "../common/SearchableRelationshipSelect";
 import { DatePicker } from "../ui/DatePicker";
@@ -76,12 +76,33 @@ const ColumnRow: React.FC<{ col: PlanColumn } & Omit<Props, "plan" | "problems">
               <ValueEditor col={col} mode={mode} value={m?.fixed_value} onChange={setValue} connectionId={connectionId} timezone={timezone} />
             )}
           </div>
+          {col.relation && (mode === "AI_CREATE" || mode === "AI_REUSE") && !problem && <RelationFlow col={col} create={mode === "AI_CREATE"} />}
           <p role={problem ? "alert" : undefined} className={`flex items-start gap-1.5 leading-relaxed ${problem ? "text-[12px] font-medium text-rose-600" : "text-[11px] text-slate-500"}`}>
             {problem ? <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" /> : <Sparkles className="mt-0.5 h-3 w-3 shrink-0 text-indigo-400" />}
             <span>{problem ?? explain(col, m, { titleColumn, length, format, manual })}</span>
           </p>
         </div>
       </div>
+    </div>
+  );
+};
+
+/** How a linked column is filled, in three steps: the AI picks (or creates) the parent record, then links its id. */
+const RelationFlow: React.FC<{ col: PlanColumn; create: boolean }> = ({ col, create }) => {
+  const r = col.relation!;
+  const steps = [
+    { icon: Sparkles, text: `AI picks the ${r.entity} that fits each new row`, tone: "bg-indigo-50 text-indigo-700 border-indigo-100" },
+    ...(create ? [{ icon: PlusCircle, text: `New ${r.entity}s are saved in “${r.table}” first`, tone: "bg-violet-50 text-violet-700 border-violet-100" }] : []),
+    { icon: Link2, text: `Its id goes into ${col.name}`, tone: "bg-emerald-50 text-emerald-700 border-emerald-100" },
+  ];
+  return (
+    <div className="flex flex-wrap items-center gap-1.5" aria-label="How this column is filled">
+      {steps.map((s, i) => (
+        <React.Fragment key={s.text}>
+          {i > 0 && <ArrowRight className="h-3 w-3 shrink-0 text-slate-300" />}
+          <span className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-medium ${s.tone}`}><s.icon className="h-3 w-3 shrink-0" /> {s.text}</span>
+        </React.Fragment>
+      ))}
     </div>
   );
 };
@@ -174,21 +195,40 @@ export const FieldMappingStep: React.FC<Props> = (props) => {
   const otherProblems = groups.other.filter((c) => problems[c.name]).length;
 
   const row = (c: PlanColumn) => <ColumnRow key={c.name} col={c} {...props} titleColumn={titleColumn} problem={problems[c.name]} />;
+  const problemCount = Object.keys(problems).length;
+
+  // One new row at a glance: which columns the AI writes, which are linked, which fill themselves.
+  const visible = plan.columns.filter((c) => !c.is_secret);
+  const glance = [
+    { label: "AI writes", tone: "bg-indigo-50 text-indigo-700 border-indigo-100", cols: visible.filter((c) => !c.relation && modeOf(mappings[c.name], c) === "AI") },
+    { label: "Linked", tone: "bg-violet-50 text-violet-700 border-violet-100", cols: groups.relations },
+    { label: "Filled automatically", tone: "bg-emerald-50 text-emerald-700 border-emerald-100", cols: visible.filter((c) => !c.relation && ["SLUG", "NOW", "DEFAULT"].includes(modeOf(mappings[c.name], c))) },
+    { label: "Fixed value", tone: "bg-amber-50 text-amber-700 border-amber-100", cols: visible.filter((c) => !c.relation && modeOf(mappings[c.name], c) === "FIXED") },
+    { label: "Left empty", tone: "bg-slate-50 text-slate-500 border-slate-200", cols: visible.filter((c) => !c.relation && modeOf(mappings[c.name], c) === "EMPTY") },
+  ].filter((g) => g.cols.length);
 
   return (
     <div className="space-y-5">
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-        {[
-          ["Columns filled", String(plan.columns.filter((c) => !c.is_secret && !["EMPTY", "DEFAULT"].includes(modeOf(mappings[c.name], c))).length)],
-          ["Written by AI", String(aiCount)],
-          ["Images", String(imageCount)],
-          ["Linked tables", String(groups.relations.length)],
-        ].map(([k, v]) => (
-          <div key={k} className="rounded-xl border border-slate-200 bg-slate-50/70 px-3 py-2">
-            <span className="block text-[10px] font-bold uppercase tracking-wide text-slate-400">{k}</span>
-            <span className="text-base font-extrabold text-slate-900">{v}</span>
-          </div>
-        ))}
+      <div className={`rounded-2xl border p-4 ${problemCount ? "border-rose-200 bg-rose-50/40" : "border-emerald-200 bg-emerald-50/40"}`}>
+        <p className={`flex items-center gap-2 text-[13.5px] font-bold ${problemCount ? "text-rose-800" : "text-emerald-800"}`}>
+          {problemCount ? <AlertCircle className="h-4 w-4" /> : <CheckCircle2 className="h-4 w-4" />}
+          {problemCount
+            ? `${problemCount} column${problemCount === 1 ? " needs" : "s need"} your choice (marked in red below)`
+            : `Ready: all ${visible.length} columns are covered${aiCount ? `, ${aiCount} written by AI` : ""}${imageCount ? `, ${imageCount} image${imageCount === 1 ? "" : "s"}` : ""}`}
+        </p>
+        <div className="mt-3 space-y-1.5">
+          {glance.map((g) => (
+            <div key={g.label} className="flex flex-wrap items-center gap-1.5">
+              <span className="w-36 shrink-0 text-[11.5px] font-semibold text-slate-500">{g.label}</span>
+              {g.cols.map((c) => (
+                <span key={c.name} className={`rounded-md border px-1.5 py-0.5 font-mono text-[11px] ${g.tone}`}>
+                  {c.name}{c.relation ? ` → ${c.relation.table}` : ""}
+                </span>
+              ))}
+            </div>
+          ))}
+        </div>
+        {!problemCount && <p className="mt-3 text-[12px] text-slate-500">The suggested choices are safe. Change a column below only if you want something different.</p>}
       </div>
 
       {groups.content.length > 0 && (

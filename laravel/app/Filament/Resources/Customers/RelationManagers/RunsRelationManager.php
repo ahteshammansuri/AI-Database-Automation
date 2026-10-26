@@ -13,7 +13,7 @@ class RunsRelationManager extends ReadOnlyRelationManager
 
     protected static string $permission = 'automations.view';
 
-    protected static ?string $title = 'Runs';
+    protected static ?string $title = 'Automation runs';
 
     public function table(Table $table): Table
     {

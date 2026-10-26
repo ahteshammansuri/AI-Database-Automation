@@ -17,6 +17,8 @@ return [
     // One model decision may take minutes on a busy CPU-only machine: wait rather than fail (turn budget is 1500 s).
     'decide_timeout_seconds' => (int) env('ORBIT_DECIDE_TIMEOUT', 480),
     'max_repairs' => (int) env('ORBIT_MAX_REPAIRS', 1),
+    // Time budget for the four real checks of the model readiness test (AI providers page).
+    'readiness_budget_seconds' => (int) env('ORBIT_READINESS_BUDGET_SECONDS', 240),
 
     // Visible UI choreography: how long to wait for the browser to acknowledge an action,
     // and how recent a client heartbeat must be for the browser to count as present.

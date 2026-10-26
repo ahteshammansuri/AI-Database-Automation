@@ -71,7 +71,7 @@ Generated from the live registry. UI tools (side effect `ui`) operate the portal
 | `confirm_data_change` | external | always | — | — | Atomically execute a previewed UPDATE (pinned to previewed PKs) or guarded DELETE (requiring typed confirmation phrase). |
 | `undo_data_change` | external | always | — | — | Revert an executed UPDATE or DELETE using the stored encrypted before-image. |
 
-Tools not in this table do not exist; Orbit says so instead of improvising. See `docs/orbit-agent/ARCHITECTURE.md`.
+Tools not in this table do not exist; Orbit says so instead of improvising. See `docs/ARCHITECTURE.md`.
 
 ## 3. Platform Feature Flags Summary
 

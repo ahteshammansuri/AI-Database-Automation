@@ -1,12 +1,12 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { motion } from "framer-motion";
-import { CheckCircle2, Clock, Eye, ArrowRight, Edit3, Send, RotateCcw, Save, FileText, Calendar, Database, RefreshCw, Workflow, Sparkles } from "lucide-react";
+import { CheckCircle2, Clock, Eye, ArrowRight, Edit3, Send, RotateCcw, Save, FileText, Calendar, Database, RefreshCw, Workflow, Sparkles, Loader2, History, Hourglass } from "lucide-react";
 import { api } from "../services/api";
 import { ContentPreview } from "../components/content/ContentPreview";
 import { WysiwygEditor } from "../components/content/WysiwygEditor";
 import { looksLikeHtml } from "../components/content/RichText";
-import { formatInstant } from "../lib/schedule";
+import { formatInstant, relativeFromNow } from "../lib/schedule";
 import { Card, EmptyState, FieldError, Loading, ModalShell, PageHeader } from "../components/ui/kit";
 import { draftPayloadErrors, draftRelationColumns, focusFirstError, invalid, rules, serverFieldErrors, validateField, type FieldErrors } from "../lib/validation";
 
@@ -14,6 +14,7 @@ import { draftPayloadErrors, draftRelationColumns, focusFirstError, invalid, rul
 const draftFieldId = (key: string) => `approval-field-${key}`;
 import { SpotlightCard } from "../components/landing/primitives";
 import { useToast } from "../context/ToastContext";
+import { useLiveEvents } from "../context/LiveEventsContext";
 import { useOrbitSurface } from "../hooks/useOrbitSurface";
 import { useRefreshAfterOrbit } from "../hooks/useRefreshAfterOrbit";
 import { orbitTargets } from "../services/orbitTargets";
@@ -35,10 +36,36 @@ interface PendingApprovalItem {
       id: number;
       name: string;
       target_table: string;
-      operation_mode: string;
+      operation_mode?: string;
+      timezone?: string;
+      timeout_policy?: string;
+      connection?: { id: number; name: string; database_name?: string };
     };
+    /** Every version of this run (without content), oldest first. */
+    versions?: { id: number; version_number: number; status: string; rejection_feedback?: string | null; created_at: string }[];
   };
 }
+
+/** What happens at the publication time when nobody has decided. */
+const DEADLINE_TEXT: Record<string, string> = {
+  KEEP_DRAFT: "If nobody decides by then, nothing is written and the draft is kept.",
+  AUTO_PUBLISH_LATEST: "If nobody decides by then, this version is published automatically.",
+  CANCEL: "If nobody decides by then, the run is cancelled and nothing is written.",
+};
+
+const MEDIA_KEY = /(^|_)(image|img|banner|thumbnail|thumb|photo|cover)(_url|_path|_src)?$/i;
+/** The first image the draft would publish, for the card thumbnail. */
+const draftImage = (payload: Record<string, any>): string | null => {
+  for (const [k, v] of Object.entries(payload || {})) {
+    if (MEDIA_KEY.test(k) && typeof v === "string" && /^(https?:\/\/|\/)/.test(v)) return v;
+  }
+  return null;
+};
+const labelFor = (k: string) => {
+  const w = k.replace(/_id$/i, "").replace(/_/g, " ").trim();
+  return w ? w.charAt(0).toUpperCase() + w.slice(1) : k;
+};
+const plain = (v: any) => (v === null || v === undefined ? "" : typeof v === "object" ? JSON.stringify(v) : String(v).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
 
 export const ApprovalsPage: React.FC = () => {
   const { toast } = useToast();
@@ -59,34 +86,25 @@ export const ApprovalsPage: React.FC = () => {
   // Messages under each edited column, and under the "send back" notes.
   const [editErrors, setEditErrors] = useState<FieldErrors>({});
   const [rejectError, setRejectError] = useState<string | null>(null);
+  // "Send back" from a card: cancelling closes everything instead of leaving the review open.
+  const [rejectFromCard, setRejectFromCard] = useState(false);
 
-  const loadData = async () => {
+  // Runs whose draft was sent back and is being rewritten (they come back here when the new version is ready).
+  const [rewriting, setRewriting] = useState<any[]>([]);
+  const [busyId, setBusyId] = useState<number | null>(null);
+
+  const loadData = async (quiet = false) => {
     try {
-      setLoading(true);
-      // Fetch from dedicated approvals endpoint
-      const res = await api.listApprovals();
-      let items: any[] = Array.isArray(res) ? res : (res as any)?.data || [];
-
-      // If empty, also check executions endpoint for PENDING_APPROVAL runs
-      if (items.length === 0) {
-        const execRes = await api.listExecutions(1, 50, "PENDING_APPROVAL");
-        const execs = Array.isArray(execRes?.data) ? execRes.data : Array.isArray(execRes) ? execRes : [];
-        items = execs.map((e: any) => {
-          const v = (e.versions && e.versions.length > 0) ? e.versions[0] : {};
-          return {
-            id: v.id || e.id,
-            version_number: v.version_number || 1,
-            payload: v.payload || e.payload || {},
-            status: v.status || "PENDING_APPROVAL",
-            created_at: v.created_at || e.created_at,
-            execution: e,
-          };
-        });
-      }
-
-      setApprovals(items);
+      if (!quiet) setLoading(true);
+      const [res, regen] = await Promise.all([
+        api.listApprovals(),
+        api.listExecutions(1, 20, "REGENERATING").catch(() => null),
+      ]);
+      setApprovals(Array.isArray(res) ? res : (res as any)?.data || []);
+      const list = Array.isArray(regen?.data) ? regen.data : Array.isArray(regen) ? regen : [];
+      setRewriting(list);
     } catch (err: any) {
-      toast.error("Failed to load approvals", err.message);
+      toast.error("The approval queue could not be loaded", err.message);
     } finally {
       setLoading(false);
     }
@@ -95,6 +113,15 @@ export const ApprovalsPage: React.FC = () => {
   useEffect(() => {
     loadData();
   }, []);
+
+  // New drafts, rewrites and publications arrive as live events; refresh quietly (debounced).
+  const { addListener } = useLiveEvents();
+  const refreshTimer = useRef<number | null>(null);
+  useEffect(() => addListener((e) => {
+    if (!/^execution\./.test(e.event_name)) return;
+    if (refreshTimer.current) window.clearTimeout(refreshTimer.current);
+    refreshTimer.current = window.setTimeout(() => loadData(true), 600);
+  }), [addListener]);
 
   // ---- Orbit surface: same API calls as the review modal (row = draft id) ---------------------
   useRefreshAfterOrbit(["approve_content_version", "reject_content_version"], () => { loadData(); });
@@ -106,7 +133,7 @@ export const ApprovalsPage: React.FC = () => {
       target: (row?: string) => `approvals.row.${row}`,
       run: async (row?: string) => {
         const item = find(row);
-        if (!item) return { success: false, message: `No draft ${row} waiting for approval.` };
+        if (!item) return { success: false, missing: true, message: `No draft ${row} waiting for approval.` };
         try {
           setIsPublishing(true);
           const payload = selectedItem && String(selectedItem.id) === String(row) ? editPayload : item.payload;
@@ -140,7 +167,7 @@ export const ApprovalsPage: React.FC = () => {
           target: (row) => `approvals.row.${row}`,
           run: (row) => {
             const item = find(row);
-            if (!item) return { success: false, message: `No draft ${row} waiting for approval.` };
+            if (!item) return { success: false, missing: true, message: `No draft ${row} waiting for approval.` };
             openReviewModal(item);
             return { success: true, message: "Draft opened for review.", data: { payload: item.payload } };
           },
@@ -151,7 +178,7 @@ export const ApprovalsPage: React.FC = () => {
           target: (row) => `approvals.row.${row}`,
           run: async (row) => {
             const item = find(row);
-            if (!item) return { success: false, message: `No draft ${row} waiting for approval.` };
+            if (!item) return { success: false, missing: true, message: `No draft ${row} waiting for approval.` };
             try {
               setIsRejecting(true);
               const res: any = await api.portalReject(item.id, rejectFeedback || undefined);
@@ -218,37 +245,42 @@ export const ApprovalsPage: React.FC = () => {
     try {
       setIsSaving(true);
       await api.updateApprovalPayload(selectedItem.id, editPayload);
-      toast.success("Changes Saved", "Updated content payload recorded successfully.");
+      toast.success("Edits saved", "The draft was updated. Nothing is published until you approve it.");
       // Update local state
       setApprovals((prev) =>
         prev.map((a) => (a.id === selectedItem.id ? { ...a, payload: editPayload } : a))
       );
       setSelectedItem((prev) => (prev ? { ...prev, payload: editPayload } : null));
     } catch (err: any) {
-      if (!draftServerErrors(err)) toast.error("Failed to save changes", err.message);
+      if (!draftServerErrors(err)) toast.error("Edits not saved", err.message);
     } finally {
       setIsSaving(false);
     }
   };
 
-  const handleApprove = async (publishNow: boolean) => {
-    if (!selectedItem || !checkDraft()) return;
+  /** Approve the open draft (with its edits), or a card's draft as it is. */
+  const handleApprove = async (publishNow: boolean, item?: PendingApprovalItem) => {
+    const target = item ?? selectedItem;
+    if (!target) return;
+    if (!item && !checkDraft()) return;
+    const payload = item ? item.payload : editPayload;
     try {
       setIsPublishing(true);
-      const res = await api.portalApprove(selectedItem.id, {
-        publish_now: publishNow,
-        payload: editPayload,
-      });
-      toast.success(
-        publishNow ? "Published Successfully!" : "Approved for Scheduled Publication",
-        res.message || "Record status updated."
-      );
+      setBusyId(target.id);
+      const res = await api.portalApprove(target.id, { publish_now: publishNow, payload });
+      toast.success(publishNow ? "Publishing now" : "Approved", res.message || (publishNow ? "The row is being written to your database." : "It publishes at its scheduled time."));
       setSelectedItem(null);
-      loadData();
+      loadData(true);
     } catch (err: any) {
-      if (!draftServerErrors(err)) toast.error("Approval Failed", err.message);
+      if (item) {
+        toast.error("Not approved", err.message);
+        openReviewModal(item);
+      } else if (!draftServerErrors(err)) {
+        toast.error("Not approved", err.message);
+      }
     } finally {
       setIsPublishing(false);
+      setBusyId(null);
     }
   };
 
@@ -263,15 +295,16 @@ export const ApprovalsPage: React.FC = () => {
     try {
       setIsRejecting(true);
       const res = await api.portalReject(selectedItem.id, rejectFeedback.trim() || undefined);
-      toast.info("Regeneration Dispatched", res.message || "AI is generating a revised version.");
+      toast.info("Sent back", res.message || "A new version is being written with your notes. It appears here when it is ready.");
       setShowRejectModal(false);
+      setRejectFromCard(false);
       setRejectFeedback("");
       setSelectedItem(null);
-      loadData();
+      loadData(true);
     } catch (err: any) {
       const msg = serverFieldErrors(err).feedback;
       if (msg) setRejectError(msg);
-      else toast.error("Rejection Failed", err.message);
+      else toast.error("Not sent back", err.message);
     } finally {
       setIsRejecting(false);
     }
@@ -286,7 +319,7 @@ export const ApprovalsPage: React.FC = () => {
         actions={
           <>
             {approvals.length > 0 && <span className="da-chip da-chip-amber px-3 py-1 text-[12px]">{approvals.length} waiting</span>}
-            <button type="button" onClick={loadData} className="da-btn da-btn-secondary">
+            <button type="button" onClick={() => loadData()} className="da-btn da-btn-secondary">
               <RefreshCw className={`h-4 w-4 text-slate-500 ${loading ? "animate-spin" : ""}`} /> Refresh
             </button>
           </>
@@ -295,7 +328,7 @@ export const ApprovalsPage: React.FC = () => {
 
       {loading ? (
         <Card><Loading label="Checking for drafts to review…" /></Card>
-      ) : approvals.length === 0 ? (
+      ) : approvals.length === 0 && rewriting.length === 0 ? (
         <EmptyState
           icon={CheckCircle2}
           title="All caught up"
@@ -306,12 +339,18 @@ export const ApprovalsPage: React.FC = () => {
         <div className="space-y-4">
           {approvals.map((item, idx) => {
             const execution = item.execution;
+            const automation = execution?.automation;
             const payload = item.payload || {};
-            const title = payload.title || payload.name || `Generated run #${execution?.id || item.id}`;
-            const excerpt = payload.excerpt || payload.description || "Structured content waiting for a reviewer.";
-            const targetTable = execution?.automation?.target_table || "target table";
-            const pubTime = execution?.publication_time ? new Date(execution.publication_time) : null;
-            const fieldCount = Object.keys(payload).length;
+            const title = plain(payload.title || payload.name || payload.headline) || `Draft of run #${execution?.id ?? item.id}`;
+            const excerpt = plain(payload.excerpt || payload.summary || payload.short_description || payload.description || payload.content);
+            const image = draftImage(payload);
+            const tz = automation?.timezone || "UTC";
+            const pub = execution?.publication_time;
+            const overdue = !!pub && new Date(pub).getTime() < Date.now();
+            const earlier = (execution?.versions || []).filter((v) => v.version_number < item.version_number);
+            const lastNotes = [...earlier].reverse().find((v) => v.rejection_feedback)?.rejection_feedback;
+            const fields = Object.keys(payload).filter((k) => !k.startsWith("__"));
+            const busy = busyId === item.id;
 
             return (
               <motion.div
@@ -325,60 +364,59 @@ export const ApprovalsPage: React.FC = () => {
               >
                 <SpotlightCard className="shadow-soft">
                   <div className="flex flex-col gap-5 p-5 sm:p-6 md:flex-row">
-                    <div className="relative hidden h-28 w-40 shrink-0 overflow-hidden rounded-2xl bg-gradient-to-br from-indigo-500 via-violet-500 to-cyan-400 md:block">
-                      <div className="absolute inset-0 landing-grid opacity-40" />
-                      <FileText className="absolute bottom-3 left-3 h-6 w-6 text-white/90" />
-                      <span className="absolute right-2 top-2 rounded-full bg-black/25 px-2 py-0.5 text-[10.5px] font-semibold text-white">v{item.version_number}</span>
-                    </div>
+                    {image ? (
+                      <img src={image} alt="" className="hidden h-28 w-40 shrink-0 rounded-2xl border border-slate-200 bg-slate-50 object-cover md:block" />
+                    ) : (
+                      <div className="hidden h-28 w-40 shrink-0 place-items-center rounded-2xl border border-dashed border-slate-200 bg-slate-50 text-slate-300 md:grid">
+                        <FileText className="h-7 w-7" />
+                      </div>
+                    )}
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-1.5">
-                        <span className="da-chip da-chip-amber">Needs review</span>
-                        <span className="da-chip da-chip-slate">Run #{execution?.id || item.id}</span>
-                        <span className="da-chip da-chip-slate">Version {item.version_number}</span>
-                        <span className="da-chip da-chip-indigo font-mono">{targetTable}</span>
+                        <span className="da-chip da-chip-amber">Needs your decision</span>
+                        {item.version_number > 1 && <span className="da-chip da-chip-violet">Version {item.version_number} (rewritten)</span>}
+                        {automation?.target_table && <span className="da-chip da-chip-indigo font-mono">{automation.target_table}</span>}
+                        {automation?.connection?.name && <span className="da-chip da-chip-slate">{automation.connection.name}</span>}
                       </div>
                       <h3 className="mt-3 text-[17px] font-bold tracking-[-0.02em] text-slate-950">{title}</h3>
-                      <p className="mt-1.5 line-clamp-2 text-[13.5px] leading-relaxed text-slate-600">{excerpt}</p>
+                      {excerpt && <p className="mt-1.5 line-clamp-2 text-[13.5px] leading-relaxed text-slate-600">{excerpt}</p>}
                       <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[12.5px] text-slate-500">
-                        <span className="flex items-center gap-1.5"><Workflow className="h-3.5 w-3.5 text-slate-400" /> {execution?.automation?.name || "Content pipeline"}</span>
+                        <span className="flex items-center gap-1.5"><Workflow className="h-3.5 w-3.5 text-slate-400" /> {automation?.name || "Automation"} · run #{execution?.id}</span>
                         <span className="flex items-center gap-1.5">
-                          <Clock className="h-3.5 w-3.5 text-amber-500" />
-                          Publishes <strong className="font-semibold text-slate-800">{pubTime ? `${pubTime.toLocaleDateString()} · ${pubTime.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "right after approval"}</strong>
+                          <Clock className={`h-3.5 w-3.5 ${overdue ? "text-rose-500" : "text-amber-500"}`} />
+                          {pub ? (
+                            <>Publishes <strong className="font-semibold text-slate-800">{formatInstant(pub, tz, { withZone: true })}</strong> ({overdue ? "time has passed" : relativeFromNow(pub)})</>
+                          ) : (
+                            <>Publishes right after approval</>
+                          )}
                         </span>
-                        <span>{fieldCount} fields ready</span>
+                        <span>{fields.length} field{fields.length === 1 ? "" : "s"}</span>
                       </div>
-                      <div className="mt-3 flex flex-wrap gap-1.5">
-                        {Object.keys(payload).slice(0, 5).map((k) => (
-                          <span key={k} className="max-w-[220px] truncate rounded-lg border border-slate-200 bg-slate-50 px-2 py-0.5 font-mono text-[11px] text-slate-600">
-                            {k}: {String(payload[k]).slice(0, 24)}
-                          </span>
-                        ))}
-                        {fieldCount > 5 && <span className="px-1.5 py-0.5 font-mono text-[11px] text-slate-400">+{fieldCount - 5} more</span>}
-                      </div>
+                      {pub && automation?.timeout_policy && DEADLINE_TEXT[automation.timeout_policy] && (
+                        <p className="mt-1.5 text-[12px] text-slate-500">{overdue ? "The publication time has passed: approve to publish it now, or send it back." : DEADLINE_TEXT[automation.timeout_policy]}</p>
+                      )}
+                      {lastNotes && (
+                        <p className="mt-2 flex items-start gap-1.5 rounded-xl bg-violet-50 px-3 py-2 text-[12.5px] text-violet-900">
+                          <History className="mt-0.5 h-3.5 w-3.5 shrink-0" /> <span>Rewritten after your notes: “{lastNotes}”</span>
+                        </p>
+                      )}
                       <div className="mt-5 flex flex-wrap items-center gap-2">
-                        <button type="button" onClick={() => openReviewModal(item)} className="da-btn da-btn-secondary">
-                          <Edit3 className="h-3.5 w-3.5 text-indigo-600" /> Review & edit
+                        <button type="button" onClick={() => openReviewModal(item)} disabled={busy} className="da-btn da-btn-primary">
+                          <Eye className="h-3.5 w-3.5" /> Review
                         </button>
-                        <button
-                          type="button"
-                          onClick={() => { setSelectedItem(item); handleApprove(false); }}
-                          className="da-btn border border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100"
-                        >
-                          <Calendar className="h-3.5 w-3.5" /> Approve for schedule
+                        {pub && !overdue && (
+                          <button type="button" onClick={() => handleApprove(false, item)} disabled={busy}
+                            className="da-btn border border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100">
+                            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Calendar className="h-3.5 w-3.5" />} Approve for {formatInstant(pub, tz)}
+                          </button>
+                        )}
+                        <button type="button" onClick={() => handleApprove(true, item)} disabled={busy} className="da-btn da-btn-secondary">
+                          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />} Publish now
                         </button>
-                        <button type="button" onClick={() => { setSelectedItem(item); handleApprove(true); }} className="da-btn da-btn-primary">
-                          <Send className="h-3.5 w-3.5" /> Publish now
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => { setSelectedItem(item); setShowRejectModal(true); }}
-                          className="da-btn da-btn-ghost text-rose-600 hover:bg-rose-50 hover:text-rose-700"
-                        >
+                        <button type="button" onClick={() => { openReviewModal(item); setRejectFromCard(true); setShowRejectModal(true); }} disabled={busy}
+                          className="da-btn da-btn-ghost text-rose-600 hover:bg-rose-50 hover:text-rose-700">
                           <RotateCcw className="h-3.5 w-3.5" /> Send back
                         </button>
-                        <span className="ml-auto hidden truncate font-mono text-[11px] text-slate-400 lg:inline">
-                          {execution?.idempotency_key ? `key ${String(execution.idempotency_key).slice(0, 18)}…` : ""}
-                        </span>
                       </div>
                     </div>
                   </div>
@@ -386,6 +424,24 @@ export const ApprovalsPage: React.FC = () => {
               </motion.div>
             );
           })}
+
+          {rewriting.length > 0 && (
+            <div className="da-card p-5">
+              <h3 className="flex items-center gap-2 text-[14px] font-bold text-slate-900"><Hourglass className="h-4 w-4 text-violet-600" /> Being rewritten · {rewriting.length}</h3>
+              <p className="mt-0.5 text-[12.5px] text-slate-500">Sent back with notes. The new version appears above when it is ready; you also get an email if the automation sends one.</p>
+              <ul className="mt-3 divide-y divide-slate-100">
+                {rewriting.map((e: any) => (
+                  <li key={e.id} className="flex flex-wrap items-center justify-between gap-2 py-2.5 text-[13px]">
+                    <span className="flex items-center gap-2 text-slate-700">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-500" />
+                      {e.automation?.name ?? "Automation"} · run #{e.id}
+                    </span>
+                    <Link to={`/executions?id=${e.id}`} className="text-[12.5px] font-semibold text-indigo-600 hover:underline">Follow progress</Link>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
       )}
 
@@ -395,16 +451,18 @@ export const ApprovalsPage: React.FC = () => {
         onClose={() => setSelectedItem(null)}
         size="xl"
         icon={Edit3}
-        title="Review & edit before publishing"
+        title="Review before publishing"
         description={selectedItem ? `Version ${selectedItem.version_number} · writes into ${selectedItem.execution?.automation?.target_table || "the target table"}` : undefined}
         footer={
           <>
             <button type="button" onClick={handleSaveEdits} disabled={isSaving} className="da-btn da-btn-secondary mr-auto">
               <Save className="h-3.5 w-3.5 text-slate-500" /> {isSaving ? "Saving…" : "Save edits"}
             </button>
-            <button type="button" onClick={() => handleApprove(false)} disabled={isPublishing} className="da-btn border border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100">
-              <Calendar className="h-3.5 w-3.5" /> Approve for schedule
-            </button>
+            {selectedItem?.execution?.publication_time && new Date(selectedItem.execution.publication_time).getTime() > Date.now() && (
+              <button type="button" onClick={() => handleApprove(false)} disabled={isPublishing} className="da-btn border border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100">
+                <Calendar className="h-3.5 w-3.5" /> Approve for {formatInstant(selectedItem.execution.publication_time, selectedItem.execution.automation?.timezone || "UTC")}
+              </button>
+            )}
             <button type="button" onClick={() => handleApprove(true)} disabled={isPublishing} className="da-btn da-btn-primary">
               <Send className="h-3.5 w-3.5" /> {isPublishing ? "Publishing…" : "Publish now"}
             </button>
@@ -427,7 +485,7 @@ export const ApprovalsPage: React.FC = () => {
             </div>
 
             <div className="da-tabs" role="tablist">
-              {([["edit", "Edit fields", Edit3], ["preview", "Preview", Eye], ["json", "Database payload", Database]] as const).map(([id, label, Icon]) => (
+              {([["edit", "Edit fields", Edit3], ["preview", "Preview", Eye], ["json", "Raw values", Database]] as const).map(([id, label, Icon]) => (
                 <button key={id} type="button" role="tab" aria-selected={activeTab === id} onClick={() => setActiveTab(id as any)}
                   className={`da-tab ${activeTab === id ? "da-tab-active" : ""}`}>
                   <Icon className="h-3.5 w-3.5" /> {label}
@@ -539,11 +597,9 @@ export const ApprovalsPage: React.FC = () => {
                         <div>
                           <label className="text-[13px] font-bold text-slate-800 flex items-center gap-1.5" htmlFor={draftFieldId(bodyKey)}>
                             <Sparkles className="h-3.5 w-3.5 text-indigo-600" />
-                            <span>{bodyKey === "description" ? "Article Content (description)" : "Article Content"}</span>
+                            <span>{labelFor(bodyKey)}</span>
                           </label>
-                          <p className="text-[12px] text-slate-500">
-                            WYSIWYG visual editor: format headings, links, and text directly, or switch to HTML source mode.
-                          </p>
+                          <p className="text-[12px] text-slate-500">Format headings and links directly, or switch to the HTML source.</p>
                         </div>
                       </div>
 
@@ -571,8 +627,8 @@ export const ApprovalsPage: React.FC = () => {
                           if (isLong) {
                             return (
                               <div key={key} className="sm:col-span-2">
-                                <label className="mb-1 block font-mono text-[12px] font-semibold text-slate-600" htmlFor={draftFieldId(key)}>
-                                  {key}
+                                <label className="mb-1 flex items-baseline justify-between gap-2 text-[12.5px] font-semibold text-slate-700" htmlFor={draftFieldId(key)}>
+                                  {labelFor(key)} <span className="font-mono text-[10.5px] font-normal text-slate-400">{key}</span>
                                 </label>
                                 {looksLikeHtml(val) ? (
                                   <WysiwygEditor
@@ -601,8 +657,8 @@ export const ApprovalsPage: React.FC = () => {
 
                           return (
                             <div key={key}>
-                              <label className="mb-1 block font-mono text-[12px] font-semibold text-slate-600" htmlFor={draftFieldId(key)}>
-                                {key}
+                              <label className="mb-1 flex items-baseline justify-between gap-2 text-[12.5px] font-semibold text-slate-700" htmlFor={draftFieldId(key)}>
+                                {labelFor(key)} <span className="font-mono text-[10.5px] font-normal text-slate-400">{key}</span>
                               </label>
                               <input
                                 id={draftFieldId(key)}
@@ -646,7 +702,7 @@ export const ApprovalsPage: React.FC = () => {
       {/* Send back with notes */}
       <ModalShell
         open={showRejectModal && !!selectedItem}
-        onClose={() => { setShowRejectModal(false); setRejectError(null); }}
+        onClose={() => { setShowRejectModal(false); setRejectError(null); if (rejectFromCard) { setSelectedItem(null); setRejectFromCard(false); } }}
         size="sm"
         icon={RotateCcw}
         tone="rose"
@@ -654,7 +710,7 @@ export const ApprovalsPage: React.FC = () => {
         description={selectedItem ? `Version ${selectedItem.version_number} will be rewritten using your notes.` : undefined}
         footer={
           <>
-            <button type="button" onClick={() => { setShowRejectModal(false); setRejectError(null); }} className="da-btn da-btn-ghost">Cancel</button>
+            <button type="button" onClick={() => { setShowRejectModal(false); setRejectError(null); if (rejectFromCard) { setSelectedItem(null); setRejectFromCard(false); } }} className="da-btn da-btn-ghost">Cancel</button>
             <button type="button" onClick={handleReject} disabled={isRejecting} className="da-btn da-btn-danger">
               {isRejecting ? "Sending…" : "Send back and rewrite"}
             </button>

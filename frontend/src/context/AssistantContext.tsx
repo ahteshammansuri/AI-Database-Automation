@@ -154,6 +154,24 @@ const AssistantContext = createContext<AssistantContextType | undefined>(undefin
 
 const SECURE_LABEL: Record<string, string> = { database_password: "database password", api_key: "API key" };
 
+/** Fly back to the dock after the current reply has been spoken (1.5 s when the voice is off; at most 20 s). */
+function returnAfterSpeech(): void {
+  if (!ttsAdapter.isSpeaking()) {
+    setTimeout(() => orbitStage.emit({ type: "return" }), 1500);
+    return;
+  }
+  let done = false;
+  const go = () => {
+    if (done) return;
+    done = true;
+    unsubscribe();
+    clearTimeout(cap);
+    setTimeout(() => orbitStage.emit({ type: "return" }), 600);
+  };
+  const unsubscribe = ttsAdapter.subscribe((e) => { if (e.type === "end" || e.type === "cancelled" || e.type === "error") go(); });
+  const cap = setTimeout(go, 20000);
+}
+
 export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [localState, setLocalState] = useState<CharacterState>("idle");
@@ -411,18 +429,15 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           }
           break;
         case "agent.speech":
-          void (async () => {
-            const loaded = await refreshConversation();
-            const msg = loaded?.msgs.find((m) => m.id === p.message_id) || null;
-            presentSpeech(msg, {
-              messageId: p.message_id, text: p.speech_text, emotion: p.emotion_hint, style: p.response_style,
-              source: p.source, isServiceError: p.is_service_error,
-            });
-            // Stay beside a field that still needs the user; otherwise return to the dock.
-            if (!(p.task_status === "WAITING_FOR_INPUT" && p.secure_input_type)) {
-              setTimeout(() => orbitStage.emit({ type: "return" }), 1500);
-            }
-          })();
+          // Speak right away from the event (the voice follows the action without a reload in between); the
+          // conversation refreshes in the background and the same message is never spoken twice.
+          presentSpeech(null, {
+            messageId: p.message_id, text: p.speech_text, emotion: p.emotion_hint, style: p.response_style,
+            source: p.source, isServiceError: p.is_service_error,
+          });
+          void refreshConversation();
+          // Stay beside a field that still needs the user; otherwise return to the dock once Orbit has finished talking.
+          if (!(p.task_status === "WAITING_FOR_INPUT" && p.secure_input_type)) returnAfterSpeech();
           break;
       }
     });

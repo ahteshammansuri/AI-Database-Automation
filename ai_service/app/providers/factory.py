@@ -11,13 +11,15 @@ class AIProviderFactory:
 
     @staticmethod
     def get_provider(
-        provider_name: str = "mock",
+        provider_name: str = "ollama",
         model: Optional[str] = None,
         api_key: Optional[str] = None
     ) -> BaseAIProvider:
-        name = (provider_name or "mock").lower()
+        name = (provider_name or "ollama").lower()
 
         if name == "mock":
+            if not settings.ALLOW_MOCK_PROVIDER:
+                raise ProviderUnsupportedError("The test-only placeholder provider is not available. Choose Ollama, OpenAI, Gemini or Claude.")
             return MockAIProvider(model_name=model or "mock-llama3-synthetic")
 
         if name == "ollama":
@@ -39,7 +41,7 @@ class AIProviderFactory:
         if name in ["anthropic", "claude"]:
             return ClaudeProvider(
                 api_key=api_key or "",
-                model_name=model or "claude-3-5-haiku-latest"
+                model_name=model or "claude-haiku-5-5"
             )
 
         raise ProviderUnsupportedError(f"Unknown AI provider '{name}'.")

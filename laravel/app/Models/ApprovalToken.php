@@ -50,7 +50,7 @@ class ApprovalToken extends Model
             'user_id' => $version->user_id,
             'version_id' => $version->id,
             'token' => Str::random(48),
-            'expires_at' => now()->addHours(24),
+            'expires_at' => now()->addHours(max(1, (int) config('automation.approval_link_hours', 24))),
         ]);
     }
 }

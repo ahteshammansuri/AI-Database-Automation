@@ -75,7 +75,7 @@ The backend enforces the access mode regardless of the database user's privilege
 
 ### 3.2 Data Classes & Protection
 - **Blocked tables:** credentials, tokens, sessions.
-- **Read-only tables:** financial, permission, order and audit tables (unless explicitly overridden by the owner).
+- **Read-only tables:** financial, permission, order and audit tables (`payments`, `invoices`, `transactions`, `refunds`, `payouts`, `financial*`, `orders`, `order_items`/`order_lines`, `roles`, `permissions`, `user_roles`, `model_has_roles`, `model_has_permissions`, `role_has_permissions`, `audit_*`) are view only until the connection owner makes a table editable (`PUT /api/connections/{id}/tables/{table}/access`, asked first in the Schema Explorer, audited with before/after). Credential, token and session tables ignore any override. Automations never write a view-only table.
 - **Secret columns:** password hashes, tokens, card numbers, national IDs are never returned, never sent to models, and never written.
 - **PII columns:** email and phone are masked by default; reveals are permission-checked and audited.
 - **Automation eligibility:** the automation engine continues to restrict sensitive tables from automated background writing.
@@ -141,3 +141,15 @@ The backend enforces the access mode regardless of the database user's privilege
 | Untraceable changes | Admin activity log (who, what, before → after; secret fields recorded only as "changed") for settings, content, admins, roles, customer actions, Orbit knowledge, failed-job actions and sign-ins. Actions on a customer's account or resources (suspend, reactivate, sign out everywhere, force read-only, pause, resume) are also written to that customer's audit log; deleting an account is recorded in the admin activity log. |
 | Admin edits to Orbit's knowledge | Guides are retrieval context only: Orbit's permissions are decided by the gate in Laravel, never by guide text. Guide names are slugs (validated in Laravel and the AI service) and are written only inside the AI service's own storage. |
 | Suspended or deleted customers | Suspension revokes all tokens, ends the paired phone and blocks sign-in and every API call (403 `suspended`); deletion signs out, removes knowledge vectors and files, then the account and its owned data. |
+
+## Portal, data and audit additions (2026-10-23)
+| Risk | Control |
+| :--- | :--- |
+| Audit noise hiding real refusals | Showing what the Data page may do uses `DataAccessPolicy::writeRefusal()` (no logging); only real write attempts are refused through `assertCanWrite()` and recorded. |
+| Secrets or personal data in the audit trail | `AuditLog::changes()` keeps before → after only for fields that changed; secret fields (passwords, keys, tokens) are stored as "(hidden)"; personal data is masked the same way the portal masks it; long values are shortened. API keys are never recorded, only that a new one was saved. |
+| Spreadsheet formula injection from exports | Customer audit CSV and the admin activity exports prefix any cell starting with `=`, `+`, `-`, `@`, tab or carriage return with `'`. Exports are themselves recorded. |
+| Account takeover through profile changes | Changing the email or the password needs the current password; a password change signs out the other sessions by default; a session can be signed out from Account settings (never the current one through that path). |
+| Orbit acting out of sight | With the portal open, run now, pause/resume, retry/cancel/pause a run, approve and send back are carried out on screen by pressing the page's own buttons; the server then checks the real state (for example that the automation is really paused) and never repeats a pressed action in the background. |
+| Orbit knowledge tampering through files | Orbit's product guides live only in the platform database, edited by admins with the `orbit_knowledge.manage` permission; the AI service indexes what Laravel publishes and keeps no guide files. |
+| Interrupting a finished run | The Orbit interrupt tool follows the portal's rules: a published run cannot be cancelled and a stopped run keeps its real outcome. |
+

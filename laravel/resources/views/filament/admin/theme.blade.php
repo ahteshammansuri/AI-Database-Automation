@@ -1,8 +1,12 @@
 {{-- Admin panel theme: matches the customer portal (ink navigation, soft canvas, rounded cards, indigo/violet). --}}
 <style>
-    :root { --da-ink: #060914; --da-canvas: #F7F8FC; --da-line: #E8EAF3; }
+    :root { --da-ink: #060914; --da-canvas: #F6F7FB; --da-line: #E6E9F2; --da-card: #FFFFFF;
+            --da-d-canvas: #070B17; --da-d-card: #0D1326; --da-d-raise: #111A33; --da-d-line: rgba(148,163,184,.12); }
     .fi-body { background: var(--da-canvas); }
-    .dark .fi-body { background: #0B1022; }
+    .dark .fi-body { background:
+            radial-gradient(70% 45% at 85% -10%, rgba(99,102,241,.12), transparent 60%),
+            radial-gradient(50% 35% at 0% 100%, rgba(139,92,246,.08), transparent 60%),
+            var(--da-d-canvas); background-attachment: fixed; }
 
     /* Brand */
     .da-brand { display: flex; align-items: center; gap: .65rem; }
@@ -46,6 +50,40 @@
         box-shadow: 0 1px 2px rgba(15,23,42,.04), 0 12px 28px -18px rgba(15,23,42,.22) !important; }
     .fi-header-heading { letter-spacing: -.035em; font-weight: 800; }
     .fi-wi-stats-overview-stat-value { letter-spacing: -.03em; }
+
+    /* Light: hairline edges instead of heavy shadows, calm table header, clear hover */
+    .fi-section:not(.fi-section-not-contained), .fi-ta-ctn, .fi-wi-stats-overview-stat {
+        box-shadow: 0 0 0 1px var(--da-line), 0 14px 30px -24px rgba(15,23,42,.28) !important; }
+    .fi-ta-header-cell { background: #F8F9FD; }
+    .fi-ta-row { transition: background .12s ease; }
+    .fi-ta-row:hover { background: #F5F6FF; }
+    .fi-modal-window { border-radius: 1.4rem !important; }
+
+    /* Dark: raised surfaces with visible edges, readable tables and inputs */
+    .dark .fi-section:not(.fi-section-not-contained), .dark .fi-ta-ctn, .dark .fi-wi-stats-overview-stat,
+    .dark .fi-wi-chart .fi-section {
+        background: var(--da-d-card) !important;
+        box-shadow: 0 0 0 1px var(--da-d-line), 0 24px 48px -30px rgba(0,0,0,.85) !important; }
+    .dark .fi-section-header { border-color: var(--da-d-line) !important; }
+    .dark .fi-ta-header, .dark .fi-ta-header-cell { background: rgba(255,255,255,.02); }
+    .dark .fi-ta-header-cell { color: #94A3B8; }
+    .dark .fi-ta-row { border-color: var(--da-d-line) !important; }
+    .dark .fi-ta-row:hover { background: rgba(99,102,241,.07); }
+    .dark .fi-ta-cell { color: #CBD5E1; }
+    .dark .fi-input-wrp { background: #0A1020 !important; box-shadow: 0 0 0 1px rgba(148,163,184,.18) !important; }
+    .dark .fi-input-wrp:focus-within { box-shadow: 0 0 0 2px rgba(129,140,248,.55) !important; }
+    .dark .fi-modal-window, .dark .fi-dropdown-panel { background: var(--da-d-raise) !important;
+        box-shadow: 0 0 0 1px rgba(148,163,184,.16), 0 40px 80px -30px rgba(0,0,0,.9) !important; }
+    .dark .fi-pagination { color: #94A3B8; }
+    .dark .fi-header-heading { color: #F8FAFC; }
+    .dark .fi-header-subheading { color: #94A3B8; }
+
+    /* Quiet scrollbars (the sidebar showed a bright track on dark) */
+    .fi-sidebar-nav, .fi-sidebar { scrollbar-width: thin; scrollbar-color: rgba(148,163,184,.28) transparent; }
+    .fi-sidebar-nav::-webkit-scrollbar, .fi-sidebar ::-webkit-scrollbar { width: 8px; }
+    .fi-sidebar-nav::-webkit-scrollbar-thumb, .fi-sidebar ::-webkit-scrollbar-thumb { background: rgba(148,163,184,.25); border-radius: 999px; }
+    .fi-sidebar-nav::-webkit-scrollbar-track, .fi-sidebar ::-webkit-scrollbar-track { background: transparent; }
+    .dark { color-scheme: dark; }
 
     /* Sign-in: the portal's aurora on ink */
     .fi-simple-layout { background:

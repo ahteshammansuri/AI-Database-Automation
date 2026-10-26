@@ -30,6 +30,8 @@ export interface ConnectionProfile {
 export interface SchemaColumn {
   name: string;
   data_type: string;
+  /** Full column type as the database reports it, e.g. varchar(255). */
+  type?: string;
   nullable: boolean;
   is_primary_key: boolean;
   is_foreign_key: boolean;
@@ -37,6 +39,8 @@ export interface SchemaColumn {
   max_length?: number;
   enum_values?: string[];
   is_unique: boolean;
+  /** secret: never returned or written; pii: masked unless revealed (audited). */
+  sensitivity?: "secret" | "pii" | "standard";
 }
 
 export interface SchemaRelationship {
@@ -58,6 +62,10 @@ export interface SchemaTable {
   restriction_reason?: string;
   approx_rows?: number;
   row_count_estimate?: number;
+  /** What the data rules allow on this connection: blocked, read_only, writable (or an owner override). */
+  data_class?: string | null;
+  /** The class before the owner's override for this connection. */
+  data_class_default?: string | null;
   columns: SchemaColumn[];
   relationships: SchemaRelationship[];
   ai_suggestion?: {

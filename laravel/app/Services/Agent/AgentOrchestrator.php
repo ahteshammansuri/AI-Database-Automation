@@ -194,11 +194,17 @@ class AgentOrchestrator
 
     public function runTurn(int $taskId, string $turnId): void
     {
-        $this->confirmedStepDone = false;
         $task = AgentTask::find($taskId);
         if (!$task || $task->current_turn_id !== $turnId) {
             return; // superseded by a newer turn
         }
+        // Model usage of this request is recorded for the customer and the Orbit request (AI usage in the admin panel).
+        \App\Services\AiUsage::using($task->user_id, 'orbit', $task, fn () => $this->runTurnFor($task, $taskId, $turnId));
+    }
+
+    private function runTurnFor(AgentTask $task, int $taskId, string $turnId): void
+    {
+        $this->confirmedStepDone = false;
 
         $lock = Cache::lock("orbit-agent-task:{$taskId}", (int) config('orbit.max_turn_seconds', 600) + 120);
         if (!$lock->get()) {
@@ -324,6 +330,7 @@ class AgentOrchestrator
                 'runtime_context' => $this->context->build($user, $task, ['provider' => $model['provider'], 'model' => $model['model']], $userMsg->content),
                 'tool_schemas' => AgentToolRegistry::modelVisibleSchemas($user, $task->autonomy_level ?: 'CONFIRM_CONSEQUENTIAL_CHANGES'),
                 'portal_map' => SurfaceCatalog::modelSummary(),
+                'product_name' => (string) config('platform.brand_name'),
                 'observations' => $observations,
                 'conversation_summary' => $this->context->conversationSummary($task, $userMsg->id),
                 'slots' => $task->slots ?: (object) [],
@@ -333,6 +340,7 @@ class AgentOrchestrator
                 'provider' => $model['provider'],
                 'model' => $model['model'],
                 'api_key' => $model['api_key'],
+                'temperature' => $model['temperature'] ?? null,
                 'max_repairs' => (int) config('orbit.max_repairs', 1),
                 // The AI service must answer before our HTTP client gives up (no orphaned model work).
                 'deadline_seconds' => max(20, (int) config('orbit.decide_timeout_seconds', 300) - 20),
@@ -523,7 +531,10 @@ class AgentOrchestrator
         $this->timeline($task, $label, 'running', "Running {$label}…", ['trace_id' => $traceId]);
 
         $started = now();
-        $result = $this->runner->run($user, $task, $def, $args);
+        // With the portal open, a backend action that has an on-screen equivalent is done on screen (the user watches
+        // Orbit go there and press the page's own button); it falls back to the backend tool only if nothing was pressed.
+        $result = $def['side_effect_class'] !== 'ui' ? $this->runVisibly($user, $task, $name, $args, $traceId) : null;
+        $result ??= $this->runner->run($user, $task, $def, $args);
         $this->persistCall($task, $turnId, $iteration, $name, $def['version'], $args, $result['success'] ? 'succeeded' : 'failed', $result, $traceId, $started);
 
         LiveEventService::publish($task->user_id, 'agent.tool_finished', [
@@ -547,6 +558,55 @@ class AgentOrchestrator
         }
 
         return ['iteration' => $iteration, 'tool' => $name, 'args' => $args, 'result' => $view];
+    }
+
+    /**
+     * Carry out a backend tool on screen when the portal is open and the page has the same action. Returns the
+     * verified result, or null to let the backend tool run (no equivalent, no browser, or nothing was pressed).
+     */
+    protected function runVisibly(User $user, AgentTask $task, string $tool, array $args, string $traceId): ?array
+    {
+        $steps = VisibleEquivalent::steps($tool, $args);
+        if ($steps === null || !UiActionCoordinator::clientPresent($user->id)) {
+            return null;
+        }
+        $since = now();
+        foreach ($steps as $step) {
+            $def = AgentToolRegistry::definition($step['tool']);
+            if ($def === null) {
+                return null;
+            }
+            $label = $this->uiLabel($step['tool'], $step['args']);
+            LiveEventService::publish($task->user_id, 'agent.tool_started', [
+                'task_id' => $task->id, 'trace_id' => $traceId, 'tool' => $step['tool'], 'label' => $label,
+                'side_effect_class' => 'ui', 'on_behalf_of' => $tool,
+            ], 'AgentTask', (string) $task->id);
+            $res = $this->runner->runUi($user, $task, $def, $step['args']);
+            LiveEventService::publish($task->user_id, 'agent.tool_finished', [
+                'task_id' => $task->id, 'trace_id' => $traceId, 'tool' => $step['tool'], 'label' => $label,
+                'success' => $res['success'], 'status' => $res['status'], 'error_category' => $res['error_category'],
+                'safe_message' => $res['safe_message'], 'verified' => $res['verified'] ?? false, 'resource_refs' => $res['resource_refs'] ?? [],
+            ], 'AgentTask', (string) $task->id);
+            if (!$res['success']) {
+                $pressed = $step['tool'] === 'press' && !in_array($res['error_category'], ['NOT_ON_SCREEN', 'NO_BROWSER'], true);
+                if (!$pressed) {
+                    $this->timeline($task, $label, 'adjusted', 'Not on screen; doing it directly instead.', ['trace_id' => $traceId]);
+                    return null;
+                }
+                // The page pressed and reported a problem (or did not answer): report it, never repeat it in the background.
+                return $res;
+            }
+        }
+
+        $check = VisibleEquivalent::verify($tool, $args, $user->id, $since);
+        if (!$check['ok']) {
+            return $this->runner->result(false, 'VERIFICATION_FAILED', $check['message'], committed: true);
+        }
+
+        return $this->runner->result(true, null, $check['message'], committed: true, refs: $check['refs'], extra: [
+            'verified' => true,
+            'verification' => 'Checked on the server after Orbit pressed the button on screen.',
+        ]);
     }
 
     /** Human-readable timeline label for an on-screen action. */

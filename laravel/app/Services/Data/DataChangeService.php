@@ -147,6 +147,139 @@ class DataChangeService
     }
 
     /**
+     * Step 1 (Insert): validate every row against the live table (types, required columns, enums, unique values,
+     * links to other tables) and keep it as a pending change. Nothing is written until the customer confirms.
+     *
+     * @param  array<int, array<string, mixed>>  $rows
+     * @param  string  $source  manual | sample | autopilot (shown in history)
+     * @return array{success: bool, errors?: array<int, array<string, string>>, change_request_id?: int, rows?: array}
+     */
+    public function previewInsert(DbConnection $connection, User $user, string $tableName, array $rows, string $source = 'manual', ?int $taskId = null): array
+    {
+        $this->policy->assertCanWrite($connection, $tableName, 'insert');
+        if (count($rows) === 0) {
+            throw new DataException('NO_ROWS', 'There is nothing to add.');
+        }
+        if (count($rows) > self::maxWriteRows()) {
+            throw new DataException('MAX_ROWS_EXCEEDED', 'At most ' . self::maxWriteRows() . ' rows can be added at once.');
+        }
+
+        $catalog = $this->schemaService->getCatalog($connection);
+        $tableMeta = $catalog['tables'][$tableName] ?? null;
+        if (!$tableMeta) {
+            throw new DataException('TABLE_NOT_FOUND', "Table '{$tableName}' does not exist.");
+        }
+
+        $validator = app(RowValidator::class);
+        $clean = [];
+        $errors = [];
+        foreach (array_values($rows) as $i => $row) {
+            [$c, $e] = $validator->validate($tableMeta, (array) $row, true);
+            $clean[$i] = $c;
+            if ($e) {
+                $errors[$i] = $e;
+            }
+        }
+        // Every problem at once: unique values and links are checked for the values that passed the type checks.
+        foreach ($this->checkUniqueAndLinks($connection, $tableName, $tableMeta, $clean, []) as $i => $e) {
+            $errors[$i] = ($errors[$i] ?? []) + $e;
+        }
+        if ($errors) {
+            ksort($errors);
+            return ['success' => false, 'errors' => $errors];
+        }
+
+        $preview = $this->policy->maskResultRows(array_slice($clean, 0, 20));
+        $change = DataChangeRequest::create([
+            'user_id' => $user->id,
+            'connection_id' => $connection->id,
+            'task_id' => $taskId,
+            'action' => 'insert',
+            'target_table' => $tableName,
+            'primary_keys' => [],
+            'patch_values' => ['rows' => array_values($clean), 'source' => $source],
+            'affected_count' => count($clean),
+            'preview_rows' => $preview,
+            'status' => 'pending_confirmation',
+            'expires_at' => now()->addMinutes(30),
+        ]);
+
+        return [
+            'success' => true,
+            'change_request_id' => $change->id,
+            'action' => 'insert',
+            'table' => $tableName,
+            'affected_count' => count($clean),
+            'preview_rows' => $preview,
+            'requires_confirmation' => true,
+            'confirmation_type' => count($clean) === 1 ? 'light_confirm' : 'count_confirm',
+        ];
+    }
+
+    /**
+     * Values that must be unique are not used yet (in the table or twice in the batch) and every link points at a
+     * row that exists. $exceptKeys: primary keys of rows being updated (their own current values are fine).
+     *
+     * @param  array<int, array<string, mixed>>  $rows
+     * @return array<int, array<string, string>>
+     */
+    public function checkUniqueAndLinks(DbConnection $connection, string $tableName, array $tableMeta, array $rows, array $exceptKeys): array
+    {
+        $errors = [];
+        $dialect = $this->dialectRegistry->get($connection->driver ?: 'mysql');
+        $pdo = $this->targetConnector->getReadOnlyPdo($connection);
+        $pk = $tableMeta['primary_key'][0] ?? null;
+        $qTable = $dialect->quoteIdentifier($tableName);
+
+        $uniqueSets = array_values(array_filter(array_merge([$tableMeta['primary_key'] ?? []], array_values($tableMeta['unique_keys'] ?? [])), fn ($k) => count($k) === 1));
+        foreach ($uniqueSets as [$col]) {
+            $seen = [];
+            foreach ($rows as $i => $row) {
+                if (!array_key_exists($col, $row) || $row[$col] === null) {
+                    continue;
+                }
+                $v = (string) $row[$col];
+                if (isset($seen[$v])) {
+                    $errors[$i][$col] = 'This value is used twice in these rows; it must be unique.';
+                    continue;
+                }
+                $seen[$v] = true;
+                $sql = "SELECT 1 FROM {$qTable} WHERE " . $dialect->quoteIdentifier($col) . ' = ?';
+                $bind = [$row[$col]];
+                if ($pk && isset($exceptKeys[$i])) {
+                    $sql .= ' AND ' . $dialect->quoteIdentifier($pk) . ' <> ?';
+                    $bind[] = $exceptKeys[$i];
+                }
+                $stmt = $pdo->prepare($sql . ' LIMIT 1');
+                $stmt->execute($bind);
+                if ($stmt->fetchColumn()) {
+                    $errors[$i][$col] = 'Another row already uses this value; it must be unique.';
+                }
+            }
+        }
+
+        foreach ($tableMeta['foreign_keys'] ?? [] as $fk) {
+            if (count($fk['columns']) !== 1) {
+                continue;
+            }
+            $col = $fk['columns'][0];
+            $q = 'SELECT 1 FROM ' . $dialect->quoteIdentifier($fk['ref_table']) . ' WHERE ' . $dialect->quoteIdentifier($fk['ref_columns'][0]) . ' = ? LIMIT 1';
+            foreach ($rows as $i => $row) {
+                if (!array_key_exists($col, $row) || $row[$col] === null || isset($errors[$i][$col])) {
+                    continue;
+                }
+                $stmt = $pdo->prepare($q);
+                $stmt->execute([$row[$col]]);
+                if (!$stmt->fetchColumn()) {
+                    $errors[$i][$col] = "No row in “{$fk['ref_table']}” has the id {$row[$col]}.";
+                }
+            }
+        }
+
+        return $errors;
+    }
+
+    /**
      * Step 1 (Delete): Impact analysis, cascade counts, soft-delete suggestion, typed phrase.
      */
     public function previewDelete(
@@ -334,7 +467,22 @@ class DataChangeService
         try {
             $placeholders = implode(', ', array_fill(0, count($pks), '?'));
 
-            if ($change->action === 'update') {
+            if ($change->action === 'insert') {
+                $rows = (array) ($change->patch_values['rows'] ?? []);
+                $inserted = [];
+                foreach ($rows as $row) {
+                    $cols = array_keys($row);
+                    $sql = "INSERT INTO {$qTable} (" . implode(', ', array_map(fn ($c) => $dialect->quoteIdentifier($c), $cols)) . ') VALUES (' . implode(', ', array_fill(0, count($cols), '?')) . ')';
+                    if (($connection->driver ?: 'mysql') === 'pgsql') {
+                        $sql .= " RETURNING {$qPk}";
+                    }
+                    $stmt = $pdo->prepare($sql);
+                    $stmt->execute(array_values($row));
+                    $inserted[] = ($connection->driver ?: 'mysql') === 'pgsql' ? $stmt->fetchColumn() : ($row[$primaryKey] ?? $pdo->lastInsertId());
+                }
+                $pks = $inserted;
+                $change->primary_keys = $inserted;
+            } elseif ($change->action === 'update') {
                 $patch = (array) $change->patch_values;
                 $setSql = [];
                 $bindings = [];
@@ -374,15 +522,20 @@ class DataChangeService
 
             $pdo->commit();
 
-            $change->update([
-                'status' => 'executed',
-                'executed_at' => now(),
-            ]);
+            $change->status = 'executed';
+            $change->executed_at = now();
+            $change->save();
 
+            $diff = $change->action === 'update' ? (array) ($change->diff_summary ?? []) : [];
             AuditLog::log($user->id, "data.{$change->action}_executed", 'db_connections', (string) $connection->id, [
                 'table' => $change->target_table,
                 'affected_count' => count($pks),
                 'primary_keys' => $pks,
+                'change_request_id' => $change->id,
+                'changes' => $diff ? AuditLog::changes(
+                    array_map(fn ($d) => $d['before'] ?? null, $diff),
+                    array_map(fn ($d) => $d['after'] ?? null, $diff),
+                ) : null,
             ]);
 
             return [
@@ -390,7 +543,8 @@ class DataChangeService
                 'action' => $change->action,
                 'table' => $change->target_table,
                 'affected_count' => count($pks),
-                'message' => "Successfully {$change->action}d " . count($pks) . " row(s) in '{$change->target_table}'.",
+                'message' => ['insert' => 'Added', 'update' => 'Updated', 'delete' => 'Deleted'][$change->action] . ' ' . count($pks) . " row(s) in '{$change->target_table}'.",
+                'primary_keys' => $pks,
                 'can_undo' => true,
                 'change_request_id' => $change->id,
             ];
@@ -413,6 +567,10 @@ class DataChangeService
 
         if ($change->status !== 'executed') {
             throw new DataException('CANNOT_UNDO', "Only executed changes can be undone (current status: {$change->status}).");
+        }
+
+        if ($change->action === 'insert') {
+            return $this->undoInsert($user, $change);
         }
 
         if (empty($change->before_image)) {
@@ -489,5 +647,50 @@ class DataChangeService
             }
             throw $e;
         }
+    }
+
+    /**
+     * Undo an insert: removes exactly the rows that change added (their recorded keys), in one transaction, within
+     * a day. It reverses the platform's own write, like the Undo center for published runs.
+     */
+    private function undoInsert(User $user, DataChangeRequest $change): array
+    {
+        if ($change->executed_at && $change->executed_at->lt(now()->subDay())) {
+            throw new DataException('UNDO_EXPIRED', 'Added rows can be removed with Undo for one day. Delete them from the table instead.');
+        }
+        $connection = $change->connection;
+        $this->policy->assertCanWrite($connection, $change->target_table, 'insert');
+        $pks = array_values(array_filter((array) $change->primary_keys, fn ($v) => $v !== null && $v !== ''));
+        if (!$pks) {
+            throw new DataException('NO_KEYS', 'The added rows have no recorded ids, so they cannot be removed automatically.');
+        }
+
+        $dialect = $this->dialectRegistry->get($connection->driver ?: 'mysql');
+        $catalog = $this->schemaService->getCatalog($connection);
+        $primaryKey = ($catalog['tables'][$change->target_table]['primary_key'] ?? ['id'])[0];
+        $pdo = $this->targetConnector->getReadWritePdo($connection);
+        $pdo->beginTransaction();
+        try {
+            $stmt = $pdo->prepare('DELETE FROM ' . $dialect->quoteIdentifier($change->target_table) . ' WHERE ' . $dialect->quoteIdentifier($primaryKey) . ' IN (' . implode(', ', array_fill(0, count($pks), '?')) . ')');
+            $stmt->execute($pks);
+            $removed = $stmt->rowCount();
+            $pdo->commit();
+        } catch (\Throwable $e) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            throw $e;
+        }
+
+        $change->update(['status' => 'undone', 'undone_at' => now()]);
+        AuditLog::log($user->id, 'data.insert_undone', 'db_connections', (string) $connection->id, [
+            'table' => $change->target_table, 'primary_keys' => $pks, 'removed' => $removed,
+        ]);
+
+        return [
+            'success' => true,
+            'message' => "Removed {$removed} added row(s) from '{$change->target_table}'.",
+            'affected_count' => $removed,
+        ];
     }
 }

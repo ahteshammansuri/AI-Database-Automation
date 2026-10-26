@@ -1,10 +1,10 @@
 import type { ElementType } from "react";
 import {
-  BookOpen, CheckCircle2, Cpu, Database, FileEdit, FileText, History, LayoutDashboard, PlusCircle, ShieldCheck,
-  TableProperties, Workflow,
+  BookOpen, CheckCircle2, Cpu, Database, FileEdit, FileText, History, LayoutDashboard, PlusCircle, ShieldCheck, UserCog,
+  Table2, TableProperties, Workflow,
 } from "lucide-react";
 
-export interface NavItem { to: string; label: string; icon: ElementType; badgeKey?: "approvals" }
+export interface NavItem { to: string; label: string; icon: ElementType; badgeKey?: "approvals"; feature?: string }
 export interface NavGroup { label: string; items: NavItem[] }
 
 /** The portal's navigation, grouped. Every item is also an Orbit target (`nav:<route>`). */
@@ -15,6 +15,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
       { to: "/connections", label: "Connections", icon: Database },
       { to: "/explorer", label: "Schema Explorer", icon: TableProperties },
+      { to: "/data", label: "Data", icon: Table2, feature: "data_explorer" },
     ],
   },
   {
@@ -39,6 +40,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { to: "/executions", label: "Execution History", icon: History },
       { to: "/audit-logs", label: "Audit Logs", icon: FileText },
       { to: "/security", label: "Security & Guardrails", icon: ShieldCheck },
+      { to: "/account", label: "Account Settings", icon: UserCog },
     ],
   },
 ];

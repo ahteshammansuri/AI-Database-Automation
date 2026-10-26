@@ -28,7 +28,12 @@ class ApprovalController extends Controller
     {
         $pendingVersions = ContentVersion::where('user_id', $request->user()->id)
             ->awaitingDecision()
-            ->with(['execution.automation:id,name,target_table,timezone,timeout_policy,connection_id', 'execution.automation.connection:id,name,database_name'])
+            ->with([
+                'execution.automation:id,name,target_table,timezone,timeout_policy,connection_id',
+                'execution.automation.connection:id,name,database_name',
+                // Earlier versions of the same run (no content): what was sent back, and the notes given.
+                'execution.versions' => fn ($q) => $q->select('id', 'execution_id', 'version_number', 'status', 'rejection_feedback', 'created_at')->orderBy('version_number'),
+            ])
             ->orderBy('created_at', 'desc')
             ->get();
         // Signed tokens are never sent to the portal; the portal acts through authenticated endpoints.
@@ -186,10 +191,12 @@ class ApprovalController extends Controller
             return $blocked;
         }
 
+        $edited = [];
         if ($request->has('payload') && is_array($request->input('payload'))) {
             if ($invalid = $this->invalidPayload($version, $request->input('payload'))) {
                 return $invalid;
             }
+            $edited = AuditLog::changes((array) $version->payload, $request->input('payload'));
             $version->payload = $request->input('payload');
         }
 
@@ -209,6 +216,15 @@ class ApprovalController extends Controller
             $pubTimeStr = $execution->publication_time ? $execution->publication_time->toIso8601String() : 'scheduled deadline';
             $execution->addTimelineEvent('PORTAL_APPROVED_FOR_SCHEDULE', "Approved by live editor in portal; scheduled to publish at {$pubTimeStr}.");
         }
+
+        AuditLog::log($request->user()->id, 'VERSION_APPROVED', 'ContentVersion', (string) $version->id, [
+            'automation_id' => $execution->automation_id,
+            'execution_id' => $execution->id,
+            'version_number' => $version->version_number,
+            'via' => 'portal',
+            'publish_now' => $publishNow,
+            'changes' => $edited ?: null,
+        ]);
 
         LiveEventService::publish($request->user()->id, 'execution.stage_changed', [
             'execution_id' => $execution->id,
@@ -242,6 +258,13 @@ class ApprovalController extends Controller
         $version->update([
             'status' => 'REJECTED',
             'rejection_feedback' => $feedback,
+        ]);
+        AuditLog::log($request->user()->id, 'VERSION_REJECTED', 'ContentVersion', (string) $version->id, [
+            'automation_id' => $execution->automation_id,
+            'execution_id' => $execution->id,
+            'version_number' => $version->version_number,
+            'via' => 'portal',
+            'feedback' => mb_substr($feedback, 0, 500),
         ]);
 
         $maxRetries = max(1, (int) config('automation.max_regenerations', 3));

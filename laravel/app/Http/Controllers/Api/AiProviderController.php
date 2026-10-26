@@ -29,15 +29,6 @@ class AiProviderController extends Controller
                 'requires_api_key' => false,
             ],
             [
-                'provider_id' => 'mock',
-                'name' => 'Local Mock Generator',
-                'is_local' => true,
-                'is_available' => true,
-                'status_message' => 'Deterministic local generator for development & offline demos.',
-                'current_model' => 'mock-llama3-synthetic',
-                'requires_api_key' => false,
-            ],
-            [
                 'provider_id' => 'openai',
                 'name' => 'OpenAI',
                 'is_local' => false,
@@ -60,8 +51,8 @@ class AiProviderController extends Controller
                 'name' => 'Anthropic Claude',
                 'is_local' => false,
                 'is_available' => isset($userProviders['anthropic']),
-                'status_message' => 'Cloud provider (Claude 3.5 Sonnet). Requires user API key.',
-                'current_model' => $userProviders['anthropic']->model_name ?? 'claude-3-5-sonnet',
+                'status_message' => 'Cloud provider (Claude). Requires your API key.',
+                'current_model' => $userProviders['anthropic']->model_name ?? (config('ai_models.anthropic')[0] ?? 'claude-sonnet-5-5'),
                 'requires_api_key' => true,
             ],
         ];
@@ -87,14 +78,8 @@ class AiProviderController extends Controller
                     $item['models'] = ['llama3.2:1b', 'llama3:latest'];
                     $item['status_message'] = 'Ollama service offline. Run "ollama serve" on port 11434.';
                 }
-            } elseif ($item['provider_id'] === 'mock') {
-                $item['models'] = ['mock-llama3-synthetic', 'mock-mistral-synthetic'];
-            } elseif ($item['provider_id'] === 'openai') {
-                $item['models'] = ['gpt-4o-mini', 'gpt-4o', 'gpt-4-turbo'];
-            } elseif ($item['provider_id'] === 'gemini') {
-                $item['models'] = ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-3.8-flash', 'gemini-flash-latest'];
-            } elseif ($item['provider_id'] === 'anthropic') {
-                $item['models'] = ['claude-3-5-sonnet', 'claude-3-5-haiku-latest'];
+            } else {
+                $item['models'] = array_values((array) config('ai_models.' . $item['provider_id'], []));
             }
         }
 
@@ -104,7 +89,7 @@ class AiProviderController extends Controller
     public function store(Request $request)
     {
         $validated = $request->validate([
-            'provider_type' => 'required|string|in:ollama,mock,openai,gemini,anthropic',
+            'provider_type' => 'required|string|in:ollama,openai,gemini,anthropic',
             'model_name' => 'required|string|max:120',
             'api_key' => 'nullable|string|max:500',
             'base_url' => 'nullable|string|max:255|url:http,https',
@@ -122,6 +107,8 @@ class AiProviderController extends Controller
             }
         }
 
+        $before = AiProvider::where('user_id', $request->user()->id)->where('provider_type', $validated['provider_type'])->first()?->only(['model_name', 'base_url', 'is_active']) ?? [];
+
         $provider = AiProvider::updateOrCreate(
             [
                 'user_id' => $request->user()->id,
@@ -136,9 +123,12 @@ class AiProviderController extends Controller
                 : [])
         );
 
+        // The key itself is never recorded; only that a new one was saved.
         AuditLog::log($request->user()->id, 'AI_PROVIDER_CONFIGURED', 'AiProvider', (string) $provider->id, [
             'provider_type' => $provider->provider_type,
             'model_name' => $provider->model_name,
+            'api_key_replaced' => !empty($validated['api_key']),
+            'changes' => AuditLog::changes($before, $provider->only(['model_name', 'base_url', 'is_active'])),
         ]);
 
         return response()->json([
@@ -149,7 +139,10 @@ class AiProviderController extends Controller
 
     public function health(Request $request)
     {
-        $providerType = $request->query('provider', 'mock');
+        $providerType = (string) $request->query('provider', 'ollama');
+        if (!in_array($providerType, ['ollama', 'openai', 'gemini', 'anthropic'], true)) {
+            return response()->json(['message' => 'Unknown provider.', 'errors' => ['provider' => ['Choose Ollama, OpenAI, Gemini or Claude.']]], 422);
+        }
         $model = $request->query('model');
 
         // Look up user's key if configured
@@ -162,8 +155,7 @@ class AiProviderController extends Controller
             'ollama' => 'llama3',
             'openai' => 'gpt-4o-mini',
             'gemini' => 'gemini-3.5-flash',
-            'anthropic' => 'claude-3-5-sonnet',
-            default => 'mock-llama3-synthetic',
+            'anthropic' => config('ai_models.anthropic')[0] ?? 'claude-sonnet-5-5',
         };
         $modelName = $model ?: ($userProvider?->model_name ?: $defaultModel);
 

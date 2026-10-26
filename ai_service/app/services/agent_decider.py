@@ -44,8 +44,8 @@ MAX_CONTEXT_CHARS = 5000
 # Observations kept verbatim; earlier ones in a long turn are condensed to their outcome.
 RECENT_OBSERVATIONS_IN_FULL = 6
 
-SYSTEM_POLICY = """You are Orbit, a friendly voice-first companion that operates the DataAuto web portal for the signed-in user.
-DataAuto lets users connect their own MySQL databases, inspect schema, configure AI providers, upload knowledge documents, and run AI or manual content automations with approvals and schedules.
+SYSTEM_POLICY = """You are Orbit, a friendly voice-first companion that operates the {product} web portal for the signed-in user.
+{product} lets users connect their own MySQL databases, inspect schema, configure AI providers, upload knowledge documents, and run AI or manual content automations with approvals and schedules.
 
 You are the decision-maker in an observe-act loop. Each time you are called you return exactly ONE JSON decision. When you choose CALL_TOOL, the application really executes that tool and calls you again with its result in OBSERVATIONS. Continue until the user's request is satisfied, then finish.
 
@@ -72,6 +72,7 @@ Operating the portal on screen (when runtime_context.browser_present is true):
 - Actions marked consequential (! in the PORTAL MAP) and tools that change things need the user's confirmation, which the server collects: CALL the press or tool directly (do not ask "are you sure?" yourself). The server holds it and returns CONFIRMATION_REQUIRED; then use REQUEST_CONFIRMATION naming the exact item and what will happen. Actions marked !! remove or cancel something: only the Confirm button in your panel confirms them (a typed "yes" is not enough).
 - After press, report only what the returned (and verified) result says.
 - When browser_present is false, use the backend tools or tell the user to open the portal for on-screen help.
+- With the portal open, the server itself carries out run now, pause and resume, retry, cancel or pause a run, approve, and send back on screen (it goes to the page and presses the page's own button) even when you call the backend tool, and checks the result. Report the returned result; do not repeat the action.
 - Use REQUEST_CONFIRMATION only right after a CONFIRMATION_REQUIRED result; it describes exactly what will happen.
 - If the user asks to stop, pause or resume the current task, use INTERRUPT_OR_CANCEL with cancel_action.
 - If the request is outside the listed tools, or would need dropping/altering/truncating tables, changing permissions or running raw SQL, use UNSUPPORTED and say so honestly. Deleting rows is possible only through preview_data_change when the connection's access mode allows deletes; otherwise say the connection is not set to allow it.
@@ -141,6 +142,47 @@ def _compact_json(value: Any, limit: int) -> str:
     if len(text) > limit:
         text = text[:limit] + "…(truncated)"
     return text
+
+
+# Decision-critical keys first; long lists after, shortened before anything is cut.
+_CONTEXT_FIRST = ("task", "browser_present", "now", "user", "user_timezone", "credentials_captured", "model", "page",
+                  "pending_approvals", "data_hint")
+_CONTEXT_SHRINK = ("knowledge_documents", "data_autopilots", "recent_runs", "conversation_memory", "focused_schema",
+                   "automations", "connections")
+
+
+def _compact_context(ctx: Dict[str, Any], limit: int) -> str:
+    """
+    The runtime context within `limit` characters without losing what decides the turn: priority keys come first, and
+    when it is too long the longest lists are shortened (keeping their first items and a count of the rest).
+    """
+    ctx = json.loads(json.dumps(ctx, default=str))  # a copy: shortening must not change the request
+    ordered = {k: ctx[k] for k in _CONTEXT_FIRST if k in ctx}
+    ordered.update({k: v for k, v in ctx.items() if k not in ordered})
+
+    def size(v: Any) -> int:
+        return len(json.dumps(v, default=str, separators=(",", ":"), ensure_ascii=False))
+
+    for _ in range(12):
+        if size(ordered) <= limit:
+            break
+        shrunk = False
+        for key in _CONTEXT_SHRINK:
+            holder, field = ordered, key
+            if key == "focused_schema" and isinstance(ordered.get(key), dict):
+                holder, field = ordered[key], "tables"
+            items = holder.get(field) if isinstance(holder, dict) else None
+            if isinstance(items, list) and len(items) > 3:
+                keep = max(3, len(items) // 2)
+                more = len(items) - keep + int(holder.get(f"{field}_more", 0) or 0)
+                holder[field] = items[:keep]
+                holder[f"{field}_more"] = more
+                shrunk = True
+                if size(ordered) <= limit:
+                    break
+        if not shrunk:
+            break
+    return _compact_json(ordered, limit)
 
 
 _TYPE_ABBR = {"string": "str", "integer": "int", "number": "num", "boolean": "bool", "array": "list", "object": "obj"}
@@ -276,7 +318,7 @@ class AgentDecider:
             offered = [t.name for t in req.tool_schemas if t.available]
         # Stable text first (policy, portal map) so the model server can reuse its cached prompt prefix;
         # the tool list, chosen per request, comes last.
-        system = SYSTEM_POLICY
+        system = SYSTEM_POLICY.replace("{product}", req.product_name)
         if req.portal_map:
             lines = []
             for s in req.portal_map:
@@ -288,7 +330,7 @@ class AgentDecider:
         system += f"\n\nTOOLS:\n{_describe_tools(req, offered)}"
 
         sections = [
-            f"RUNTIME CONTEXT (live application state, authoritative):\n{_compact_json(req.runtime_context, MAX_CONTEXT_CHARS)}",
+            f"RUNTIME CONTEXT (live application state, authoritative; *_more counts items left out, use a list tool for them):\n{_compact_context(req.runtime_context, MAX_CONTEXT_CHARS)}",
             f"SLOTS (non-secret values already known for the current task):\n{_compact_json(req.slots, 1200)}",
         ]
         if req.conversation_summary:
@@ -408,7 +450,8 @@ class AgentDecider:
             while True:
                 try:
                     raw = provider.chat_structured(messages, schema, timeout=settings.AGENT_MODEL_TIMEOUT,
-                                                   deadline=deadline - 2)
+                                                   deadline=deadline - 2,
+                                                   **({"temperature": req.temperature} if req.temperature is not None else {}))
                 except ProviderError as e:
                     return done(success=False, error_category=e.category, error_message=str(e),
                                 model_used=model_used, repairs=repairs)

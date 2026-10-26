@@ -388,5 +388,72 @@ portal through these endpoints and response codes.
 **Internal AI service (X-Service-Token)**
 | Endpoint | Body | Result |
 | --- | --- | --- |
-| `POST /v1/rag/product-guides` | `guides: [{name (slug), title, content}]` | Replaces Orbit's published product guides and re-indexes: `{success, guides, vectors, chunks, version, indexed_at, embedding_backend, source}`. An empty list falls back to the built-in `docs/orbit-agent` guides. **422** for a name that is not a slug. |
+| `POST /v1/rag/product-guides` | `guides: [{name (slug), title, content}]` | Replaces Orbit's published product guides and re-indexes: `{success, guides, vectors, chunks, version, indexed_at, embedding_backend, source}`. An empty list leaves Orbit without product knowledge (there is no file fallback; the guides live in the platform database and Laravel publishes them). **422** for a name that is not a slug. |
 | `GET /v1/rag/product-guides/status` | | `{source: "published"|"bundled", guides, chunks, version, indexed_at, embedding_backend}` |
+
+## Portal, data, Orbit and admin additions (2026-10-22 / 2026-10-23)
+
+All endpoints below require `auth:sanctum` and act only on the signed-in customer's own records (another customer's id is **404**). Validation problems are **422** with `errors` keyed by field.
+
+### Dashboard, drafts, knowledge
+| Endpoint | Purpose |
+| :--- | :--- |
+| `GET /api/dashboard/next-up` | `{server_time, current, next, later, active_schedules, last_published}`: what runs now (with steps), the next scheduled run, or the last published item. |
+| `GET/PUT/DELETE /api/drafts/{kind}` | Server-side draft (`automation` or `manual_publish`): `PUT {payload, step}` (≤ 256 KB) returns `{saved_at}`. |
+| `POST /api/knowledge/suggest` | Knowledge documents that match a topic (pre-selected in the builder). |
+| `POST /api/automations/preview?stream=1` | Same preview as before; with `stream=1` the response is NDJSON progress lines (`{type:"progress", stage, message}`) then `{type:"result", ...}` or `{type:"error", ...}`. |
+| `POST /api/automations/preview-ai`, `POST /api/automations/field-assist` | Without `provider`, use the customer's "Writing content" model and its temperature. `field-assist` refuses `generate` without a topic and rewrite actions without text (**422**, no model call). |
+
+### Schema and table access
+| Endpoint | Purpose |
+| :--- | :--- |
+| `GET /api/connections/{id}/schema` | Adds per table `data_class` (`blocked`, `read_only`, `writable`) and `data_class_default`, and per column `sensitivity` (`secret`, `pii`, `standard`). |
+| `PUT /api/connections/{id}/tables/{table}/access` | `{access: "read_only" | "writable" | "default"}` sets the owner's override for one table on this connection. Credential/session tables are refused (**422**). Audited `CONNECTION_TABLE_ACCESS_CHANGED` with before/after. Returns `{table, data_class, data_class_default, message}`. |
+| `PUT /api/connections/{id}` | `data_policy.table_overrides.*` must be `read_only` or `writable`. |
+
+### Data Explorer and Data Manager (`/api/data`)
+| Endpoint | Purpose |
+| :--- | :--- |
+| `GET /connections/{id}/tables` | Tables with row estimate, protection class and `permissions {read, insert, update, delete, reason}` (a preview: nothing is attempted or logged). |
+| `GET /connections/{id}/tables/{table}/rows` | `page, per_page (≤ admin limit), sort, dir, search, filters[col], reveal`. Secret columns never returned; personal data masked unless `reveal=1` (audited). Linked values come back as `labels`. |
+| `GET /connections/{id}/tables/{table}/links/{column}` | Rows of the linked table (id + label) for pickers, with `q` search. |
+| `POST .../preview-insert`, `.../preview-update`, `.../preview-delete` | Validated preview (every problem at once, per field). Returns a change request id, the rows or before → after diff, delete impact and the phrase to type. Nothing is written. |
+| `POST .../sample-rows?stream=1` | AI sample rows from the "Writing content" model; only rows that pass every check are proposed (NDJSON progress when streamed). |
+| `POST /changes/{id}/confirm` | `{typed_phrase}` (deletes only). Writes the previewed change in a transaction, pinned to the previewed keys. |
+| `POST /changes/{id}/cancel`, `POST /changes/{id}/undo` | Cancel a preview; undo an executed change (inserts within a day). |
+| `GET .../history` | Changes made from the Data page. |
+| `GET/POST /api/data/autopilots`, `PUT/DELETE /api/data/autopilots/{id}`, `POST /api/data/autopilots/{id}/run` | Data autopilot schedules (per-customer limit; pauses after 3 failed runs). |
+
+### Executions and approvals
+| Endpoint | Purpose |
+| :--- | :--- |
+| `GET /api/executions` | Adds `summary` (runs per status for the same automation filter). `pageSize` is capped at 100. |
+| `GET /api/executions/{id}` | Adds `ai_usage {calls, prompt_tokens, completion_tokens, models[]}`. |
+| `GET /api/approvals` | Each pending version includes `execution.versions` (no content): earlier versions with status and review notes. |
+| `POST /api/approvals/{id}/portal-approve`, `.../portal-reject` | Now audited (`VERSION_APPROVED` / `VERSION_REJECTED`, with edited fields and notes). |
+
+### Audit log
+| Endpoint | Purpose |
+| :--- | :--- |
+| `GET /api/audit-logs` | `category` (`connections`, `automations`, `approvals`, `data`, `ai`, `account`, `orbit`), `search`, `from`, `to`, `page`. Update entries carry `metadata.changes {field: {from, to}}` (secrets stored as "(hidden)", personal data masked). |
+| `GET /api/audit-logs/orbit` | Each Orbit tool call: the request it served, tool, redacted arguments, outcome, `changed_something`, `verified`, duration. |
+| `GET /api/audit-logs/export` | CSV of the filtered log (≤ 10,000 rows, spreadsheet-formula guard; the export itself is audited). |
+
+### Account settings (`/api/profile`)
+| Endpoint | Purpose |
+| :--- | :--- |
+| `GET /api/profile` | Profile, workspace counts, signed-in sessions (`current` marks this one), password minimum. |
+| `PUT /api/profile` | `{name, email, timezone|null, current_password}`; changing the email needs the current password; `timezone` null means "follow the browser". |
+| `PUT /api/profile/password` | `{current_password, password, password_confirmation, sign_out_others}`; other sessions are signed out by default. |
+| `DELETE /api/profile/sessions/{id}`, `DELETE /api/profile/sessions` | Sign out one other session, or every other one (never the current one this way). |
+| `GET /api/profile/usage?days=7|30|90` | The customer's AI calls and tokens by model and by purpose. |
+| `GET /api/auth/me` | Now includes `timezone`. |
+
+### AI service
+| Endpoint | Purpose |
+| :--- | :--- |
+| Every response with model calls | `X-AI-Usage` header (calls and tokens per provider/model); Laravel stores it in `ai_usage_events`. |
+| `POST /v1/ai/readiness` | Four real checks of a model (JSON, tool calling, query plans, slot correction). |
+| `POST /v1/ai/sample-rows` | Rows for a table from column rules (batches of 8, unique values avoided, links as enums of real ids). |
+| `POST /v1/rag/product-guides`, `GET /v1/rag/product-guides/status` | Guides are indexed straight from the request (no files kept); status `source` is `published` or `none`. `/v1/rag/ingest-corpus` was removed. |
+

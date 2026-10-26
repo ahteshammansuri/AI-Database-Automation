@@ -35,10 +35,8 @@ class ModelRolesApiTest extends TestCase
         ]);
 
         $roles = collect($response->json('roles'))->pluck('role')->toArray();
-        $this->assertContains('planner', $roles);
-        $this->assertContains('generator', $roles);
-        $this->assertContains('classifier', $roles);
-        $this->assertContains('summarizer', $roles);
+        // Only jobs the product really gives to a model are offered.
+        $this->assertSame(['planner', 'generator'], $roles);
     }
 
     public function test_user_can_update_model_role(): void
@@ -108,9 +106,14 @@ class ModelRolesApiTest extends TestCase
     {
         $user = User::factory()->create();
 
+        \Illuminate\Support\Facades\Http::fake(['*/v1/ai/health' => \Illuminate\Support\Facades\Http::response(['provider' => 'ollama', 'available' => true, 'latency_ms' => 12.5, 'models' => ['qwen2.5:3b'], 'message' => 'Ready'])]);
+
+        // The placeholder generator is not a provider customers can choose.
+        $this->actingAs($user)->postJson('/api/model-roles/probe', ['provider' => 'mock'])->assertStatus(422);
+
         $response = $this->actingAs($user)->postJson('/api/model-roles/probe', [
-            'provider' => 'mock',
-            'model_name' => 'mock-llama3-synthetic',
+            'provider' => 'ollama',
+            'model_name' => 'qwen2.5:3b',
         ]);
 
         $response->assertStatus(200);

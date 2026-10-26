@@ -4,7 +4,6 @@ namespace App\Filament\Resources\OrbitKnowledge\Pages;
 
 use App\Filament\Resources\OrbitKnowledge\OrbitKnowledgeResource;
 use App\Filament\Resources\OrbitKnowledge\Widgets\OrbitKnowledgeStatus;
-use Filament\Actions\ActionGroup;
 use Filament\Actions\CreateAction;
 use Filament\Resources\Pages\ListRecords;
 
@@ -14,7 +13,7 @@ class ListOrbitKnowledge extends ListRecords
 
     public function getSubheading(): ?string
     {
-        return 'What Orbit knows about the website. Edits stay drafts until you publish them to Orbit.';
+        return 'What Orbit knows about the website, stored here in the database. Edits stay drafts until you publish them to Orbit. Write {brand} where the product name belongs; it is replaced with the brand name from Settings.';
     }
 
     protected function getHeaderWidgets(): array
@@ -27,7 +26,6 @@ class ListOrbitKnowledge extends ListRecords
         return [
             OrbitKnowledgeResource::publishAction(),
             CreateAction::make()->label('New guide')->color('gray'),
-            ActionGroup::make([OrbitKnowledgeResource::restoreAction()]),
         ];
     }
 }

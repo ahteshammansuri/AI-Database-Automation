@@ -26,6 +26,8 @@ use Carbon\Carbon;
 
 class AutomationController extends Controller
 {
+    use \App\Http\Controllers\Concerns\StreamsProgress;
+
     public function __construct(
         protected DatabaseSafetyService $safetyService,
         protected SafeDatabaseExecutor $executor,
@@ -244,6 +246,7 @@ class AutomationController extends Controller
         // The connection and table of an existing automation never change; create a new one instead.
         unset($validated['connection_id'], $validated['target_table']);
         $wasActive = (bool) $automation->is_active;
+        $before = $automation->only(array_keys($validated));
         $automation->fill($validated);
 
         if (isset($validated['field_mappings']) || isset($validated['operation_mode'])) {
@@ -263,8 +266,11 @@ class AutomationController extends Controller
         }
         $automation->save();
 
+        $changes = AuditLog::changes($before, $automation->only(array_keys($validated)));
         AuditLog::log($request->user()->id, 'AUTOMATION_UPDATED', 'Automation', (string) $id, [
-            'fields' => array_keys($validated),
+            'name' => $automation->name,
+            'fields' => array_keys($changes),
+            'changes' => $changes,
             'schedule_changed' => $scheduleChanged,
         ]);
 
@@ -357,8 +363,9 @@ class AutomationController extends Controller
      * Live preview of a draft (unsaved) configuration: the same pipeline a scheduled run uses,
      * including images and the read-only write plan. Never writes to the customer database.
      */
-    public function preview(Request $request, ContentPipeline $pipeline): JsonResponse
+    public function preview(Request $request, ContentPipeline $pipeline): \Symfony\Component\HttpFoundation\Response
     {
+        \App\Services\AiUsage::attribute($request->user()->id, 'preview');
         $request->merge(['name' => $request->input('name') ?: 'Preview']);
         [$errors, $validated] = $this->validateConfiguration($request);
         $connection = DbConnection::where('user_id', $request->user()->id)->where('id', $validated['connection_id'])->firstOrFail();
@@ -393,38 +400,42 @@ class AutomationController extends Controller
         $draft->setRelation('connection', $connection);
 
         $next = empty($scheduleErrors) ? $this->schedule->nextOccurrence($draft) : null;
-        $events = [];
-        try {
-            $result = $pipeline->run(
-                $draft,
-                [
-                    'publication_time' => $next ? $next['publication_at'] : now(),
-                    'include_images' => $request->boolean('include_images', true),
-                ],
-                function (string $stage, string $message, ?array $meta = null) use (&$events) {
-                    $events[] = ['stage' => $stage, 'message' => $message, 'timestamp' => now()->toIso8601String()];
-                }
-            );
-        } catch (\Throwable $e) {
-            return response()->json([
-                'message' => $e->getMessage(),
+        $userId = $request->user()->id;
+        $includeImages = $request->boolean('include_images', true);
+
+        // Runs the same steps as a scheduled run; $emit receives each step as it happens.
+        $runPreview = function (callable $emit) use ($pipeline, $draft, $next, $includeImages, $scheduleErrors, $userId): array {
+            $events = [];
+            try {
+                $result = $pipeline->run(
+                    $draft,
+                    ['publication_time' => $next ? $next['publication_at'] : now(), 'include_images' => $includeImages],
+                    function (string $stage, string $message, ?array $meta = null) use (&$events, $emit) {
+                        $event = ['stage' => $stage, 'message' => $message, 'timestamp' => now()->toIso8601String()];
+                        $events[] = $event;
+                        $emit($event);
+                    }
+                );
+            } catch (\Throwable $e) {
+                return [422, ['message' => DbConnection::explainFailure($e, $draft->connection), 'events' => $events]];
+            }
+            AuditLog::log($userId, 'AUTOMATION_PREVIEW_GENERATED', 'Automation', null, [
+                'table' => $draft->target_table,
+                'images' => count($result['meta']['media'] ?? []),
+            ]);
+            return [200, [
+                'success' => true,
+                'payload' => $result['payload'],
+                'meta' => $result['meta'],
                 'events' => $events,
-            ], 422);
-        }
+                'schedule' => empty($scheduleErrors) ? $this->schedule->summary($draft) : null,
+                'schedule_errors' => $scheduleErrors,
+            ]];
+        };
 
-        AuditLog::log($request->user()->id, 'AUTOMATION_PREVIEW_GENERATED', 'Automation', null, [
-            'table' => $draft->target_table,
-            'images' => count($result['meta']['media'] ?? []),
-        ]);
-
-        return response()->json([
-            'success' => true,
-            'payload' => $result['payload'],
-            'meta' => $result['meta'],
-            'events' => $events,
-            'schedule' => empty($scheduleErrors) ? $this->schedule->summary($draft) : null,
-            'schedule_errors' => $scheduleErrors,
-        ]);
+        return $this->respondWithProgress($request->boolean('stream'), fn (callable $emit) => $runPreview(
+            fn (array $event) => $event['stage'] === 'STARTED' ? null : $emit($event['stage'], $event['message'])
+        ));
     }
 
     /**
@@ -728,6 +739,7 @@ class AutomationController extends Controller
      */
     public function previewAi(Request $request, \App\Services\AiServiceClient $aiClient)
     {
+        \App\Services\AiUsage::attribute($request->user()->id, 'preview');
         $validated = $request->validate([
             'prompt' => 'nullable|string|max:4000',
             'topic' => 'nullable|string|max:4000',
@@ -744,7 +756,10 @@ class AutomationController extends Controller
             return response()->json(['success' => false, 'message' => 'Describe what to write about first.'], 422);
         }
         $fields = array_values(array_filter($validated['fields'] ?? ['title', 'content'], fn($f) => is_string($f) && !\App\Services\Data\ColumnClassifier::isSecret($f)));
-        $provider = $validated['provider'] ?? 'ollama';
+        // Without an explicit choice, write with the customer's "Writing content" model (same as automations).
+        $chosen = \App\Services\Agent\ModelSelector::for($request->user(), \App\Models\ModelRole::ROLE_GENERATOR);
+        $provider = $validated['provider'] ?? $chosen['provider'];
+        $model = $validated['model'] ?? ($provider === $chosen['provider'] ? $chosen['model'] : null);
         $apiKey = \App\Models\AiProvider::where('user_id', $request->user()->id)->where('provider_type', $provider)->first()?->encrypted_api_key;
 
         $contextPassages = [];
@@ -762,8 +777,9 @@ class AutomationController extends Controller
         try {
             $res = $aiClient->generateContent([
                 'provider' => $provider,
-                'model' => $validated['model'] ?? null,
+                'model' => $model,
                 'api_key' => $apiKey,
+                'temperature' => $provider === $chosen['provider'] ? $chosen['temperature'] : null,
                 'prompt' => "Topic and direction: {$topic}\nTone: " . ($validated['tone'] ?? 'Professional and engaging'),
                 'target_table' => $validated['target_table'] ?? 'posts',
                 'required_fields' => $fields,
@@ -789,8 +805,8 @@ class AutomationController extends Controller
         $validated = $request->validate([
             'connection_id' => 'required|integer',
             'prompt' => 'required|string|max:1000',
-            'provider' => 'nullable|string',
-            'model' => 'nullable|string',
+            'provider' => 'nullable|string|in:ollama,openai,gemini,anthropic',
+            'model' => 'nullable|string|max:120',
         ]);
 
         $connection = DbConnection::where('user_id', $request->user()->id)
@@ -799,12 +815,22 @@ class AutomationController extends Controller
 
         $schema = $schemaService->introspectSchema($connection, false);
 
+        // The customer's own planning model (never a placeholder generator), or the provider they asked for.
+        $chosen = \App\Services\Agent\ModelSelector::for($request->user());
+        if (!empty($validated['provider']) && $validated['provider'] !== $chosen['provider']) {
+            $chosen = [
+                'provider' => $validated['provider'],
+                'model' => null,
+                'api_key' => \App\Models\AiProvider::where('user_id', $request->user()->id)->where('provider_type', $validated['provider'])->first()?->encrypted_api_key,
+            ];
+        }
         try {
             $proposed = $aiClient->proposeAutomation(
                 $validated['prompt'],
                 $schema['tables'] ?? [],
-                $validated['provider'] ?? 'mock',
-                $validated['model'] ?? null
+                $chosen['provider'],
+                $validated['model'] ?? $chosen['model'],
+                $chosen['api_key']
             );
 
             $rawPlan = $proposed['plan'] ?? $proposed;
@@ -872,6 +898,7 @@ class AutomationController extends Controller
      */
     public function fieldAssist(Request $request, \App\Services\AiServiceClient $aiClient)
     {
+        \App\Services\AiUsage::attribute($request->user()->id, 'field_assist');
         $validated = $request->validate([
             'field_name' => 'required|string|max:100',
             'action' => 'required|string|in:generate,improve,shorten,expand,change_tone,regenerate',
@@ -886,12 +913,28 @@ class AutomationController extends Controller
         $fieldName = $validated['field_name'];
         $action = $validated['action'];
         $currentValue = $validated['current_value'] ?? '';
-        $topic = !empty($validated['topic']) ? $validated['topic'] : 'Enterprise Database Automation';
+        if (trim($currentValue) === '' && !in_array($action, ['generate', 'regenerate'], true)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'There is no text in this field yet. Write something first, or use Generate.',
+                'errors' => ['current_value' => ['Write something first, or use Generate.']],
+            ], 422);
+        }
+        $topic = trim((string) ($validated['topic'] ?? ''));
+        if ($topic === '' && in_array($action, ['generate', 'regenerate'], true)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Write a title or a topic first, so the AI knows what this field should be about.',
+                'errors' => ['topic' => ['Write a title or a topic first.']],
+            ], 422);
+        }
         $tone = !empty($validated['tone']) ? $validated['tone'] : 'Professional and authoritative';
         $targetTable = !empty($validated['target_table']) ? $validated['target_table'] : 'posts';
 
-        $provider = $validated['provider'] ?? 'ollama';
-        $model = $validated['model'] ?? null;
+        // Without an explicit choice, use the customer's "Writing content" model (same as automations).
+        $chosen = \App\Services\Agent\ModelSelector::for($request->user(), \App\Models\ModelRole::ROLE_GENERATOR);
+        $provider = $validated['provider'] ?? $chosen['provider'];
+        $model = $validated['model'] ?? ($provider === $chosen['provider'] ? $chosen['model'] : null);
 
         $userProvider = \App\Models\AiProvider::where('user_id', $request->user()->id)
             ->where('provider_type', $provider)
@@ -911,6 +954,7 @@ class AutomationController extends Controller
                 'provider' => $provider,
                 'model' => $model,
                 'api_key' => $apiKey,
+                'temperature' => $provider === $chosen['provider'] ? $chosen['temperature'] : null,
                 'prompt' => $prompt,
                 'target_table' => $targetTable,
                 'required_fields' => [$fieldName],

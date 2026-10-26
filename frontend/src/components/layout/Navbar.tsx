@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { AnimatePresence, motion } from "framer-motion";
-import { ChevronDown, ChevronRight, Home, LogOut, Menu, Plus, RefreshCw, ShieldCheck } from "lucide-react";
+import { ChevronDown, ChevronRight, Home, LogOut, UserCog, Menu, Plus, RefreshCw, ShieldCheck } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
 import { useLiveEvents } from "../../context/LiveEventsContext";
 import { api } from "../../services/api";
@@ -153,6 +153,14 @@ export const Navbar: React.FC<NavbarProps> = ({ onRefresh, isRefreshing = false,
                     <div className="truncate text-[12px] text-slate-500">{user.email}</div>
                   </div>
                   <div className="p-1.5">
+                    <Link
+                      to="/account"
+                      role="menuitem"
+                      onClick={() => setAccountOpen(false)}
+                      className="flex items-center gap-2.5 rounded-xl px-3 py-2 text-[13px] font-medium text-slate-700 hover:bg-slate-50"
+                    >
+                      <UserCog className="h-4 w-4 text-slate-400" /> Account settings
+                    </Link>
                     <Link
                       to="/security"
                       role="menuitem"

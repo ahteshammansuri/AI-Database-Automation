@@ -179,15 +179,17 @@ class ContextPackageService
             $name = $col['name'] ?? '';
             if (!$name) continue;
 
+            // Schema snapshots name these is_nullable / default / is_primary_key; older profiles used the short names.
+            $nullable = (bool) ($col['nullable'] ?? $col['is_nullable'] ?? true);
             $constraints[$name] = [
                 'role'         => $roleMap[$name] ?? 'unknown',
                 'db_type'      => $col['db_type'] ?? $col['type'] ?? 'varchar',
-                'nullable'     => $col['nullable'] ?? true,
-                'required'     => !($col['nullable'] ?? true) && !isset($col['default_value']),
+                'nullable'     => $nullable,
+                'required'     => !$nullable && !isset($col['default_value']) && !isset($col['default']),
                 'max_length'   => $col['max_length'] ?? null,
                 'enum_values'  => $col['enum_values'] ?? [],
                 'is_unique'    => $col['is_unique'] ?? false,
-                'is_pk'        => $col['is_pk'] ?? false,
+                'is_pk'        => (bool) ($col['is_pk'] ?? $col['is_primary_key'] ?? false),
             ];
         }
 

@@ -118,6 +118,20 @@ class AutomationLeadTimeAndFieldAssistTest extends TestCase
         $this->assertNotEmpty($response->json('suggested_value'));
     }
 
+    public function test_field_assist_needs_a_topic_to_generate_and_text_to_rewrite()
+    {
+        $user = User::factory()->create();
+
+        // No invented topic: generating with nothing to go on is refused before any model call.
+        $this->actingAs($user)->postJson('/api/automations/field-assist', [
+            'field_name' => 'excerpt', 'action' => 'generate', 'target_table' => 'posts',
+        ])->assertStatus(422)->assertJsonValidationErrors(['topic']);
+
+        $this->postJson('/api/automations/field-assist', [
+            'field_name' => 'excerpt', 'action' => 'shorten', 'current_value' => '   ', 'topic' => 'Replication',
+        ])->assertStatus(422)->assertJsonValidationErrors(['current_value']);
+    }
+
     public function test_knowledge_semantic_query_endpoint()
     {
         \Illuminate\Support\Facades\Http::fake([

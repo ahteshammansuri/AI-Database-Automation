@@ -19,6 +19,12 @@ class LiveSchemaService
         return $this->getSchema($connection, $forceRefresh);
     }
 
+    /** Drop the cached catalog, e.g. after the owner changed a table's access on this connection. */
+    public function forget(DbConnection $connection): void
+    {
+        Cache::forget("live_schema:{$connection->id}");
+    }
+
     public function getSchema(DbConnection $connection, bool $forceRefresh = false): array
     {
         $cacheKey = "live_schema:{$connection->id}";

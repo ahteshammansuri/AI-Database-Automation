@@ -102,6 +102,9 @@ final class PlatformSettings
                     $rules[self::field($key) . ".*.{$name}"] = ['required', 'string', 'max:' . ($field['max'] ?? 1000)];
                 }
             }
+            if ($def['type'] === 'tags') {
+                $rules[self::field($key) . '.*'] = ['required', 'string', 'max:' . ($def['item_max'] ?? 120), 'regex:/^[A-Za-z0-9._:\/-]+$/'];
+            }
         }
         $validator = Validator::make($data, $rules, [], self::attributes(array_keys($input)));
         self::crossChecks($validator, $input);
@@ -222,6 +225,9 @@ final class PlatformSettings
             foreach ($def['also'] as $alias) {
                 config([$alias => $value]);
             }
+            foreach ($def['map'] ?? [] as $target => $convert) {
+                config([$target => $convert($value)]);
+            }
         }
     }
 
@@ -256,6 +262,7 @@ final class PlatformSettings
                 fn ($row) => array_intersect_key((array) $row, $def['fields']),
                 is_array($value) ? $value : []
             )),
+            'tags' => array_values(array_unique(array_filter(array_map(fn ($v) => trim((string) $v), is_array($value) ? $value : []), fn ($v) => $v !== ''))),
             'url', 'email' => ($value === null || $value === '') ? null : trim((string) $value),
             default => $value === null ? (($def['nullable'] ?? false) ? null : '') : trim((string) $value),
         };
@@ -271,6 +278,7 @@ final class PlatformSettings
             'url' => [$required, 'url:http,https', 'max:255'],
             'select' => ['required', 'in:' . implode(',', array_keys($def['options']))],
             'list' => ['nullable', 'array', 'max:' . ($def['max_items'] ?? 50)],
+            'tags' => [($def['nullable'] ?? false) ? 'nullable' : 'required', 'array', 'min:' . (($def['nullable'] ?? false) ? 0 : 1), 'max:' . ($def['max_items'] ?? 30)],
             'text' => [$def['group'] === 'content' ? 'nullable' : $required, 'string', 'max:' . ($def['max'] ?? 2000)],
             default => [$def['group'] === 'content' ? 'nullable' : $required, 'string', 'max:' . ($def['max'] ?? 255)],
         };

@@ -34,7 +34,8 @@ class ModelRoleController extends Controller
                 'description' => $meta['description'],
                 'provider' => $saved->provider ?? $meta['default_provider'],
                 'model_name' => $saved->model_name ?? $meta['default_model'],
-                'temperature' => $saved->temperature ?? 0.70,
+                'temperature' => $saved->temperature ?? ($roleKey === ModelRole::ROLE_PLANNER ? 0.2 : 0.7),
+                'temperature_hint' => $meta['temperature_hint'],
                 'max_tokens' => $saved->max_tokens ?? null,
                 'is_active' => $saved->is_active ?? true,
                 'recommended_models' => $meta['recommended'],
@@ -45,11 +46,10 @@ class ModelRoleController extends Controller
 
         // Active model catalog per provider
         $providerModels = [
-            'gemini' => ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-3.8-flash', 'gemini-flash-latest'],
-            'openai' => ['gpt-4o-mini', 'gpt-4o', 'gpt-4-turbo'],
-            'anthropic' => ['claude-3-5-sonnet', 'claude-3-5-haiku-latest'],
-            'mock' => ['mock-llama3-synthetic', 'mock-mistral-synthetic'],
-            'ollama' => ['llama3.2:1b', 'qwen2.5:3b', 'llama3:latest', 'mistral:7b'],
+            'gemini' => (array) config('ai_models.gemini', []),
+            'openai' => (array) config('ai_models.openai', []),
+            'anthropic' => (array) config('ai_models.anthropic', []),
+            'ollama' => (array) config('ai_models.ollama_fallback', []),
         ];
 
         try {
@@ -80,15 +80,17 @@ class ModelRoleController extends Controller
     public function update(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'role' => 'required|string|in:planner,generator,classifier,summarizer',
-            'provider' => 'required|string|in:ollama,mock,openai,gemini,anthropic',
+            'role' => 'required|string|in:planner,generator',
+            'provider' => 'required|string|in:ollama,openai,gemini,anthropic',
             'model_name' => 'required|string|max:64',
-            'temperature' => 'nullable|numeric|min:0|max:2',
+            'temperature' => 'nullable|numeric|min:0|max:' . ($request->input('role') === ModelRole::ROLE_PLANNER ? '1' : '1.5'),
             'max_tokens' => 'nullable|integer|min:1|max:32000',
             'is_active' => 'nullable|boolean',
         ]);
 
         $userId = $request->user()->id;
+        $tracked = ['provider', 'model_name', 'temperature', 'max_tokens', 'is_active'];
+        $before = ModelRole::where('user_id', $userId)->where('role', $validated['role'])->first()?->only($tracked) ?? [];
 
         $role = ModelRole::updateOrCreate(
             [
@@ -98,7 +100,7 @@ class ModelRoleController extends Controller
             [
                 'provider' => $validated['provider'],
                 'model_name' => $validated['model_name'],
-                'temperature' => $validated['temperature'] ?? 0.70,
+                'temperature' => $validated['temperature'] ?? ($validated['role'] === ModelRole::ROLE_PLANNER ? 0.2 : 0.7),
                 'max_tokens' => $validated['max_tokens'] ?? null,
                 'is_active' => $validated['is_active'] ?? true,
             ]
@@ -113,6 +115,7 @@ class ModelRoleController extends Controller
                 'role' => $role->role,
                 'provider' => $role->provider,
                 'model_name' => $role->model_name,
+                'changes' => AuditLog::changes($before, $role->only($tracked)),
             ]
         );
 
@@ -129,7 +132,7 @@ class ModelRoleController extends Controller
     public function probe(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'provider' => 'required|string|in:ollama,mock,openai,gemini,anthropic',
+            'provider' => 'required|string|in:ollama,openai,gemini,anthropic',
             'model_name' => 'nullable|string|max:64',
         ]);
 
@@ -164,72 +167,69 @@ class ModelRoleController extends Controller
     }
 
     /**
-     * Model Readiness Test (ADR-010, Section 8):
-     * Evaluates tool-calling, JSON conformance, NL-to-QueryPlan accuracy, and correction handling.
+     * Model readiness: four real tasks run against the model by the AI service (exact JSON, choosing the right
+     * action, turning a question into a query plan, applying a correction). Each result is what the model did.
      */
     public function readinessTest(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'provider' => 'required|string|in:ollama,mock,openai,gemini,anthropic',
+            'provider' => 'required|string|in:ollama,openai,gemini,anthropic',
             'model_name' => 'nullable|string|max:64',
         ]);
 
         $provider = $validated['provider'];
-        $model = $validated['model_name'] ?? 'llama3.2';
+        $model = $validated['model_name'] ?? null;
+        $apiKey = AiProvider::where('user_id', $request->user()->id)->where('provider_type', $provider)->first()?->encrypted_api_key;
 
-        $userProvider = AiProvider::where('user_id', $request->user()->id)
-            ->where('provider_type', $provider)
-            ->first();
-        $apiKey = $userProvider?->encrypted_api_key;
-
-        $tests = [
-            'json_conformance' => ['passed' => true, 'score' => 25, 'details' => 'Outputs valid JSON conforming to strict schema.'],
-            'query_plan_accuracy' => ['passed' => true, 'score' => 25, 'details' => 'Mapped natural language count query to valid QueryPlan.'],
-            'slot_correction' => ['passed' => true, 'score' => 25, 'details' => 'Correctly extracted slot patch from mid-task user utterance.'],
-            'tool_calling_safety' => ['passed' => true, 'score' => 25, 'details' => 'Adheres to tool arguments and obeys safety boundaries.'],
-        ];
-
-        // Probe provider responsiveness
         $health = $this->aiClient->checkHealth($provider, $model, $apiKey);
-        $isAvailable = (bool) ($health['available'] ?? false);
-
-        if (!$isAvailable && $provider !== 'mock') {
+        if (!($health['available'] ?? false)) {
             return response()->json([
                 'success' => false,
                 'provider' => $provider,
                 'model_name' => $model,
                 'overall_score' => 0,
                 'status' => 'offline',
-                'message' => "Model '{$model}' on provider '{$provider}' is offline or unreachable.",
-                'recommended_models' => ['qwen2.5:7b', 'llama3.1:8b', 'mistral:7b'],
-                'tests' => array_map(fn($t) => array_merge($t, ['passed' => false, 'score' => 0]), $tests),
+                'message' => $health['message'] ?? "The model '{$model}' on {$provider} cannot be reached.",
+                'tests' => [],
             ]);
         }
 
-        $overallScore = 100;
-        $status = 'ready_for_agent';
-        $recommendation = null;
-
-        // If using small or weak models (like 1b or 0.5b), lower score and suggest better model
-        if (preg_match('/(?:1b|0\.5b|tiny)/i', $model)) {
-            $overallScore = 55;
-            $status = 'needs_better_model';
-            $tests['query_plan_accuracy']['passed'] = false;
-            $tests['query_plan_accuracy']['score'] = 10;
-            $tests['slot_correction']['score'] = 15;
-            $recommendation = "Model '{$model}' is under 3B parameters and may produce inconsistent QueryPlans. We recommend upgrading to 'qwen2.5:7b' or 'llama3.1:8b' for agent tasks.";
+        try {
+            $report = $this->aiClient->modelReadiness($provider, $model, $apiKey, (int) config('orbit.readiness_budget_seconds', 240));
+        } catch (\Throwable $e) {
+            return response()->json(['success' => false, 'status' => 'error', 'message' => 'The readiness test could not run: ' . $e->getMessage(), 'tests' => []], 502);
         }
+        if (!($report['success'] ?? false)) {
+            return response()->json(['success' => false, 'status' => 'error', 'message' => $report['error'] ?? 'The readiness test could not run.', 'tests' => []], 422);
+        }
+
+        $tests = [];
+        foreach ($report['checks'] as $c) {
+            $tests[$c['key']] = [
+                'label' => $c['label'],
+                'passed' => (bool) $c['passed'],
+                'score' => $c['passed'] ? (int) round(100 / max(1, $report['total'])) : 0,
+                'details' => $c['details'],
+                'seconds' => $c['seconds'],
+            ];
+        }
+        $score = (int) $report['score'];
+        $status = $score === 100 ? 'ready_for_agent' : ($score >= 50 ? 'needs_better_model' : 'not_ready');
+
+        AuditLog::log($request->user()->id, 'MODEL_READINESS_TESTED', 'ModelRole', null, [
+            'provider' => $provider, 'model_name' => $model, 'score' => $score,
+        ]);
 
         return response()->json([
             'success' => true,
             'provider' => $provider,
-            'model_name' => $model,
-            'overall_score' => $overallScore,
+            'model_name' => $report['model'] ?? $model,
+            'overall_score' => $score,
             'status' => $status,
-            'recommendation' => $recommendation,
-            'latency_ms' => (float) ($health['latency_ms'] ?? 15.0),
+            'recommendation' => $status === 'ready_for_agent' ? null
+                : "This model got {$report['passed']} of {$report['total']} checks right. Orbit may make mistakes with it; a larger model (for example qwen2.5:7b or a cloud model) is more reliable.",
+            'latency_ms' => (float) ($report['seconds'] ?? 0) * 1000,
             'tests' => $tests,
         ]);
     }
 }
-

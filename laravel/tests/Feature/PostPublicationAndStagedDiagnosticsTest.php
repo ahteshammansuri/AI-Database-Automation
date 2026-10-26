@@ -223,7 +223,8 @@ class PostPublicationAndStagedDiagnosticsTest extends TestCase
                     '*' => ['label', 'published', 'failed', 'total'],
                 ],
             ],
-            'worker_health' => ['status', 'is_healthy', 'active_workers'],
+            // Real liveness from the default queue's heartbeat (no invented worker count).
+            'worker_health' => ['status', 'is_healthy', 'waiting_jobs', 'running_jobs'],
             'operational_feed',
         ]);
     }

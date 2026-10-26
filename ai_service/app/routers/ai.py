@@ -1,7 +1,9 @@
 import time
 import re
 import numpy as np
+from typing import Optional
 from fastapi import APIRouter, HTTPException, Depends
+from pydantic import BaseModel, Field
 from ai_service.app.schemas.ai import (
     GenerateRequest,
     GenerateResponse,
@@ -69,6 +71,7 @@ def generate_content(req: GenerateRequest):
             field_contract=field_contract,
             field_specs=specs or None,
             max_output_tokens=budget,
+            temperature=req.temperature,
         )
 
         missing: list = []
@@ -93,6 +96,7 @@ def generate_content(req: GenerateRequest):
                         field_contract=contract.build_field_contract(repair_specs, req.length or "medium"),
                         field_specs=repair_specs,
                         max_output_tokens=contract.token_budget(repair_specs, req.length or "medium"),
+                        temperature=req.temperature,
                     )
                     for k, v in contract.normalize_values(repaired, repair_specs).items():
                         if k in missing:
@@ -462,3 +466,52 @@ def propose_automation_plan(req: ProposeAutomationRequest):
         timeout_policy="AUTO_PUBLISH_LATEST",
         explanation=explanation
     )
+
+
+class ReadinessRequest(BaseModel):
+    provider: str
+    model: Optional[str] = None
+    api_key: Optional[str] = None
+    budget_seconds: float = Field(240.0, ge=30.0, le=900.0)
+
+
+@router.post("/readiness")
+def model_readiness(req: ReadinessRequest):
+    """Runs four real tasks against the model (JSON, action choice, query plan, correction) and reports each."""
+    from ai_service.app.providers.base import ProviderError
+    from ai_service.app.services import model_readiness as readiness
+
+    try:
+        provider = AIProviderFactory.get_provider(req.provider, req.model, req.api_key)
+    except ProviderError as e:
+        return {"success": False, "error": str(e)}
+    report = readiness.run(provider, req.budget_seconds)
+    return {"success": True, "provider": req.provider, "model": req.model or getattr(provider, "model", None) or getattr(provider, "model_name", None), **report}
+
+
+class SampleRowsRequest(BaseModel):
+    provider: str
+    model: Optional[str] = None
+    api_key: Optional[str] = None
+    table: str = Field(..., pattern=r"^[A-Za-z0-9_]{1,64}$")
+    columns: list = Field(..., min_length=1, max_length=120)
+    count: int = Field(5, ge=1, le=100)
+    instructions: str = Field("", max_length=1000)
+    existing_unique: dict = Field(default_factory=dict)
+    budget_seconds: float = Field(240.0, ge=20.0, le=900.0)
+    temperature: Optional[float] = Field(None, ge=0.0, le=1.5)
+
+
+@router.post("/sample-rows")
+def sample_rows(req: SampleRowsRequest):
+    """Realistic sample rows for one table from its column rules; Laravel validates every value before writing."""
+    from ai_service.app.providers.base import ProviderError
+    from ai_service.app.services import sample_rows as samples
+
+    try:
+        provider = AIProviderFactory.get_provider(req.provider, req.model, req.api_key)
+    except ProviderError as e:
+        return {"success": False, "error": str(e), "rows": []}
+    result = samples.generate(provider, req.table, req.columns, req.count, req.instructions.strip(),
+                              req.existing_unique, req.budget_seconds, req.temperature)
+    return {"success": bool(result["rows"]), "error": None if result["rows"] else ("; ".join(result["problems"]) or "The model returned no rows."), **result}

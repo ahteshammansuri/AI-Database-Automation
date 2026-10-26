@@ -1973,6 +1973,13 @@ class AgentToolRegistry
         }
 
         $action = strtolower($args['action'] ?? 'cancel');
+        // Same rules as the portal: a finished run keeps its real outcome.
+        if ($execution->status === 'PUBLISHED' || ($action === 'pause' && in_array($execution->status, ['FAILED', 'CANCELLED', 'SKIPPED', 'MISSED', 'REJECTED'], true))) {
+            return ['success' => false, 'error' => "Run #{$execution->id} is {$execution->status}; it cannot be " . ($action === 'pause' ? 'paused' : 'cancelled') . '.'];
+        }
+        if ($action !== 'pause' && in_array($execution->status, ['CANCELLED', 'FAILED', 'SKIPPED', 'MISSED', 'REJECTED'], true)) {
+            return ['success' => true, 'execution_id' => $execution->id, 'status' => $execution->status, 'message' => "Run #{$execution->id} had already stopped ({$execution->status}); nothing changed."];
+        }
         if ($action === 'pause') {
             $execution->update(['status' => 'PAUSED']);
             $msg = "Execution #{$execution->id} paused.";

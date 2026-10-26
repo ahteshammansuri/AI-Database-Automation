@@ -93,10 +93,10 @@ export function modeOptions(col: PlanColumn): { value: Mode; label: string }[] {
   const r = col.relation;
   if (r) {
     if (!r.protected && r.label_column) {
-      if (r.can_create) add("AI_CREATE", `AI picks a ${r.entity} (creates it if new)`);
-      if (r.existing_count > 0) add("AI_REUSE", `AI picks one of the existing ${r.entity}s`);
+      if (r.can_create) add("AI_CREATE", `AI chooses or creates a ${r.entity} (recommended)`);
+      if (r.existing_count > 0) add("AI_REUSE", `AI chooses an existing ${r.entity}`);
     }
-    add("FIXED_REL", `Always use one ${r.entity}`);
+    add("FIXED_REL", `Always the same ${r.entity}`);
     if (col.nullable) add("EMPTY", "Leave empty");
     return out;
   }
@@ -196,7 +196,7 @@ export function explain(col: PlanColumn, m: Mapping | undefined, ctx: { titleCol
       if (col.kind === "enum") return `AI chooses one of: ${col.enum_values.join(", ")}.`;
       return `AI writes a value for this column${col.max_length ? ` (max ${col.max_length} characters)` : ""}.`;
     case "AI_CREATE":
-      return `AI picks the best ${r!.entity} from your ${r!.existing_count} existing one${r!.existing_count === 1 ? "" : "s"}${r!.options.length ? ` (${r!.options.slice(0, 4).join(", ")}${r!.options.length > 4 ? ", …" : ""})` : ""}. If none fits, it first creates a new ${r!.entity} in “${r!.table}”${r!.parent_required_columns.length ? ` (also filling ${r!.parent_required_columns.join(", ")})` : ""}, then stores its new id here. Both happen in one transaction.`;
+      return `For each new row the AI picks the ${r!.entity} that fits the content${r!.existing_count ? ` from your ${r!.existing_count} existing one${r!.existing_count === 1 ? "" : "s"}${r!.options.length ? ` (${r!.options.slice(0, 4).join(", ")}${r!.options.length > 4 ? ", …" : ""})` : ""}` : ""}. When none fits, it first adds a new ${r!.entity} to “${r!.table}”${r!.parent_required_columns.length ? ` (also filling ${r!.parent_required_columns.join(", ")})` : ""} and stores that new id here. Both are saved together, or neither is.`;
     case "AI_REUSE":
       return `AI picks the closest of your ${r!.existing_count} existing ${r!.entity}${r!.existing_count === 1 ? "" : "s"}. New ${r!.entity}s are never created.${r!.create_blocked_reason ? ` (Creating is not possible: ${r!.create_blocked_reason}.)` : ""}`;
     case "FIXED_REL":

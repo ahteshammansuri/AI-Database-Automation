@@ -170,14 +170,24 @@ class AutomationResource extends Resource
                         TextEntry::make('connection.name')->label('Connection')->placeholder('—'),
                         TextEntry::make('target_table')->label('Table')->fontFamily('mono'),
                         TextEntry::make('operation_mode')->label('Content')->formatStateUsing(fn ($state) => self::MODES[$state] ?? $state)->badge(),
-                        TextEntry::make('ai_provider')->label('Model')->formatStateUsing(fn ($state, Automation $record) => trim(ucfirst((string) $state) . ' ' . $record->ai_model))->placeholder('—'),
+                        // Exactly what the next run uses (the pipeline's own resolution: automation setting, else the
+                        // customer's "Writing content" model).
+                        TextEntry::make('ai_provider')->label('Model')
+                            ->state(function (Automation $record) {
+                                if ($record->operation_mode === 'MANUAL_SCHEDULE') {
+                                    return 'No AI (manual)';
+                                }
+                                [$provider, $model] = app(\App\Services\Automation\ContentPipeline::class)->resolveTextProvider($record);
+                                return trim(($model ?: 'provider default') . ' · ' . ucfirst((string) $provider));
+                            })
+                            ->helperText(fn (Automation $record) => $record->ai_model ? 'Set on this automation' : 'The customer\'s "Writing content" model'),
                         IconEntry::make('requires_approval')->label('Email approval')->boolean(),
                         TextEntry::make('timeout_policy')->label('If nobody decides')->formatStateUsing(fn ($state) => str((string) $state)->replace('_', ' ')->lower()->ucfirst())->placeholder('—'),
                     ]),
                 Section::make('Schedule')
                     ->columns(4)
                     ->components([
-                        TextEntry::make('schedule_type')->label('Runs')->formatStateUsing(fn ($state) => self::SCHEDULES[$state] ?? $state),
+                        TextEntry::make('schedule_type')->label('Schedule')->formatStateUsing(fn ($state) => self::SCHEDULES[$state] ?? $state),
                         TextEntry::make('times')->label('Writes → publishes')
                             ->state(fn (Automation $record) => substr((string) $record->generation_time, 0, 5) . ' → ' . substr((string) $record->publication_time, 0, 5)),
                         TextEntry::make('timezone'),
@@ -192,6 +202,21 @@ class AutomationResource extends Resource
                         TextEntry::make('success')->label('Run success')
                             ->state(fn (Automation $record) => self::successRate($record))
                             ->formatStateUsing(fn ($state) => $state === null ? '—' : "{$state}%"),
+                    ]),
+                Section::make('Approval and results')
+                    ->columns(4)
+                    ->components([
+                        TextEntry::make('requires_approval')->label('Approval')->formatStateUsing(fn ($state, Automation $record) => $state ? 'Required' . ($record->reviewer_email ? ' (' . $record->reviewer_email . ')' : ' (customer\'s email)') : 'Publishes without approval'),
+                        TextEntry::make('last_run')->label('Last run')
+                            ->state(fn (Automation $record) => ($r = $record->executions()->latest('id')->first()) ? '#' . $r->id . ' · ' . \App\Filament\Resources\Runs\RunResource::statusLabel($r->status) . ' · ' . $r->created_at?->diffForHumans() : null)
+                            ->placeholder('Not run yet'),
+                        TextEntry::make('documents')->label('Knowledge documents')->state(fn (Automation $record) => count((array) $record->knowledge_document_ids)),
+                        TextEntry::make('tokens')->label('AI tokens, all runs')
+                            ->state(fn (Automation $record) => (int) \App\Models\AiUsageEvent::where('subject_type', 'AutomationExecution')->whereIn('subject_id', $record->executions()->select('id'))->sum(\Illuminate\Support\Facades\DB::raw('prompt_tokens + completion_tokens')))
+                            ->numeric(),
+                        TextEntry::make('last_error')->label('Last failure')
+                            ->state(fn (Automation $record) => $record->executions()->where('status', 'FAILED')->latest('id')->value('error_message'))
+                            ->placeholder('None')->columnSpanFull(),
                     ]),
                 Section::make('Topic')
                     ->collapsed()

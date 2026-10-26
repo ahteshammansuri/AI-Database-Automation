@@ -15,6 +15,10 @@ class FeatureFlagService
         'FEATURE_CONTENT_CALENDAR' => true,
         'FEATURE_DB_INSIGHTS' => true,
         'FEATURE_TEMPLATES' => true,
+        'FEATURE_DATA_EXPLORER' => true,
+        'FEATURE_DATA_MANAGER' => true,
+        'FEATURE_SAMPLE_DATA' => true,
+        'FEATURE_DATA_AUTOPILOT' => true,
     ];
 
     /**

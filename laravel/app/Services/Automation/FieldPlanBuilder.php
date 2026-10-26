@@ -33,6 +33,7 @@ class FieldPlanBuilder
     public const MAPPING_TYPES = ['AI_GENERATED', 'FIXED_VALUE', 'RELATIONAL_LOOKUP', 'RELATIONSHIP_LOOKUP', 'DERIVED_SLUG', 'RUNTIME_NOW', 'LEAVE_EMPTY', 'DB_DEFAULT'];
 
     /** How many existing parent names are offered to the model when it picks a parent. */
+    /** Default; the live value is the admin setting automation.relation_options. */
     private const RELATION_OPTION_LIMIT = 40;
 
     public function __construct(
@@ -282,7 +283,7 @@ class FieldPlanBuilder
             try {
                 $count = (int) $pdo->query("SELECT COUNT(*) FROM `{$refTable}`")->fetchColumn();
                 if ($withOptions && $labelCol) {
-                    $stmt = $pdo->query("SELECT `{$labelCol}` FROM `{$refTable}` WHERE `{$labelCol}` IS NOT NULL AND `{$labelCol}` <> '' ORDER BY `{$fk['column']}` ASC LIMIT " . self::RELATION_OPTION_LIMIT);
+                    $stmt = $pdo->query("SELECT `{$labelCol}` FROM `{$refTable}` WHERE `{$labelCol}` IS NOT NULL AND `{$labelCol}` <> '' ORDER BY `{$fk['column']}` ASC LIMIT " . max(5, (int) config('automation.relation_options', self::RELATION_OPTION_LIMIT)));
                     $options = array_values(array_unique(array_map('strval', $stmt->fetchAll(PDO::FETCH_COLUMN))));
                 }
             } catch (\Throwable) {

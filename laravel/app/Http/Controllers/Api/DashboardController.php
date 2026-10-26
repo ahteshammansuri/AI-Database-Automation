@@ -146,34 +146,15 @@ class DashboardController extends Controller
         }
         $todayStr = now($userTz)->toDateString();
 
-        $upcomingRuns = [];
-        foreach ($automations->where('is_active', true) as $auto) {
-            $tz = $auto->timezone ?: $userTz;
-            if (!in_array($tz, timezone_identifiers_list(), true)) {
-                $tz = 'UTC';
-            }
-            try {
-                $genTime = Carbon::parse("{$todayStr} {$auto->generation_time}", $tz);
-                $pubTime = Carbon::parse("{$todayStr} {$auto->publication_time}", $tz);
-
-                if ($genTime->isPast()) {
-                    $genTime = $genTime->addDay();
-                }
-                if ($pubTime->isPast()) {
-                    $pubTime = $pubTime->addDay();
-                }
-
-                $upcomingRuns[] = [
-                    'automation_id' => $auto->id,
-                    'name' => $auto->name,
-                    'target_table' => $auto->target_table,
-                    'next_generation_at' => $genTime->toIso8601String(),
-                    'next_publication_at' => $pubTime->toIso8601String(),
-                    'timezone' => $tz,
-                    'requires_approval' => (bool) $auto->requires_approval,
-                ];
-            } catch (\Throwable) {}
-        }
+        $upcomingRuns = array_map(fn (array $n) => [
+            'automation_id' => $n['automation_id'],
+            'name' => $n['name'],
+            'target_table' => $n['target_table'],
+            'next_generation_at' => $n['generation_at'],
+            'next_publication_at' => $n['publication_at'],
+            'timezone' => $n['timezone'],
+            'requires_approval' => $n['requires_approval'],
+        ], $this->upcomingOccurrences($automations));
 
         usort($upcomingRuns, fn($a, $b) => strcmp($a['next_generation_at'], $b['next_generation_at']));
         $nextUpcoming = $upcomingRuns[0] ?? null;
@@ -195,11 +176,13 @@ class DashboardController extends Controller
             ->take(8)
             ->get();
 
+        // Real worker liveness (heartbeat of the queue that generates and publishes runs).
+        $queue = \App\Admin\SystemHealth::queues()['default'] ?? null;
         $workerHealth = [
-            'status' => 'operational',
-            'last_heartbeat' => now()->toIso8601String(),
-            'active_workers' => $runningCount > 0 ? $runningCount : 1,
-            'is_healthy' => true,
+            'status' => ($queue['status'] ?? 'down') === 'down' ? 'offline' : 'operational',
+            'is_healthy' => ($queue['status'] ?? 'down') !== 'down',
+            'waiting_jobs' => (int) ($queue['waiting'] ?? 0),
+            'running_jobs' => (int) ($queue['running'] ?? 0),
         ];
 
         return response()->json([
@@ -238,5 +221,124 @@ class DashboardController extends Controller
             'timezone' => $userTz,
             'server_time' => now()->toIso8601String(),
         ]);
+    }
+
+    /**
+     * The dashboard's live card: the run in progress (or one that just finished), the next scheduled run of any
+     * active automation (from the real schedule), and the last published item. Times are ISO-8601 UTC.
+     */
+    public function nextUp(Request $request)
+    {
+        $userId = $request->user()->id;
+        $automations = Automation::where('user_id', $userId)->get();
+
+        $inFlight = AutomationExecution::where('user_id', $userId)
+            ->whereIn('status', ['PENDING_GENERATION', 'GENERATING', 'PENDING_APPROVAL', 'APPROVED', 'PUBLISHING'])
+            ->with('automation:id,name,target_table,requires_approval')
+            ->orderByRaw('COALESCE(publication_time, scheduled_generation_at, created_at) ASC')
+            ->first();
+        $justFinished = $inFlight ? null : AutomationExecution::where('user_id', $userId)
+            ->whereIn('status', ['PUBLISHED', 'FAILED'])
+            ->where('updated_at', '>=', now()->subMinutes(30))
+            ->with('automation:id,name,target_table,requires_approval')
+            ->latest('updated_at')
+            ->first();
+        $current = $inFlight ?? $justFinished;
+
+        $upcoming = $this->upcomingOccurrences($automations);
+        if ($current) {
+            // The in-flight run is already shown; "next" is the next one after it.
+            $upcoming = array_values(array_filter($upcoming, fn ($n) => !($n['automation_id'] === $current->automation_id
+                && $current->scheduled_generation_at && $n['generation_at'] === $current->scheduled_generation_at->toIso8601String())));
+        }
+
+        $lastPublished = AutomationExecution::where('user_id', $userId)->where('status', 'PUBLISHED')
+            ->with('automation:id,name,target_table,requires_approval')->latest('published_at')->first();
+
+        return response()->json([
+            'server_time' => now()->toIso8601String(),
+            'current' => $current ? $this->runCard($current) : null,
+            'next' => $upcoming[0] ?? null,
+            'later' => array_slice($upcoming, 1, 3),
+            'active_schedules' => count(array_unique(array_column($upcoming, 'automation_id'))),
+            'last_published' => $lastPublished ? $this->runCard($lastPublished) : null,
+        ]);
+    }
+
+    /** One run as the card shows it. */
+    private function runCard(AutomationExecution $e): array
+    {
+        $stage = match ($e->status) {
+            'PENDING_GENERATION' => 'queued',
+            'GENERATING' => 'writing',
+            'PENDING_APPROVAL' => 'awaiting_approval',
+            'APPROVED' => 'scheduled_publish',
+            'PUBLISHING' => 'publishing',
+            'PUBLISHED' => 'published',
+            default => 'failed',
+        };
+        $title = null;
+        if (in_array($e->status, ['PENDING_APPROVAL', 'APPROVED', 'PUBLISHING', 'PUBLISHED'], true)) {
+            $version = $e->versions()->latest('version_number')->first();
+            $payload = (array) ($version?->payload ?? []);
+            foreach (['title', 'name', 'headline', 'question', 'subject'] as $k) {
+                if (!empty($payload[$k]) && is_string($payload[$k])) {
+                    $title = mb_substr($payload[$k], 0, 160);
+                    break;
+                }
+            }
+        }
+        return [
+            'execution_id' => $e->id,
+            'automation_id' => $e->automation_id,
+            'automation_name' => $e->automation?->name ?? 'Manual publication',
+            'target_table' => $e->automation?->target_table,
+            'status' => $e->status,
+            'stage' => $stage,
+            'title' => $title,
+            'requires_approval' => (bool) ($e->automation?->requires_approval ?? false),
+            'generation_at' => $e->scheduled_generation_at?->toIso8601String(),
+            'publication_at' => $e->publication_time?->toIso8601String(),
+            'published_at' => $e->published_at?->toIso8601String(),
+            'record_id' => $e->target_record_id,
+            'error' => $stage === 'failed' ? mb_substr((string) $e->error_message, 0, 240) : null,
+            'updated_at' => $e->updated_at?->toIso8601String(),
+        ];
+    }
+
+    /**
+     * Next real occurrence of every active scheduled automation, soonest first.
+     *
+     * @return list<array{automation_id: int, name: string, target_table: string, generation_at: string, publication_at: string, timezone: string, requires_approval: bool}>
+     */
+    private function upcomingOccurrences($automations): array
+    {
+        $calc = app(\App\Services\Automation\ScheduleCalculator::class);
+        $out = [];
+        foreach ($automations as $a) {
+            if (!$a->is_active || $a->completed_at || \App\Services\Automation\ScheduleCalculator::scheduleType($a) === \App\Services\Automation\ScheduleCalculator::TYPE_NONE) {
+                continue;
+            }
+            try {
+                $occ = $calc->nextOccurrence($a);
+            } catch (\Throwable) {
+                continue;
+            }
+            if (!$occ) {
+                continue;
+            }
+            $o = \App\Services\Automation\ScheduleCalculator::occurrenceToArray($occ);
+            $out[] = [
+                'automation_id' => $a->id,
+                'name' => $a->name,
+                'target_table' => $a->target_table,
+                'generation_at' => $o['generation_at'],
+                'publication_at' => $o['publication_at'],
+                'timezone' => $o['timezone'],
+                'requires_approval' => (bool) $a->requires_approval,
+            ];
+        }
+        usort($out, fn ($x, $y) => strcmp($x['generation_at'], $y['generation_at']));
+        return $out;
     }
 }

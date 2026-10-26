@@ -16,8 +16,11 @@ export interface PlatformConfig {
     password_min_length: number;
     knowledge_max_upload_mb: number;
     media_max_upload_mb: number;
+    terms_url: string | null;
+    privacy_url: string | null;
   };
   automation: { min_gap_minutes: number };
+  data_explorer: { max_page_size: number; max_sample_rows: number };
   orbit: { enabled: boolean; remote_enabled: boolean };
   features: Record<string, boolean>;
 }

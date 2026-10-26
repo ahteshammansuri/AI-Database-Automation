@@ -19,6 +19,8 @@ class Settings(BaseModel):
     # Room for one decision: speech, slot updates for a long request, and a plan.
     AGENT_NUM_PREDICT: int = int(os.getenv("AGENT_NUM_PREDICT", "512"))
     AGENT_MAX_TOOLS: int = int(os.getenv("AGENT_MAX_TOOLS", "18"))
+    # The placeholder "mock" provider writes fake text; it is only for automated tests (tests/conftest.py).
+    ALLOW_MOCK_PROVIDER: bool = os.getenv("AI_ALLOW_MOCK_PROVIDER", "").lower() in ("1", "true", "yes")
 
 
 settings = Settings()

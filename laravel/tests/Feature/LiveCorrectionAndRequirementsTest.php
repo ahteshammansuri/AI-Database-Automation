@@ -158,16 +158,36 @@ class LiveCorrectionAndRequirementsTest extends TestCase
         $user = User::factory()->create();
         $token = $user->createToken('test')->plainTextToken;
 
+        \Illuminate\Support\Facades\Http::fake([
+            '*/v1/ai/health' => \Illuminate\Support\Facades\Http::response(['available' => true, 'latency_ms' => 10, 'models' => ['llama3.2'], 'message' => 'Ready']),
+            '*/v1/ai/readiness' => \Illuminate\Support\Facades\Http::response([
+                'success' => true, 'model' => 'llama3.2', 'passed' => 3, 'total' => 4, 'score' => 75, 'seconds' => 41.2,
+                'checks' => [
+                    ['key' => 'json_conformance', 'label' => 'Answers in exact JSON', 'passed' => true, 'details' => 'ok', 'seconds' => 9.1],
+                    ['key' => 'tool_calling_safety', 'label' => 'Picks the right action', 'passed' => false, 'details' => "Chose 'answer' instead of pause_automation.", 'seconds' => 11.0],
+                    ['key' => 'query_plan_accuracy', 'label' => 'Turns a question into a data query', 'passed' => true, 'details' => 'ok', 'seconds' => 10.0],
+                    ['key' => 'slot_correction', 'label' => 'Applies a correction', 'passed' => true, 'details' => 'ok', 'seconds' => 11.1],
+                ],
+            ]),
+        ]);
+
+        $this->withHeader('Authorization', "Bearer {$token}")
+            ->postJson('/api/model-roles/readiness-test', ['provider' => 'mock'])
+            ->assertStatus(422);
+
         $response = $this->withHeader('Authorization', "Bearer {$token}")
             ->postJson('/api/model-roles/readiness-test', [
-                'provider' => 'mock',
+                'provider' => 'ollama',
                 'model_name' => 'llama3.2',
             ]);
 
+        // The score is what the model actually did on the four tasks, not a guess from its name.
         $response->assertStatus(200);
         $this->assertTrue($response->json('success'));
-        $this->assertEquals(100, $response->json('overall_score'));
-        $this->assertEquals('ready_for_agent', $response->json('status'));
-        $this->assertArrayHasKey('tests', $response->json());
+        $this->assertEquals(75, $response->json('overall_score'));
+        $this->assertEquals('needs_better_model', $response->json('status'));
+        $this->assertFalse($response->json('tests.tool_calling_safety.passed'));
+        $this->assertSame("Chose 'answer' instead of pause_automation.", $response->json('tests.tool_calling_safety.details'));
+        \Illuminate\Support\Facades\Http::assertSent(fn ($r) => str_ends_with($r->url(), '/v1/ai/readiness') && $r['provider'] === 'ollama' && $r['model'] === 'llama3.2');
     }
 }

@@ -90,7 +90,23 @@ class CustomerResource extends Resource
             'executions as published_runs_count' => fn ($q) => $q->where('status', 'PUBLISHED'),
             'executions as failed_runs_count' => fn ($q) => $q->where('status', 'FAILED'),
             'agentTasks',
-        ]);
+        ])
+            ->withSum(['aiUsageEvents as prompt_tokens_30d' => fn ($q) => $q->where('created_at', '>=', now()->subDays(30))], 'prompt_tokens')
+            ->withSum(['aiUsageEvents as completion_tokens_30d' => fn ($q) => $q->where('created_at', '>=', now()->subDays(30))], 'completion_tokens');
+    }
+
+    /** Tokens used in the last 30 days (from the list query's sums). */
+    public static function tokens30d(User $user): int
+    {
+        return (int) $user->prompt_tokens_30d + (int) $user->completion_tokens_30d;
+    }
+
+    /** The model each role really uses for this customer, resolved exactly as the app resolves it. */
+    public static function modelFor(User $user, string $role): string
+    {
+        $m = \App\Services\Agent\ModelSelector::for($user, $role);
+
+        return trim(($m['model'] ?? '—') . ' · ' . ucfirst((string) ($m['provider'] ?? '')), ' ·');
     }
 
     /** Latest of our activity marker and Sanctum's last token use. */
@@ -128,6 +144,18 @@ class CustomerResource extends Resource
                     ->color(fn ($state) => $state === null ? 'gray' : ($state >= 80 ? 'success' : ($state >= 50 ? 'warning' : 'danger')))
                     ->tooltip(fn (User $record) => "{$record->published_runs_count} published · {$record->failed_runs_count} failed"),
                 TextColumn::make('agent_tasks_count')->label('Orbit requests')->sortable()->alignCenter()->toggleable(),
+                TextColumn::make('tokens_30d')
+                    ->label('AI tokens (30 days)')
+                    ->state(fn (User $record) => self::tokens30d($record))
+                    ->numeric()
+                    ->alignEnd()
+                    ->sortable(query: fn (Builder $query, string $direction) => $query->orderByRaw('(COALESCE(prompt_tokens_30d, 0) + COALESCE(completion_tokens_30d, 0)) ' . ($direction === 'desc' ? 'desc' : 'asc')))
+                    ->tooltip(fn (User $record) => number_format((int) $record->prompt_tokens_30d) . ' sent · ' . number_format((int) $record->completion_tokens_30d) . ' written by the model'),
+                TextColumn::make('writing_model')
+                    ->label('Writing model')
+                    ->state(fn (User $record) => self::modelFor($record, \App\Models\ModelRole::ROLE_GENERATOR))
+                    ->description(fn (User $record) => 'Orbit: ' . self::modelFor($record, \App\Models\ModelRole::ROLE_PLANNER))
+                    ->toggleable(),
                 TextColumn::make('last_active_at')
                     ->label('Last active')
                     ->state(fn (User $record) => self::lastActive($record))
@@ -247,13 +275,45 @@ class CustomerResource extends Resource
                         TextEntry::make('suspended_at')->label('Suspended')->dateTime()->visible(fn (User $record) => $record->isSuspended()),
                         TextEntry::make('suspension_reason')->label('Reason')->visible(fn (User $record) => $record->isSuspended())->columnSpan(2),
                     ]),
+                Section::make('AI models & tokens')
+                    ->description('The models this customer\'s requests use, and the tokens recorded for every AI call. Local models cost nothing; cloud providers bill the customer\'s own key.')
+                    ->columns(4)
+                    ->components([
+                        TextEntry::make('planner_model')->label('Orbit and planning')->state(fn (User $record) => self::modelFor($record, \App\Models\ModelRole::ROLE_PLANNER)),
+                        TextEntry::make('generator_model')->label('Writing content')->state(fn (User $record) => self::modelFor($record, \App\Models\ModelRole::ROLE_GENERATOR)),
+                        TextEntry::make('tokens_30d_total')
+                            ->label('Tokens, last 30 days')
+                            ->state(function (User $record) {
+                                $u = \App\Services\AiUsage::summarize($record->aiUsageEvents()->where('created_at', '>=', now()->subDays(30))->getQuery());
+                                return number_format($u['total']) . ' in ' . number_format($u['calls']) . ' ' . str('call')->plural($u['calls']);
+                            }),
+                        TextEntry::make('tokens_all')
+                            ->label('Tokens, all time')
+                            ->state(fn (User $record) => (int) $record->aiUsageEvents()->sum(\Illuminate\Support\Facades\DB::raw('prompt_tokens + completion_tokens')))
+                            ->numeric(),
+                        TextEntry::make('by_model')
+                            ->label('By model (30 days)')
+                            ->columnSpan(2)
+                            ->state(fn (User $record) => collect(\App\Services\AiUsage::summarize($record->aiUsageEvents()->where('created_at', '>=', now()->subDays(30))->getQuery())['models'])
+                                ->map(fn ($m) => ($m['model'] ?: 'unknown') . ' (' . $m['provider'] . '): ' . number_format($m['total']) . ' tokens · ' . $m['calls'] . ' calls')->all())
+                            ->listWithLineBreaks()
+                            ->placeholder('No AI calls yet'),
+                        TextEntry::make('by_purpose')
+                            ->label('By purpose (30 days)')
+                            ->columnSpan(2)
+                            ->state(fn (User $record) => $record->aiUsageEvents()->where('created_at', '>=', now()->subDays(30))
+                                ->selectRaw('purpose, SUM(calls) calls, SUM(prompt_tokens) + SUM(completion_tokens) tokens')->groupBy('purpose')->orderByDesc('tokens')->get()
+                                ->map(fn ($r) => \App\Models\AiUsageEvent::purposeLabel($r->purpose) . ': ' . number_format((int) $r->tokens) . ' tokens · ' . (int) $r->calls . ' calls')->all())
+                            ->listWithLineBreaks()
+                            ->placeholder('No AI calls yet'),
+                    ]),
                 Section::make('Usage')
                     ->columns(4)
                     ->components([
                         TextEntry::make('connections_count')->label('Database connections'),
                         TextEntry::make('automations_count')->label('Automations'),
                         TextEntry::make('runs')
-                            ->label('Runs')
+                            ->label('Automation runs')
                             ->state(fn (User $record) => "{$record->published_runs_count} published · {$record->failed_runs_count} failed"),
                         TextEntry::make('success')
                             ->label('Run success')
@@ -280,6 +340,7 @@ class CustomerResource extends Resource
             RelationManagers\AutomationsRelationManager::class,
             RelationManagers\RunsRelationManager::class,
             RelationManagers\OrbitTasksRelationManager::class,
+            RelationManagers\AiUsageRelationManager::class,
             RelationManagers\AiProvidersRelationManager::class,
             RelationManagers\KnowledgeDocumentsRelationManager::class,
             RelationManagers\ActivityRelationManager::class,

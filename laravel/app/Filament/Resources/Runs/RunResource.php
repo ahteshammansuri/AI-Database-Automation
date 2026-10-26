@@ -33,7 +33,7 @@ class RunResource extends Resource
 
     protected static string $permissionArea = 'automations';
 
-    protected static ?string $modelLabel = 'run';
+    protected static ?string $modelLabel = 'automation run';
 
     protected static ?string $slug = 'runs';
 
@@ -41,7 +41,22 @@ class RunResource extends Resource
 
     protected static string|UnitEnum|null $navigationGroup = 'Customers';
 
-    protected static ?string $navigationLabel = 'Runs';
+    protected static ?string $navigationLabel = 'Automation runs';
+
+    /** Run statuses in plain words (same wording as the customer portal). */
+    public const STATUS_LABELS = [
+        'PENDING_GENERATION' => 'Waiting to start', 'QUEUED' => 'Waiting to start', 'RUNNING' => 'Running', 'GENERATING' => 'Writing',
+        'REGENERATING' => 'Rewriting', 'PENDING_APPROVAL' => 'Waiting for approval', 'APPROVED' => 'Approved',
+        'READY_TO_PUBLISH' => 'Ready to publish', 'PUBLISHING' => 'Publishing', 'PUBLISHED' => 'Published', 'PAUSED' => 'Paused',
+        'FAILED' => 'Failed', 'CANCELLED' => 'Cancelled', 'SKIPPED' => 'Skipped', 'MISSED' => 'Missed', 'REJECTED' => 'Rejected',
+    ];
+
+    public const TRIGGERS = ['SCHEDULE' => 'Schedule', 'MANUAL' => 'Run now', 'MANUAL_PUBLISH' => 'Manual post'];
+
+    public static function statusLabel(?string $status): string
+    {
+        return self::STATUS_LABELS[$status] ?? self::label($status);
+    }
 
     protected static ?int $navigationSort = 4;
 
@@ -80,7 +95,11 @@ class RunResource extends Resource
     public static function table(Table $table): Table
     {
         return $table
-            ->modifyQueryUsing(fn ($query) => $query->with(['automation', 'user']))
+            ->modifyQueryUsing(fn ($query) => $query->with(['automation', 'user'])->withCount('versions')
+                ->addSelect(['ai_tokens' => \App\Models\AiUsageEvent::query()
+                    ->selectRaw('COALESCE(SUM(prompt_tokens + completion_tokens), 0)')
+                    ->where('subject_type', 'AutomationExecution')
+                    ->whereColumn('subject_id', 'automation_executions.id')]))
             ->columns([
                 TextColumn::make('id')->label('#')->sortable(),
                 TextColumn::make('automation.name')
@@ -94,16 +113,24 @@ class RunResource extends Resource
                     ->label('Customer')
                     ->url(fn (AutomationExecution $record) => $record->user && CustomerResource::canViewAny() ? CustomerResource::getUrl('view', ['record' => $record->user]) : null)
                     ->searchable(),
-                TextColumn::make('status')->badge()->formatStateUsing(fn ($state) => self::label($state))->color(fn ($state) => self::statusColor($state)),
+                TextColumn::make('status')->badge()->formatStateUsing(fn ($state) => self::statusLabel($state))->color(fn ($state) => self::statusColor($state)),
+                TextColumn::make('trigger_type')->label('Started by')->formatStateUsing(fn ($state) => self::TRIGGERS[$state] ?? 'Schedule')->placeholder('Schedule')->toggleable(),
                 TextColumn::make('failure_category')->label('Failure')->formatStateUsing(fn ($state) => self::label($state))->placeholder('—')->toggleable(),
                 TextColumn::make('publication_time')->label('Publishes')->dateTime('M j, H:i')->sortable()->placeholder('—'),
                 TextColumn::make('published_at')->label('Published')->since()->placeholder('—')->toggleable(),
                 TextColumn::make('created_at')->label('Started')->since()->sortable(),
+                TextColumn::make('execution_duration_ms')->label('Took')->formatStateUsing(fn ($state) => $state === null ? '—' : ($state >= 60000 ? round($state / 60000, 1) . ' min' : round($state / 1000, 1) . ' s'))->alignEnd()->toggleable(),
+                TextColumn::make('versions_count')->label('Versions')->alignCenter()->toggleable(isToggledHiddenByDefault: true),
+                TextColumn::make('ai_tokens')->label('AI tokens')->numeric()->alignEnd()->placeholder('—')->toggleable(),
+                TextColumn::make('target_record_id')->label('Row')->prefix('#')->placeholder('—')->toggleable(isToggledHiddenByDefault: true),
             ])
             ->defaultSort('id', 'desc')
             ->filters([
-                SelectFilter::make('status')->multiple()->options(collect(['PENDING_GENERATION', 'GENERATING', 'PENDING_APPROVAL', 'APPROVED', 'PUBLISHING', 'PUBLISHED', 'FAILED', 'MISSED', 'SKIPPED', 'CANCELLED', 'REJECTED'])
-                    ->mapWithKeys(fn ($s) => [$s => self::label($s)])->all()),
+                SelectFilter::make('status')->multiple()->options(collect(['QUEUED', 'GENERATING', 'REGENERATING', 'PENDING_APPROVAL', 'APPROVED', 'PUBLISHING', 'PUBLISHED', 'PAUSED', 'FAILED', 'MISSED', 'SKIPPED', 'CANCELLED', 'REJECTED'])
+                    ->mapWithKeys(fn ($s) => [$s => self::statusLabel($s)])->all()),
+                SelectFilter::make('trigger_type')->label('Started by')->options(self::TRIGGERS),
+                SelectFilter::make('automation_id')->label('Automation')->relationship('automation', 'name')->searchable(),
+                SelectFilter::make('user_id')->label('Customer')->relationship('user', 'name')->searchable(),
                 SelectFilter::make('failure_category')->label('Failure')->options(['GENERATION_ERROR' => 'Generation error', 'TRANSACTION_ROLLBACK' => 'Write rolled back', 'MISSED_WINDOW' => 'Missed window', 'MAX_REJECTIONS_EXCEEDED' => 'Too many rejections']),
                 Filter::make('started')
                     ->schema([DatePicker::make('from')->label('Started from'), DatePicker::make('until')->label('Started until')])
@@ -122,10 +149,11 @@ class RunResource extends Resource
                 Section::make('Run')
                     ->columns(4)
                     ->components([
-                        TextEntry::make('status')->badge()->formatStateUsing(fn ($state) => self::label($state))->color(fn ($state) => self::statusColor($state)),
+                        TextEntry::make('status')->badge()->formatStateUsing(fn ($state) => self::statusLabel($state))->color(fn ($state) => self::statusColor($state)),
                         TextEntry::make('automation.name')->label('Automation')->placeholder('Manual publication'),
                         TextEntry::make('user.name')->label('Customer'),
-                        TextEntry::make('trigger_type')->label('Started by')->formatStateUsing(fn ($state) => $state === 'SCHEDULE' ? 'Schedule' : self::label($state))->placeholder('—'),
+                        TextEntry::make('trigger_type')->label('Started by')->formatStateUsing(fn ($state) => self::TRIGGERS[$state] ?? self::label($state))->placeholder('Schedule'),
+                        TextEntry::make('writes_to')->label('Writes to')->state(fn (AutomationExecution $r) => $r->automation ? $r->automation->target_table . ($r->automation->connection ? ' in ' . $r->automation->connection->name . ' (' . $r->automation->connection->database_name . ')' : '') : null)->placeholder('—'),
                         TextEntry::make('scheduled_generation_at')->label('Writes at')->dateTime()->placeholder('—'),
                         TextEntry::make('publication_time')->label('Publishes at')->dateTime()->placeholder('—'),
                         TextEntry::make('published_at')->label('Published')->dateTime()->placeholder('—'),
@@ -135,6 +163,29 @@ class RunResource extends Resource
                         TextEntry::make('retry_count')->label('Retries'),
                         TextEntry::make('failure_category')->label('Failure')->formatStateUsing(fn ($state) => self::label($state))->placeholder('None'),
                         TextEntry::make('error_message')->label('Error')->placeholder('None')->columnSpanFull(),
+                    ]),
+                Section::make('AI usage')
+                    ->description('Every model call this run made (writing, rewrites, images), with tokens as the provider reported them.')
+                    ->columns(3)
+                    ->components([
+                        TextEntry::make('ai_total')->label('Tokens')->state(fn (AutomationExecution $r) => self::usage($r)['total'])->numeric(),
+                        TextEntry::make('ai_calls')->label('Calls')->state(fn (AutomationExecution $r) => self::usage($r)['calls'])->numeric(),
+                        TextEntry::make('ai_models')->label('Models')->state(fn (AutomationExecution $r) => collect(self::usage($r)['models'])->map(fn ($m) => ($m['model'] ?: 'unknown') . ' (' . $m['provider'] . '): ' . number_format($m['total']))->all())->listWithLineBreaks()->placeholder('No AI calls'),
+                    ]),
+                Section::make('Content versions')
+                    ->description('Each draft of this run. A version sent back carries the reviewer\'s notes; the next version was rewritten from them.')
+                    ->components([
+                        RepeatableEntry::make('versions')
+                            ->hiddenLabel()
+                            ->schema([
+                                TextEntry::make('version_number')->hiddenLabel()->prefix('Version '),
+                                TextEntry::make('status')->hiddenLabel()->badge()->formatStateUsing(fn ($state) => self::statusLabel($state))->color(fn ($state) => self::statusColor($state)),
+                                TextEntry::make('title')->hiddenLabel()->state(fn ($record) => \Illuminate\Support\Str::limit(strip_tags((string) ($record->payload['title'] ?? $record->payload['name'] ?? '')), 90))->placeholder('—')->columnSpan(2),
+                                TextEntry::make('created_at')->hiddenLabel()->since()->color('gray'),
+                                TextEntry::make('rejection_feedback')->label('Sent back with')->placeholder('—')->columnSpanFull()->visible(fn ($record) => filled($record->rejection_feedback)),
+                            ])
+                            ->columns(5)
+                            ->placeholder('No versions yet'),
                     ]),
                 Section::make('Timeline')
                     ->components([
@@ -153,6 +204,13 @@ class RunResource extends Resource
                             ->placeholder('No timeline recorded'),
                     ]),
             ]);
+    }
+
+    /** @return array{total:int, calls:int, models:array} */
+    public static function usage(AutomationExecution $run): array
+    {
+        static $cache = [];
+        return $cache[$run->id] ??= \App\Services\AiUsage::summarize(\App\Models\AiUsageEvent::where('subject_type', 'AutomationExecution')->where('subject_id', $run->id));
     }
 
     public static function getPages(): array

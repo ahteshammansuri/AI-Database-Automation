@@ -64,6 +64,7 @@ class ContentPipeline
             throw new Exception('Field mapping problem: ' . implode(' ', array_map(fn($i) => $i['message'], $planErrors)));
         }
         $fields = $plan['fields'];
+        $log('TABLE_READ', 'Read `' . $automation->target_table . '` from your database: ' . count($fields) . ' column(s) to fill.');
         $isManual = $automation->operation_mode === 'MANUAL_SCHEDULE';
         $tz = ScheduleCalculator::normalizeTimezone($automation->timezone);
         $dbTz = $connection->data_timezone ?: 'UTC';
@@ -287,6 +288,10 @@ class ContentPipeline
 
         // 6. Images
         if (($options['include_images'] ?? true) && !$isManual) {
+            $imageCols = array_keys(array_filter($fields, fn ($f) => $f['source'] === 'ai_image'));
+            if ($imageCols) {
+                $log('IMAGES_STARTED', 'Creating ' . count($imageCols) . ' image(s): ' . implode(', ', $imageCols) . '.');
+            }
             foreach ($fields as $col => $f) {
                 if ($f['source'] !== 'ai_image') {
                     continue;
@@ -324,7 +329,9 @@ class ContentPipeline
         }
 
         // 8. Read-only dry run of the INSERT
+        $log('WRITE_CHECK_STARTED', 'Checking the write against your live table (nothing is written).');
         $plan = $this->executor->planInsert($connection, $automation->target_table, $payload, $relationOptions);
+        $log('WRITE_CHECKED', $plan['can_publish'] ? 'The row fits your table: types, lengths, required columns and links checked.' : 'The row needs attention before it can be published (' . count($plan['issues']) . ' issue(s)).');
         $meta['write_plan'] = $plan;
         $meta['relation_options'] = $relationOptions;
         $meta['issues'] = array_merge($meta['issues'], $plan['issues']);
@@ -337,8 +344,8 @@ class ContentPipeline
     }
 
     /**
-     * Effective text provider: the automation's choice, else the user's active provider, else local
-     * Ollama when it is reachable, else the offline mock.
+     * Effective text provider: the automation's choice, else the user's writing model (model roles / active
+     * provider / local Ollama). Never a placeholder generator: if the model cannot be reached the run fails honestly.
      *
      * @return array{0: string, 1: ?string, 2: ?string} provider, model, api key
      */
@@ -347,21 +354,14 @@ class ContentPipeline
         $provider = $automation->ai_provider;
         $model = $automation->ai_model;
 
-        if (empty($provider) || $provider === 'none') {
-            $active = AiProvider::where('user_id', $automation->user_id)->where('is_active', true)->first();
-            if ($active) {
-                $provider = $active->provider_type;
-                $model = $active->model_name;
-            } else {
-                try {
-                    $health = $this->ai->checkHealth('ollama');
-                    $provider = !empty($health['available']) ? 'ollama' : 'mock';
-                    $model = !empty($health['available']) ? ($model ?: ($health['models'][0] ?? null)) : 'mock-llama3-synthetic';
-                } catch (\Throwable) {
-                    $provider = 'mock';
-                    $model = 'mock-llama3-synthetic';
-                }
-            }
+        if (empty($provider) || $provider === 'none' || $provider === 'mock') {
+            $chosen = \App\Services\Agent\ModelSelector::for($automation->user, \App\Models\ModelRole::ROLE_GENERATOR);
+            $provider = $chosen['provider'];
+            $model = $chosen['model'];
+        } elseif (empty($model)) {
+            // No model named: the "Writing content" model when it uses the same provider, else the provider's default.
+            $chosen = \App\Services\Agent\ModelSelector::for($automation->user, \App\Models\ModelRole::ROLE_GENERATOR);
+            $model = $chosen['provider'] === $provider ? $chosen['model'] : null;
         }
 
         $apiKey = AiProvider::where('user_id', $automation->user_id)->where('provider_type', $provider)->first()?->encrypted_api_key;
@@ -383,6 +383,8 @@ class ContentPipeline
             'context_passages' => $passages,
             'rejection_feedback' => $feedback,
             'recent_titles' => array_slice($recent, 0, 20),
+            // How creative the writing is: the customer's "Writing content" role (provider default when not set).
+            'temperature' => $a->user ? \App\Services\Agent\ModelSelector::temperature($a->user, \App\Models\ModelRole::ROLE_GENERATOR) : null,
         ]);
     }
 

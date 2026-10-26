@@ -201,6 +201,8 @@
   -webkit-mask-image: radial-gradient(ellipse 60% 55% at 50% 0%, #000 30%, transparent 100%);
   mask-image: radial-gradient(ellipse 60% 55% at 50% 0%, #000 30%, transparent 100%);
 }
+/* Indeterminate progress bar (work whose length the server cannot report). */
+@keyframes da-indeterminate { 0% { transform: translateX(-110%); } 100% { transform: translateX(320%); } }
 @keyframes landing-marquee { from { transform: translateX(0); } to { transform: translateX(-50%); } }
 .landing-marquee { animation: landing-marquee 40s linear infinite; }
 .landing-marquee-wrap:hover .landing-marquee { animation-play-state: paused; }

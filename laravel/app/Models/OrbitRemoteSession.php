@@ -8,7 +8,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 /**
- * A phone paired with one DataAuto tab (see OrbitRemoteService). Codes and device tokens are stored hashed.
+ * A phone paired with one portal tab (see OrbitRemoteService). Codes and device tokens are stored hashed.
  */
 class OrbitRemoteSession extends Model
 {

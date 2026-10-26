@@ -98,4 +98,10 @@ class User extends Authenticatable
     {
         return $this->hasMany(AuditLog::class);
     }
+
+    /** AI calls made for this customer (tokens per model and purpose). */
+    public function aiUsageEvents(): HasMany
+    {
+        return $this->hasMany(AiUsageEvent::class);
+    }
 }

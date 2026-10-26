@@ -198,9 +198,8 @@ class OrbitKnowledgeResource extends Resource
                 TextColumn::make('published_at')->label('Published')->since()->placeholder('—')->toggleable(isToggledHiddenByDefault: true),
             ])
             ->emptyStateIcon(Heroicon::OutlinedBookOpen)
-            ->emptyStateHeading('Orbit is using the built-in guides')
-            ->emptyStateDescription('Load them here to edit what Orbit knows about the website, or write your own guide.')
-            ->emptyStateActions([self::restoreAction('Load built-in guides')])
+            ->emptyStateHeading('Orbit has no product knowledge yet')
+            ->emptyStateDescription('Write a guide about the website (pages, workflows, rules), include it and publish it. Orbit answers product questions only from published guides.')
             ->recordActions([
                 EditAction::make(),
                 DeleteAction::make()
@@ -240,25 +239,6 @@ class OrbitKnowledgeResource extends Resource
                     ->body("{$res['guides']} " . str('guide')->plural($res['guides']) . ", {$res['chunks']} sections, indexed for {$backend}.")
                     ->success()
                     ->send();
-                $livewire->dispatch('orbit-knowledge-changed');
-            });
-    }
-
-    public static function restoreAction(string $label = 'Restore built-in guides'): Action
-    {
-        return Action::make('restoreBundled')
-            ->label($label)
-            ->icon('heroicon-o-arrow-path')
-            ->color('gray')
-            ->visible(fn () => self::adminCan('orbit_knowledge.manage') && OrbitKnowledge::bundled() !== [])
-            ->requiresConfirmation()
-            ->modalHeading($label . '?')
-            ->modalDescription(fn () => OrbitKnowledgeGuide::exists()
-                ? 'The ' . count(OrbitKnowledge::bundled()) . ' guides that ship with the app get their original text back. Your own guides are kept. Orbit uses the change after you publish.'
-                : 'The ' . count(OrbitKnowledge::bundled()) . ' guides that ship with the app are added here, exactly as Orbit uses them now.')
-            ->action(function ($livewire) {
-                $n = OrbitKnowledge::restoreBundled();
-                Notification::make()->title("{$n} built-in " . str('guide')->plural($n) . ' loaded')->body('Publish to Orbit to make edits live.')->success()->send();
                 $livewire->dispatch('orbit-knowledge-changed');
             });
     }

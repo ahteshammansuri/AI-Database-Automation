@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Models\AuditLog;
 use App\Models\AutomationExecution;
+use App\Services\AiUsage;
 use App\Models\ContentVersion;
 use App\Services\Automation\ContentPipeline;
 use App\Services\ContextPackageService;
@@ -39,6 +40,16 @@ class GenerateAutomationContentJob implements ShouldQueue
     ) {}
 
     public function handle(
+        ContentPipeline $pipeline,
+        EmailApprovalService $approvalService,
+        ContextPackageService $contextPackageService
+    ): void {
+        // Model usage of this run is recorded for its customer and the run (AI usage in the admin panel).
+        $run = AutomationExecution::query()->select(['id', 'user_id'])->find($this->executionId);
+        AiUsage::using($run?->user_id, 'content', $run, fn () => $this->generate($pipeline, $approvalService, $contextPackageService));
+    }
+
+    private function generate(
         ContentPipeline $pipeline,
         EmailApprovalService $approvalService,
         ContextPackageService $contextPackageService

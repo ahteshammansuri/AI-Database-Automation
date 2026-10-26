@@ -14,7 +14,7 @@ use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 
 /**
- * Orbit Remote: pair a phone with one DataAuto tab by QR code. The phone sends spoken requests; the tab runs them
+ * Orbit Remote: pair a phone with one portal tab by QR code. The phone sends spoken requests; the tab runs them
  * through the normal Orbit pipeline (so page context, confirmations and secure fields stay on the computer) and
  * mirrors the web Orbit back to the phone.
  *
@@ -364,7 +364,7 @@ class OrbitRemoteService
     // ------------------------------------------------------------------ helpers
 
     /**
-     * Private IPv4 addresses of this machine, so a computer that opened DataAuto as "localhost" can still show a
+     * Private IPv4 addresses of this machine, so a computer that opened the portal as "localhost" can still show a
      * QR code a phone on the same Wi-Fi can open. Container and virtual bridges are skipped.
      *
      * @return string[]

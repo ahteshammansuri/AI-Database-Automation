@@ -143,6 +143,122 @@ async function request<T>(endpoint: string, options?: RequestOptions): Promise<T
 let lastHeartbeatTime = 0;
 let lastHeartbeatPromise: Promise<any> | null = null;
 
+export interface ProgressEvent {
+  stage: string;
+  message: string;
+  timestamp: string;
+}
+
+/**
+ * POST that streams one JSON object per line ({type: "event" | "result" | "error"}): onEvent receives each real step
+ * as the server reaches it; resolves with the result. Validation errors arrive as normal JSON and throw like request().
+ */
+async function streamRequest(endpoint: string, body: any, onEvent: (e: ProgressEvent) => void): Promise<any> {
+  const token = localStorage.getItem("auth_token");
+  const res = await fetch(`${BASE_URL}${endpoint}`, {
+    method: "POST",
+    headers: {
+      Accept: "application/x-ndjson, application/json",
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+  if (!(res.headers.get("content-type") || "").includes("ndjson")) {
+    let data: any = null;
+    try {
+      data = await res.json();
+    } catch {
+      // not JSON
+    }
+    const err: any = new Error(data?.message || `Request failed with status ${res.status}`);
+    err.status = res.status;
+    err.errors = data?.errors ?? null;
+    err.data = data;
+    if (res.status === 401 && token) window.dispatchEvent(new CustomEvent("auth:ended", { detail: { reason: "unauthenticated" } }));
+    throw err;
+  }
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let result: any = null;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      if (!line) continue;
+      const msg = JSON.parse(line);
+      if (msg.type === "event") onEvent(msg);
+      else if (msg.type === "result") result = msg;
+      else if (msg.type === "error") {
+        const err: any = new Error(msg.message || "The request could not finish.");
+        err.status = msg.status;
+        err.data = msg;
+        throw err;
+      }
+    }
+  }
+  if (!result) throw new Error("The connection closed before the work finished. Try again.");
+  clearApiCache();
+  return result;
+}
+
+/** "?a=1&b=x" from the set values of an object ("" for none). */
+function toQuery(params: Record<string, string | number | undefined | null>): string {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null && v !== "") q.set(k, String(v));
+  const s = q.toString();
+  return s ? `?${s}` : "";
+}
+
+/** GET a file with the signed-in token and hand it to the browser as a download. */
+async function downloadFile(endpoint: string, fallbackName: string): Promise<void> {
+  const token = localStorage.getItem("auth_token");
+  const res = await fetch(`${BASE_URL}${endpoint}`, { headers: { Accept: "text/csv, application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) } });
+  if (!res.ok) {
+    let message = "The file could not be downloaded.";
+    try { message = (await res.json())?.message || message; } catch { /* not JSON */ }
+    throw new Error(message);
+  }
+  const blob = await res.blob();
+  const name = /filename="?([^";]+)"?/.exec(res.headers.get("Content-Disposition") || "")?.[1] || fallbackName;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/**
+ * Schema snapshots name column facts is_nullable / default and keep foreign keys on the table's relationships.
+ * Pages read nullable / default_value / is_foreign_key, so add those here once (the original keys stay).
+ */
+function normalizeSchema(schema: any) {
+  if (!schema || !Array.isArray(schema.tables)) return schema;
+  return {
+    ...schema,
+    tables: schema.tables.map((t: any) => {
+      const fks = new Set((t.relationships ?? []).map((r: any) => r.foreign_key ?? r.constrained_column));
+      return {
+        ...t,
+        columns: (t.columns ?? []).map((c: any) => ({
+          ...c,
+          nullable: c.nullable ?? c.is_nullable ?? true,
+          default_value: c.default_value ?? c.default ?? undefined,
+          is_foreign_key: c.is_foreign_key ?? fks.has(c.name),
+        })),
+      };
+    }),
+  };
+}
+
 export const api = {
   // Platform settings and website texts (public, managed in the admin panel)
   // Always re-checked with the server, so an administrator's change shows on the next load.
@@ -153,10 +269,63 @@ export const api = {
   register: (data: any) => request<any>("/auth/register", { method: "POST", body: JSON.stringify(data) }),
   login: (data: any) => request<any>("/auth/login", { method: "POST", body: JSON.stringify(data) }),
   logout: () => request<any>("/auth/logout", { method: "POST" }),
-  me: () => request<any>("/auth/me"),
+  me: () => request<any>("/auth/me", { forceRefresh: true }),
+
+  // Account settings (the signed-in customer only)
+  getProfile: () => request<any>("/profile", { forceRefresh: true }),
+  updateProfile: (data: { name: string; email: string; timezone: string | null; current_password?: string }) =>
+    request<any>("/profile", { method: "PUT", body: JSON.stringify(data) }),
+  changePassword: (data: { current_password: string; password: string; password_confirmation: string; sign_out_others: boolean }) =>
+    request<any>("/profile/password", { method: "PUT", body: JSON.stringify(data) }),
+  profileUsage: (days: 7 | 30 | 90) => request<any>(`/profile/usage?days=${days}`, { forceRefresh: true }),
+  signOutSession: (id?: number) => request<any>(id ? `/profile/sessions/${id}` : "/profile/sessions", { method: "DELETE" }),
 
   // Stats & Dashboard
   getStats: (range = "7d") => request<any>(`/dashboard/stats?range=${encodeURIComponent(range)}`),
+  /** The dashboard's live card: run in progress or just finished, next scheduled run, last published. */
+  getNextUp: () => request<any>("/dashboard/next-up", { forceRefresh: true }),
+  /** Knowledge documents that clearly match a topic (best first). */
+  suggestKnowledge: (topic: string) =>
+    request<{ suggestions: { id: number; title: string; score: number }[]; backend: string | null }>("/knowledge/suggest", { method: "POST", body: JSON.stringify({ topic }) }),
+
+  // Data Explorer and Data Manager (every change: preview -> confirm -> undo)
+  dataTables: (connectionId: number, refresh = false) => request<any>(`/data/connections/${connectionId}/tables${refresh ? "?refresh=1" : ""}`, { forceRefresh: true }),
+  dataRows: (connectionId: number, table: string, params: Record<string, any>) => {
+    const q = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v === undefined || v === null || v === "") continue;
+      if (k === "filters" && typeof v === "object") for (const [fk, fv] of Object.entries(v)) q.append(`filters[${fk}]`, String(fv ?? ""));
+      else q.append(k, typeof v === "boolean" ? (v ? "1" : "0") : String(v));
+    }
+    return request<any>(`/data/connections/${connectionId}/tables/${encodeURIComponent(table)}/rows?${q.toString()}`, { forceRefresh: true });
+  },
+  dataLinkOptions: (connectionId: number, table: string, column: string, q = "") =>
+    request<any>(`/data/connections/${connectionId}/tables/${encodeURIComponent(table)}/links/${encodeURIComponent(column)}?q=${encodeURIComponent(q)}`),
+  dataHistory: (connectionId: number, table: string) => request<any>(`/data/connections/${connectionId}/tables/${encodeURIComponent(table)}/history`, { forceRefresh: true }),
+  dataPreviewInsert: (connectionId: number, table: string, rows: Record<string, any>[]) =>
+    request<any>(`/data/connections/${connectionId}/tables/${encodeURIComponent(table)}/preview-insert`, { method: "POST", body: JSON.stringify({ rows }) }),
+  dataPreviewUpdate: (connectionId: number, table: string, key: any, values: Record<string, any>) =>
+    request<any>(`/data/connections/${connectionId}/tables/${encodeURIComponent(table)}/preview-update`, { method: "POST", body: JSON.stringify({ key, values }) }),
+  dataPreviewDelete: (connectionId: number, table: string, key: any) =>
+    request<any>(`/data/connections/${connectionId}/tables/${encodeURIComponent(table)}/preview-delete`, { method: "POST", body: JSON.stringify({ key }) }),
+  dataSampleRowsStream: (connectionId: number, table: string, count: number, instructions: string, onEvent: (e: ProgressEvent) => void) =>
+    streamRequest(`/data/connections/${connectionId}/tables/${encodeURIComponent(table)}/sample-rows?stream=1`, { count, instructions }, onEvent),
+  dataConfirm: (changeId: number, typedPhrase?: string) =>
+    request<any>(`/data/changes/${changeId}/confirm`, { method: "POST", body: JSON.stringify({ typed_phrase: typedPhrase }) }),
+  dataCancel: (changeId: number) => request<any>(`/data/changes/${changeId}/cancel`, { method: "POST" }),
+  dataUndo: (changeId: number) => request<any>(`/data/changes/${changeId}/undo`, { method: "POST" }),
+  autopilots: (connectionId?: number, table?: string) =>
+    request<any>(`/data/autopilots?${new URLSearchParams({ ...(connectionId ? { connection_id: String(connectionId) } : {}), ...(table ? { table } : {}) }).toString()}`, { forceRefresh: true }),
+  createAutopilot: (data: any) => request<any>("/data/autopilots", { method: "POST", body: JSON.stringify(data) }),
+  updateAutopilot: (id: number, data: any) => request<any>(`/data/autopilots/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  deleteAutopilot: (id: number) => request<any>(`/data/autopilots/${id}`, { method: "DELETE" }),
+  runAutopilot: (id: number) => request<any>(`/data/autopilots/${id}/run`, { method: "POST" }),
+
+  // Drafts of the automation builder and manual publishing (saved on the server as the customer works)
+  getDraft: (kind: "automation" | "manual_publish") => request<any>(`/drafts/${kind}`, { forceRefresh: true }),
+  saveDraft: (kind: "automation" | "manual_publish", payload: any, step: number) =>
+    request<any>(`/drafts/${kind}`, { method: "PUT", body: JSON.stringify({ payload, step }) }),
+  deleteDraft: (kind: "automation" | "manual_publish") => request<any>(`/drafts/${kind}`, { method: "DELETE" }),
   getHealth: () => request<any>("/ai-providers/health"),
 
   // Database Connections
@@ -196,10 +365,16 @@ export const api = {
   }),
 
   // Schema Discovery
-  getSchema: (id: number) => request<any>(`/connections/${id}/schema`),
+  getSchema: (id: number) => request<any>(`/connections/${id}/schema`).then(normalizeSchema),
   refreshSchema: (id: number) => request<any>(`/connections/${id}/refresh-schema`, { method: "POST" }),
   getLookupValues: (connectionId: number, table: string, search?: string) =>
     request<any[]>(`/connections/${connectionId}/lookup-values?table=${encodeURIComponent(table)}${search ? `&search=${encodeURIComponent(search)}` : ""}`),
+  /** Owner: rows of one table on this connection are view only or editable ("default" removes the override). */
+  setTableAccess: (connectionId: number, table: string, access: "read_only" | "writable" | "default") =>
+    request<{ table: string; data_class: string; data_class_default: string; message: string }>(
+      `/connections/${connectionId}/tables/${encodeURIComponent(table)}/access`,
+      { method: "PUT", body: JSON.stringify({ access }) },
+    ),
   annotateTable: (connectionId: number, table: string, data: any) =>
     request<any>(`/connections/${connectionId}/tables/${encodeURIComponent(table)}/annotate`, {
       method: "POST",
@@ -234,6 +409,9 @@ export const api = {
   }) => request<any>("/model-roles", { method: "PUT", body: JSON.stringify(data) }),
   probeModelRole: (data: { provider: string; model_name?: string }) =>
     request<any>("/model-roles/probe", { method: "POST", body: JSON.stringify(data) }),
+  /** Four real tasks run against the model (can take a few minutes on a local model). */
+  modelReadinessTest: (data: { provider: string; model_name?: string }) =>
+    request<any>("/model-roles/readiness-test", { method: "POST", body: JSON.stringify(data) }),
 
   previewAIGeneration: (data: any) =>
     request<any>("/automations/preview-ai", { method: "POST", body: JSON.stringify(data) }),
@@ -333,6 +511,8 @@ export const api = {
   /** Full dry run of a draft automation: content, images, relations and the exact write plan. Never writes. */
   previewAutomation: (data: any) =>
     request<any>("/automations/preview", { method: "POST", body: JSON.stringify(data) }),
+  /** The same preview with live progress (each real step as it happens). */
+  previewAutomationStream: (data: any, onEvent: (e: ProgressEvent) => void) => streamRequest("/automations/preview?stream=1", data, onEvent),
   /** Validate and describe a draft schedule (next runs, total runs). */
   previewSchedule: (data: {
     schedule_type: string;
@@ -376,7 +556,13 @@ export const api = {
     }),
 
   // Audit Logs
-  listAuditLogs: () => request<any[]>("/audit-logs"),
+  listAuditLogs: (filters: { category?: string; search?: string; from?: string; to?: string; page?: number } = {}) =>
+    request<any>(`/audit-logs${toQuery(filters)}`, { forceRefresh: true }),
+  orbitActivity: (filters: { search?: string; page?: number } = {}) =>
+    request<any>(`/audit-logs/orbit${toQuery(filters)}`, { forceRefresh: true }),
+  /** Downloads the filtered audit log as CSV (authenticated fetch, then a local file). */
+  exportAuditLog: (filters: { category?: string; search?: string; from?: string; to?: string } = {}) =>
+    downloadFile(`/audit-logs/export${toQuery(filters)}`, `audit-log-${new Date().toISOString().slice(0, 10)}.csv`),
 
   // Autonomous AI Agent Assistant
   listAgentConversations: () => request<any>("/agent/conversations"),

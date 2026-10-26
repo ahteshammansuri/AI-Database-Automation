@@ -6,6 +6,7 @@ use App\Models\AgentMessage;
 use App\Models\AgentTask;
 use App\Models\Automation;
 use App\Models\AutomationExecution;
+use App\Models\DataAutopilot;
 use App\Models\DbConnection;
 use App\Models\KnowledgeDocument;
 use App\Models\SchemaSnapshot;
@@ -43,7 +44,7 @@ class RuntimeContextBuilder
                 'target_table' => $a->target_table,
                 'schedule_type' => $a->schedule_type,
                 'is_active' => (bool) $a->is_active,
-            ])->all();
+            ] + $this->scheduleFacts($a))->all();
 
         $context = [
             'now' => now()->toIso8601String(),
@@ -54,6 +55,27 @@ class RuntimeContextBuilder
             'knowledge_documents' => KnowledgeDocument::where('user_id', $user->id)->orderByDesc('id')->limit(20)->get(['id', 'title', 'status'])
                 ->map(fn ($d) => ['id' => $d->id, 'title' => $d->title, 'status' => $d->status])->all(),
             'pending_approvals' => AutomationExecution::where('user_id', $user->id)->where('status', 'PENDING_APPROVAL')->count(),
+            // Latest runs, so "what happened / did it work" is answered from facts.
+            'recent_runs' => AutomationExecution::where('user_id', $user->id)->with('automation:id,name')->orderByDesc('id')->limit(5)->get()
+                ->map(fn ($e) => array_filter([
+                    'id' => $e->id,
+                    'automation' => $e->automation?->name,
+                    'status' => $e->status,
+                    'publication_time' => $e->publication_time?->toIso8601String(),
+                    'record_id' => $e->target_record_id,
+                    'error' => $e->error_message ? mb_substr((string) $e->error_message, 0, 160) : null,
+                ], fn ($v) => $v !== null))->all(),
+            'data_autopilots' => DataAutopilot::where('user_id', $user->id)->orderBy('id')->limit(10)->get()
+                ->map(fn ($p) => array_filter([
+                    'id' => $p->id,
+                    'connection_id' => $p->connection_id,
+                    'table' => $p->table_name,
+                    'active' => (bool) $p->is_active,
+                    'next_run_at' => $p->is_active ? $p->next_run_at?->toIso8601String() : null,
+                    'last_status' => $p->last_status,
+                ], fn ($v) => $v !== null))->all(),
+            // Times are said in this zone (null: the user's browser zone, shown on the page).
+            'user_timezone' => $user->timezone,
             'model' => $modelInfo,
             'credentials_captured' => $this->vault->capturedKinds($task),
             'conversation_memory' => $task->conversation?->metadata['memory'] ?? (object) [],
@@ -93,6 +115,22 @@ class RuntimeContextBuilder
         }
 
         return $context;
+    }
+
+    /** State and next run of an automation's schedule (never fails the turn). */
+    private function scheduleFacts(Automation $a): array
+    {
+        try {
+            $summary = $a->scheduleSummary();
+            $next = $summary['next_run'] ?? null;
+            return array_filter([
+                'state' => $summary['state'] ?? null,
+                'next_generation_at' => $next['generation_at'] ?? null,
+                'next_publication_at' => $next['publication_at'] ?? null,
+            ], fn ($v) => $v !== null);
+        } catch (\Throwable) {
+            return [];
+        }
     }
 
     /**

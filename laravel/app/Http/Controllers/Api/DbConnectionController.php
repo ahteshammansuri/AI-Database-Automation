@@ -54,6 +54,8 @@ class DbConnectionController extends Controller
             'db_type' => 'nullable|string|in:mysql,mariadb,postgresql,postgres,pgsql,sqlite,sqlsrv,mongodb',
             'access_mode' => 'nullable|string|in:read_only,read_write,read_write_delete',
             'data_policy' => 'nullable|array',
+            'data_policy.table_overrides' => 'sometimes|array|max:500',
+            'data_policy.table_overrides.*' => 'string|in:read_only,writable',
             'data_timezone' => 'nullable|string|max:64|timezone:all',
             'test_before_save' => 'nullable|boolean',
         ]), self::targetMessages());
@@ -188,6 +190,8 @@ class DbConnectionController extends Controller
             'name' => 'sometimes|required|string|max:120',
             'access_mode' => 'nullable|string|in:read_only,read_write,read_write_delete',
             'data_policy' => 'nullable|array',
+            'data_policy.table_overrides' => 'sometimes|array|max:500',
+            'data_policy.table_overrides.*' => 'string|in:read_only,writable',
             'data_timezone' => 'nullable|string|max:64|timezone:all',
             'is_active' => 'nullable|boolean',
         ]), self::targetMessages());
@@ -246,9 +250,14 @@ class DbConnectionController extends Controller
             $dataToUpdate['status'] = 'unverified'; // Require new test when credentials rotate
         }
 
+        $before = $connection->only(array_keys($dataToUpdate));
         $connection->update($dataToUpdate);
 
-        AuditLog::log($request->user()->id, 'CONNECTION_UPDATED', 'DbConnection', (string) $connection->id);
+        $changes = AuditLog::changes($before, $connection->only(array_keys($dataToUpdate)), ['encrypted_password']);
+        AuditLog::log($request->user()->id, 'CONNECTION_UPDATED', 'DbConnection', (string) $connection->id, [
+            'name' => $connection->name,
+            'changes' => $changes,
+        ]);
 
         LiveEventService::publish($request->user()->id, 'connection.updated', [
             'id' => $connection->id,

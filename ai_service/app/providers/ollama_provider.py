@@ -5,6 +5,8 @@ import threading
 import time
 from typing import Dict, Any, List, Optional
 import httpx
+
+from ai_service.app import usage
 from ai_service.app.providers.base import (
     BaseAIProvider,
     ProviderError,
@@ -194,7 +196,7 @@ class OllamaProvider(BaseAIProvider):
             "stream": False,
             "keep_alive": "30m",
             "options": {
-                "temperature": 0.7,
+                "temperature": kwargs.get("temperature") if kwargs.get("temperature") is not None else 0.7,
                 "num_predict": budget,
                 # Room for system contract + RAG context + the answer without silent truncation,
                 # but no larger than needed (a bigger window costs memory and prompt-eval time on CPU).
@@ -208,6 +210,7 @@ class OllamaProvider(BaseAIProvider):
                 raise RuntimeError(f"Ollama generation failed with status {res.status_code}: {res.text}")
 
             response_json = res.json()
+            usage.record_ollama(self.model, response_json, "generate")
             raw_response = response_json.get("response", "{}")
 
             cleaned = self._clean_json_output(raw_response)
@@ -337,6 +340,7 @@ class OllamaProvider(BaseAIProvider):
                 "idle": f"The local model stopped producing output for {int(idle)}s; the request was cancelled.",
             }[state["reason"]])
         final["content"] = "".join(content_parts)
+        usage.record_ollama(self.model, final)
         return final
 
     @staticmethod
@@ -359,6 +363,7 @@ class OllamaProvider(BaseAIProvider):
         timeout: float = 120.0,
         temperature: float = 0.2,
         deadline: Optional[float] = None,
+        max_output_tokens: Optional[int] = None,
         **_: Any,
     ) -> str:
         self._assert_model_installed()
@@ -369,7 +374,7 @@ class OllamaProvider(BaseAIProvider):
             "stream": True,
             "keep_alive": "30m",
             # Short JSON decisions; a smaller context lowers memory (and swap) pressure on CPU-only machines.
-            "options": {"temperature": temperature, "num_ctx": self._agent_ctx(messages, json_schema), "num_predict": settings.AGENT_NUM_PREDICT},
+            "options": {"temperature": temperature, "num_ctx": self._agent_ctx(messages, json_schema), "num_predict": max_output_tokens or settings.AGENT_NUM_PREDICT},
         }
         deadline = deadline if deadline is not None else time.monotonic() + timeout
         data = self._stream_chat(payload, ttft=settings.AGENT_FIRST_TOKEN_TIMEOUT,

@@ -14,6 +14,10 @@
       "title": "Schema Explorer"
     },
     {
+      "route": "/data",
+      "title": "Data (browse and change rows)"
+    },
+    {
       "route": "/automations",
       "title": "Automations"
     },
@@ -48,6 +52,10 @@
     {
       "route": "/security",
       "title": "Security & Guardrails"
+    },
+    {
+      "route": "/account",
+      "title": "Account settings"
     }
   ],
   "surfaces": [
@@ -211,6 +219,53 @@
       ]
     },
     {
+      "id": "data.page",
+      "route": "/data",
+      "title": "Data",
+      "purpose": "Rows of the user's own tables. Choose the connection and table, search, then open the add-row form or the AI sample rows window. Adding, editing or deleting always ends in the page's own preview, confirmed by the user; there is no action here that writes rows.",
+      "openable": false,
+      "fields": [
+        {
+          "name": "connection",
+          "label": "Connection",
+          "type": "searchable_select",
+          "required": true
+        },
+        {
+          "name": "table",
+          "label": "Table",
+          "type": "searchable_select",
+          "required": true
+        },
+        {
+          "name": "search",
+          "label": "Search the rows",
+          "type": "text",
+          "required": false
+        }
+      ],
+      "actions": [
+        {
+          "id": "refresh",
+          "label": "Reload the rows",
+          "consequential": false,
+          "timeout_s": 30
+        },
+        {
+          "id": "add_row",
+          "label": "Open the add-row form",
+          "consequential": false,
+          "timeout_s": 10
+        },
+        {
+          "id": "sample_rows",
+          "label": "Open the AI sample rows window",
+          "consequential": false,
+          "timeout_s": 10
+        }
+      ]
+    },
+    {
       "id": "automations.list",
       "route": "/automations",
       "title": "Automations",
@@ -224,6 +279,22 @@
           "row": true,
           "consequential": true,
           "timeout_s": 30,
+          "verifies": "Automation"
+        },
+        {
+          "id": "pause",
+          "label": "Pause this automation (no change if already paused)",
+          "row": true,
+          "consequential": true,
+          "timeout_s": 20,
+          "verifies": "Automation"
+        },
+        {
+          "id": "resume",
+          "label": "Resume (activate) this automation (no change if already active)",
+          "row": true,
+          "consequential": true,
+          "timeout_s": 20,
           "verifies": "Automation"
         },
         {
@@ -582,7 +653,7 @@
       "id": "manual.form",
       "route": "/manual-schedule",
       "title": "Manual publishing form",
-      "purpose": "Write and publish (or schedule) content without AI into a connected table. Choose the connection and table first; read_screen lists that table's columns, which you fill as col.<column_name>. Foreign-key columns are dropdowns (choose_option).",
+      "purpose": "Write and publish (or schedule) one row without AI into a connected table. Only tables that may be written are offered. Choose the connection and table first; read_screen lists that table's columns, which you fill as col.<column_name>. A linked column (for example category_id) takes an existing row's id, or a name: then a new linked row is added first in the same transaction (an existing row with that name is reused).",
       "openable": false,
       "fields": [
         {
@@ -633,6 +704,12 @@
           "label": "Fill the form with an AI draft from the topic",
           "consequential": false,
           "timeout_s": 240
+        },
+        {
+          "id": "review",
+          "label": "Check the row against the database and open the review (nothing is written)",
+          "consequential": false,
+          "timeout_s": 60
         },
         {
           "id": "publish",
@@ -973,7 +1050,7 @@
       "id": "audit.page",
       "route": "/audit-logs",
       "title": "Audit logs",
-      "purpose": "Security-relevant actions in this workspace (latest entries). Filter by category, open an entry with inspect. For counts, date ranges or older entries use the list_audit_logs and get_audit_log_entry tools.",
+      "purpose": "What happened in this workspace, as plain sentences (latest entries). Filter by tab (all, connections, automations, approvals, data, ai, account, orbit) or search, and open an entry with inspect to see what changed. For counts, date ranges or older entries use the list_audit_logs and get_audit_log_entry tools.",
       "openable": false,
       "fields": [
         {
@@ -982,12 +1059,21 @@
           "type": "select",
           "required": false,
           "enum": [
-            "ALL",
-            "CONNECTION",
-            "SCHEMA",
-            "AUTOMATION",
-            "APPROVAL"
+            "all",
+            "connections",
+            "automations",
+            "approvals",
+            "data",
+            "ai",
+            "account",
+            "orbit"
           ]
+        },
+        {
+          "name": "search",
+          "label": "Search the audit log",
+          "type": "text",
+          "required": false
         }
       ],
       "actions": [

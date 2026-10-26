@@ -67,7 +67,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ pendingApprovalsCount = 0, mob
             <div key={group.label}>
               <div className="px-3 pb-1.5 text-[10.5px] font-semibold uppercase tracking-[0.16em] text-slate-500">{group.label}</div>
               <div className="space-y-0.5">
-                {group.items.map((link) => {
+                {group.items.filter((link) => !link.feature || (config.features as Record<string, boolean>)[link.feature] !== false).map((link) => {
                   const Icon = link.icon;
                   const isActive = location.pathname === link.to;
                   const badge = link.badgeKey === "approvals" && pendingApprovalsCount > 0 ? pendingApprovalsCount : undefined;

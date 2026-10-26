@@ -22,10 +22,19 @@ class OrbitKnowledgeGuide extends Model
         return $this->belongsTo(Admin::class, 'updated_by');
     }
 
-    /** What the AI service receives for this guide; its hash tells whether the live copy is current. */
+    /**
+     * What the AI service receives for this guide; its hash tells whether the live copy is current. "{brand}" becomes
+     * the brand name from the admin settings, so renaming the product changes what Orbit says after the next publish.
+     */
     public function payload(): array
     {
-        return ['name' => $this->slug, 'title' => $this->title, 'content' => $this->body];
+        $brand = (string) config('platform.brand_name', 'Rowpilot');
+
+        return [
+            'name' => $this->slug,
+            'title' => str_replace('{brand}', $brand, (string) $this->title),
+            'content' => str_replace('{brand}', $brand, (string) $this->body),
+        ];
     }
 
     public function contentHash(): string

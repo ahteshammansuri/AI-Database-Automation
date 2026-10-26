@@ -19,4 +19,8 @@ return Application::configure(basePath: dirname(__DIR__))
         $exceptions->shouldRenderJsonWhen(function ($request, $e) {
             return $request->is('api/*') || $request->expectsJson();
         });
+        // Data policy refusals and data errors carry a safe, plain message for the customer.
+        $exceptions->render(function (\App\Services\Data\DataException $e, $request) {
+            return $request->is('api/*') || $request->expectsJson() ? response()->json(['message' => $e->getMessage()] + $e->toArray(), 422) : null;
+        });
     })->create();

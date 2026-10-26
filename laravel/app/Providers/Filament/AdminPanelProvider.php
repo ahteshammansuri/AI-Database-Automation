@@ -40,7 +40,7 @@ class AdminPanelProvider extends PanelProvider
             ->multiFactorAuthentication([
                 AppAuthentication::make()->recoverable(),
             ])
-            ->brandName(fn () => config('platform.brand_name', 'DataAuto') . ' Admin')
+            ->brandName(fn () => config('platform.brand_name', 'Rowpilot') . ' Admin')
             ->brandLogo(fn () => view('filament.admin.brand'))
             ->brandLogoHeight('2.25rem')
             ->favicon(asset('favicon.svg'))

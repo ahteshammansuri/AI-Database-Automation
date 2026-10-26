@@ -5,7 +5,7 @@ use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
 
 /**
- * Orbit Remote: a phone paired by QR code sends spoken requests to the user's open DataAuto tab and mirrors
+ * Orbit Remote: a phone paired by QR code sends spoken requests to the user's open portal tab and mirrors
  * the web Orbit. Pairing codes and device tokens are stored only as SHA-256 hashes.
  */
 return new class extends Migration

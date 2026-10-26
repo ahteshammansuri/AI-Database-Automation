@@ -248,6 +248,12 @@ class AdminPanelTest extends TestCase
 
     // ------------------------------------------------------------------ Orbit knowledge
 
+    /** The migrations add the product guides; these tests start from an empty set of their own. */
+    private function withoutShippedGuides(): void
+    {
+        OrbitKnowledgeGuide::query()->delete();
+    }
+
     private function guide(string $slug = 'billing_guide', bool $published = true): OrbitKnowledgeGuide
     {
         return OrbitKnowledgeGuide::create(['slug' => $slug, 'title' => 'Billing', 'body' => "## Plans\nThe Pro plan has no limits.", 'is_published' => $published, 'sort' => 10]);
@@ -256,6 +262,7 @@ class AdminPanelTest extends TestCase
     public function test_publishing_sends_included_guides_and_marks_them_live()
     {
         $this->actingAs($this->admin('content_editor'), 'admin');
+        $this->withoutShippedGuides();
         Http::fake(['*/v1/rag/product-guides' => Http::response(['success' => true, 'guides' => 1, 'chunks' => 1, 'version' => 'abc123', 'embedding_backend' => 'ollama:nomic-embed-text'])]);
         $live = $this->guide();
         $hidden = $this->guide('old_faq', false);
@@ -278,6 +285,7 @@ class AdminPanelTest extends TestCase
     public function test_a_failed_publish_changes_nothing_and_publishing_nothing_is_refused()
     {
         $this->actingAs($this->admin(Admin::SUPER_ADMIN), 'admin');
+        $this->withoutShippedGuides();
         $this->guide('draft_only', false);
         try {
             OrbitKnowledge::publish();
@@ -295,6 +303,66 @@ class AdminPanelTest extends TestCase
             $this->assertStringContainsString('Invalid guide name', $e->getMessage());
         }
         $this->assertSame('pending', $guide->fresh()->liveState());
+    }
+
+    public function test_guides_live_in_the_database_with_the_brand_filled_in_and_are_resent_when_lost()
+    {
+        $slugs = OrbitKnowledgeGuide::orderBy('sort')->pluck('slug')->all();
+        foreach (['product_context_rag', 'portal_tour', 'automations_guide', 'security_guide', 'data_tools_guide'] as $slug) {
+            $this->assertContains($slug, $slugs, "{$slug} is stored in the database");
+        }
+        $this->assertDirectoryDoesNotExist(base_path('../docs/orbit-agent'), 'no guide is kept as a file');
+
+        config(['platform.brand_name' => 'Acme Pilot']);
+        $payload = OrbitKnowledgeGuide::where('slug', 'product_context_rag')->first()->payload();
+        $this->assertStringContainsString('Acme Pilot', $payload['title'] . $payload['content']);
+        $this->assertStringNotContainsString('{brand}', $payload['title'] . $payload['content']);
+
+        // The AI service still has the guides: nothing is sent.
+        Http::fake(['*/v1/rag/product-guides/status' => Http::response(['source' => 'published', 'guides' => 5, 'chunks' => 79])]);
+        $this->assertNull(OrbitKnowledge::syncIfLost());
+        Http::assertNotSent(fn ($r) => $r->method() === 'POST');
+    }
+
+    public function test_guides_are_resent_when_the_ai_service_lost_them()
+    {
+        Http::fake([
+            '*/v1/rag/product-guides/status' => Http::response(['source' => 'none', 'guides' => 0, 'chunks' => 0]),
+            '*/v1/rag/product-guides' => Http::response(['success' => true, 'guides' => 5, 'chunks' => 70, 'version' => 'v1', 'embedding_backend' => 'ollama:nomic-embed-text']),
+        ]);
+        $this->artisan('orbit:sync-knowledge')->assertSuccessful();
+        Http::assertSent(fn ($r) => $r->method() === 'POST' && str_ends_with($r->url(), '/v1/rag/product-guides') && count($r['guides']) >= 5);
+    }
+
+    public function test_activity_logs_export_what_is_filtered_as_readable_csv()
+    {
+        $this->actingAs($this->admin(Admin::SUPER_ADMIN), 'admin');
+        Filament::setCurrentPanel(Filament::getPanel('admin'));
+        $ann = User::factory()->create(['name' => 'Ann Customer']);
+        $tricky = User::factory()->create(['name' => '=SUM(1,2)']);
+        \App\Models\AuditLog::log($tricky->id, 'AUTOMATION_DELETED', 'Automation', '9');
+        \App\Models\AuditLog::log($ann->id, 'AUTOMATION_UPDATED', 'Automation', '7', ['name' => '=HYPERLINK("x")', 'changes' => ['timeout_policy' => ['from' => 'KEEP_DRAFT', 'to' => 'CANCEL']]]);
+        \App\Models\AuditLog::log($ann->id, 'CONNECTION_CREATED', 'DbConnection', '3', ['name' => 'Shop', 'database' => 'shop']);
+
+        $page = Livewire::test(\App\Filament\Resources\CustomerActivity\Pages\ListCustomerActivity::class)
+            ->filterTable('category', 'automations');
+        ob_start();
+        $page->instance()->exportCsv()->sendContent();
+        $csv = ob_get_clean();
+
+        $this->assertStringStartsWith('time_utc,customer,customer_email,what_happened', $csv);
+        $this->assertStringContainsString('timeout_policy: KEEP_DRAFT → CANCEL', $csv);
+        $this->assertStringContainsString('Ann Customer', $csv);
+        $this->assertStringNotContainsString('Added the connection', $csv, 'only the filtered area is exported');
+        $this->assertStringContainsString("'=SUM(1,2)", $csv, 'a cell that would start a formula is neutralised');
+        $this->assertStringNotContainsString(',=SUM', $csv);
+        $this->assertDatabaseHas('admin_activity_logs', ['action' => 'customer_activity.exported']);
+
+        ob_start();
+        Livewire::test(\App\Filament\Resources\AdminActivity\Pages\ListAdminActivity::class)->instance()->exportCsv()->sendContent();
+        $adminCsv = ob_get_clean();
+        $this->assertStringStartsWith('time_utc,admin,action,subject,changes', $adminCsv);
+        $this->assertStringContainsString('Customer activity log', $adminCsv);
     }
 
     public function test_editing_a_guide_in_the_panel_records_what_changed()

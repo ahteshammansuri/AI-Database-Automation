@@ -187,3 +187,22 @@ Filament v5 panel at `/admin` for the platform's operators (see `docs/tasks/2026
 | A6 | System health and failed jobs | DONE (tested, browser) |
 | A7 | Portal and website read the settings and content | DONE (tsc, lint, unit tests, browser) |
 | A8 | Feature tests (`AdminPanelTest`, 22), full suites, docs | DONE (see PROGRESS.md) |
+
+## Portal, automations, data tools, Orbit and admin upgrade (2026-10-22 / 2026-10-23)
+Task folder: `docs/tasks/2026-10-22_portal-automation-orbit-admin/` (PLAN.md and a step-by-step PROGRESS.md).
+
+| Area | Delivered |
+| :--- | :--- |
+| Dashboard | Live "next up" card (running now with steps, next run with countdown, or last published). |
+| Automation builder | Server drafts, table detection for templates, clearer fields with linked-parent creation shown, edit from review without redoing steps, streamed preview progress, suggested knowledge documents, no mock provider. |
+| Schema Explorer | Row estimates, what a new row needs, links to/from tables, Secret/Personal badges, per-table access (view only / editable) by the owner. |
+| Data | Data Explorer and Manager: browse, add, edit, delete with previews and undo; AI sample rows; data autopilot. |
+| Manual publishing | Real linked-row picker (existing or new parent), only writable tables, database defaults only, drafts, AI draft keeps typed text. |
+| Approvals / executions | Card actions fixed, version history and notes, deadline policy shown, live refresh; status summary, AI usage per run, correct version for edits. |
+| Audit / account | Plain sentences, before → after, Orbit activity, CSV export; Account settings (profile, timezone, password, sessions, AI usage). |
+| Orbit | Knowledge only in the database; visible actions enforced; richer user context with priority-aware compaction; speech timing fixes. |
+| Admin | Refined light/dark theme, customer models and tokens, AI usage page, Automation runs, Orbit request detail with conversation, activity exports, connection/automation/phone detail, Orbit knowledge health. |
+| AI usage | Every model call records tokens (`X-AI-Usage` → `ai_usage_events`) for customers, runs and Orbit requests. |
+
+Results and test runs: see that task's PROGRESS.md.
+

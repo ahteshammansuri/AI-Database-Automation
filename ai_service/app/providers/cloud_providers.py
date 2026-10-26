@@ -3,6 +3,8 @@ import re
 import time
 from typing import Dict, Any, List, Optional
 import httpx
+
+from ai_service.app import usage
 from ai_service.app.providers.base import BaseAIProvider, ProviderError, ProviderUnavailableError
 from ai_service.app.providers.mock_provider import MockAIProvider
 
@@ -154,7 +156,7 @@ class OpenAIProvider(BaseAIProvider):
     def list_models(self) -> List[str]:
         return ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"]
 
-    def chat_structured(self, messages, json_schema, timeout: float = 120.0, temperature: float = 0.2, deadline=None, **_) -> str:
+    def chat_structured(self, messages, json_schema, timeout: float = 120.0, temperature: float = 0.2, deadline=None, max_output_tokens=None, **_) -> str:
         if deadline is not None:
             timeout = max(5.0, min(timeout, deadline - time.monotonic()))
         if not self.api_key:
@@ -168,10 +170,12 @@ class OpenAIProvider(BaseAIProvider):
                 "response_format": {"type": "json_object"},
                 "messages": [{"role": "system", "content": system}] + convo,
                 "temperature": temperature,
+                **({"max_tokens": int(max_output_tokens)} if max_output_tokens else {}),
             },
             timeout,
             "OpenAI",
         )
+        usage.record_openai(self.model_name, data)
         return _clean_json_output(data["choices"][0]["message"]["content"] or "")
 
 
@@ -200,7 +204,7 @@ class OpenAIProvider(BaseAIProvider):
                 {"role": "system", "content": full_system},
                 {"role": "user", "content": prompt}
             ],
-            "temperature": 0.7
+            "temperature": kwargs.get("temperature") if kwargs.get("temperature") is not None else 0.7
         }
 
         with httpx.Client(timeout=180.0) as client:
@@ -216,6 +220,7 @@ class OpenAIProvider(BaseAIProvider):
                 raise RuntimeError(f"OpenAI completion error ({res.status_code}): {res.text[:200]}")
 
             data = res.json()
+            usage.record_openai(self.model_name, data, "generate")
             raw = data["choices"][0]["message"]["content"]
             parsed = json.loads(_clean_json_output(raw))
             return parsed
@@ -283,7 +288,7 @@ class GeminiProvider(BaseAIProvider):
     def list_models(self) -> List[str]:
         return ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.8-flash", "gemini-flash-latest"]
 
-    def chat_structured(self, messages, json_schema, timeout: float = 120.0, temperature: float = 0.2, deadline=None, **_) -> str:
+    def chat_structured(self, messages, json_schema, timeout: float = 120.0, temperature: float = 0.2, deadline=None, max_output_tokens=None, **_) -> str:
         if deadline is not None:
             timeout = max(5.0, min(timeout, deadline - time.monotonic()))
         if not self.api_key:
@@ -296,7 +301,8 @@ class GeminiProvider(BaseAIProvider):
         payload = {
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": contents,
-            "generationConfig": {"responseMimeType": "application/json", "temperature": temperature},
+            "generationConfig": {"responseMimeType": "application/json", "temperature": temperature,
+                                 **({"maxOutputTokens": int(max_output_tokens)} if max_output_tokens else {})},
         }
 
         # Candidate models with fast high-availability flash-lite fallback if primary hits 503 high demand / 429
@@ -315,6 +321,7 @@ class GeminiProvider(BaseAIProvider):
                     timeout,
                     f"Gemini ({mod})",
                 )
+                usage.record_gemini(mod, data)
                 parts = (data.get("candidates") or [{}])[0].get("content", {}).get("parts", [])
                 text = parts[0].get("text", "") if parts else ""
                 if text.strip():
@@ -357,7 +364,7 @@ class GeminiProvider(BaseAIProvider):
             "contents": [{"parts": [{"text": full_prompt}]}],
             "generationConfig": {
                 "responseMimeType": "application/json",
-                "temperature": 0.7
+                "temperature": kwargs.get("temperature") if kwargs.get("temperature") is not None else 0.7
             }
         }
 
@@ -376,6 +383,7 @@ class GeminiProvider(BaseAIProvider):
                     180.0,
                     f"Gemini ({mod})",
                 )
+                usage.record_gemini(mod, data, "generate")
                 candidates_list = data.get("candidates", [])
                 if not candidates_list:
                     continue
@@ -396,9 +404,9 @@ class GeminiProvider(BaseAIProvider):
 class ClaudeProvider(BaseAIProvider):
     """Anthropic Claude API Provider."""
 
-    def __init__(self, api_key: str, model_name: str = "claude-3-5-haiku-latest"):
+    def __init__(self, api_key: str, model_name: str = "claude-haiku-5-5"):
         self.api_key = api_key.strip()
-        self.model_name = model_name or "claude-3-5-haiku-latest"
+        self.model_name = model_name or "claude-haiku-5-5"
 
     def test_connection(self) -> Dict[str, Any]:
         if not self.api_key or len(self.api_key) < 15:
@@ -421,7 +429,7 @@ class ClaudeProvider(BaseAIProvider):
                         "content-type": "application/json"
                     },
                     json={
-                        "model": "claude-3-haiku-20240307",
+                        "model": self.model_name,
                         "max_tokens": 1,
                         "messages": [{"role": "user", "content": "ping"}]
                     }
@@ -457,9 +465,9 @@ class ClaudeProvider(BaseAIProvider):
             }
 
     def list_models(self) -> List[str]:
-        return ["claude-3-5-sonnet-latest", "claude-3-5-haiku-latest", "claude-3-opus-latest"]
+        return ["claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-5-5"]
 
-    def chat_structured(self, messages, json_schema, timeout: float = 120.0, temperature: float = 0.2, deadline=None, **_) -> str:
+    def chat_structured(self, messages, json_schema, timeout: float = 120.0, temperature: float = 0.2, deadline=None, max_output_tokens=None, **_) -> str:
         if deadline is not None:
             timeout = max(5.0, min(timeout, deadline - time.monotonic()))
         if not self.api_key:
@@ -468,10 +476,11 @@ class ClaudeProvider(BaseAIProvider):
         data = _post_json(
             "https://api.anthropic.com/v1/messages",
             {"x-api-key": self.api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-            {"model": self.model_name, "max_tokens": 1024, "system": system, "messages": convo, "temperature": temperature},
+            {"model": self.model_name, "max_tokens": int(max_output_tokens or 1024), "system": system, "messages": convo, "temperature": min(1.0, temperature)},
             timeout,
             "Anthropic",
         )
+        usage.record_anthropic(self.model_name, data)
         blocks = data.get("content", [])
         return _clean_json_output(blocks[0].get("text", "") if blocks else "")
 
@@ -500,7 +509,8 @@ class ClaudeProvider(BaseAIProvider):
             "system": full_system,
             "messages": [
                 {"role": "user", "content": f"{prompt}\nReturn JSON object with keys: {', '.join(required_fields)}."}
-            ]
+            ],
+            **({"temperature": min(1.0, float(kwargs["temperature"]))} if kwargs.get("temperature") is not None else {}),
         }
 
         with httpx.Client(timeout=180.0) as client:
@@ -517,6 +527,7 @@ class ClaudeProvider(BaseAIProvider):
                 raise RuntimeError(f"Claude generation error ({res.status_code}): {res.text[:200]}")
 
             data = res.json()
+            usage.record_anthropic(self.model_name, data, "generate")
             content_blocks = data.get("content", [])
             raw = content_blocks[0]["text"] if content_blocks else "{}"
             parsed = json.loads(_clean_json_output(raw))

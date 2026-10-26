@@ -21,7 +21,10 @@ import { FieldMappingStep } from "../components/automation/FieldMappingStep";
 import { FieldPlan, Mapping, Mode as ColumnMode, PlanColumn, explain, mappingFor, mappingProblems, modeOf, modeOptions, serializeMappings } from "../components/automation/fieldPlan";
 import { ScheduleStep, ScheduleConfig, ApprovalConfig } from "../components/automation/ScheduleStep";
 import { ContentPreview } from "../components/content/ContentPreview";
-import { browserTimeZone, gapMinutes, todayIn, addDays, formatTime12 } from "../lib/schedule";
+import { WorkProgress, type StepStatus, type WorkStep } from "../components/ui/WorkProgress";
+import type { ProgressEvent } from "../services/api";
+import { defaultTimeZone, gapMinutes, todayIn, addDays, formatTime12 } from "../lib/schedule";
+import { bestTableFor, templateLabel, type TemplateKind } from "../lib/tableMatch";
 
 type Mode = "AI_GENERATED" | "MANUAL";
 interface GenerationOptions {
@@ -85,7 +88,7 @@ export const AutomationBuilderPage: React.FC = () => {
   const [searchParams] = useSearchParams();
   const { toast } = useToast();
   const { user } = useAuth();
-  const tz0 = browserTimeZone();
+  const tz0 = defaultTimeZone();
 
   const [step, setStep] = useState(1);
   const [connections, setConnections] = useState<ConnectionProfile[]>([]);
@@ -124,12 +127,20 @@ export const AutomationBuilderPage: React.FC = () => {
 
   const [naturalPrompt, setNaturalPrompt] = useState("");
   const [isProposing, setIsProposing] = useState(false);
+  const [proposeSeconds, setProposeSeconds] = useState(0);
+  useEffect(() => {
+    if (!isProposing) return;
+    setProposeSeconds(0);
+    const t = setInterval(() => setProposeSeconds((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [isProposing]);
   const [proposeFeedback, setProposeFeedback] = useState<string | null>(null);
 
   const [preview, setPreview] = useState<any>(null);
   const [previewError, setPreviewError] = useState<{ message: string; events?: any[] } | null>(null);
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [previewSeconds, setPreviewSeconds] = useState(0);
+  const [previewEvents, setPreviewEvents] = useState<ProgressEvent[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Messages shown directly under the field they are about (client checks on Next, and the server's 422).
@@ -146,12 +157,41 @@ export const AutomationBuilderPage: React.FC = () => {
   const [hydrated, setHydrated] = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
   const [showRecap, setShowRecap] = useState(true);
+  const [draftState, setDraftState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [draftSavedAt, setDraftSavedAt] = useState<string | null>(null);
+  // Set once the customer picks documents themselves; suggestions never override their choice.
+  const [docsTouched, setDocsTouched] = useState(false);
 
   const manual = mode === "MANUAL";
 
   // ---------------------------------------------------------------- templates
-  const applyTemplate = (id: string, cfg: { name: string; topic: string; tone: string; frequency: ScheduleConfig["frequency"]; gen: string; pub: string; approval: boolean; manual?: boolean; length?: GenerationOptions["length"] }) => {
+  // A template also picks the table it is meant for (blog -> the posts table), from the live schema.
+  const [tableNote, setTableNote] = useState<{ found: boolean; text: string } | null>(null);
+  const [pendingKind, setPendingKind] = useState<TemplateKind | null>(null);
+  const pickTableFor = (kind: TemplateKind, tables: any[]) => {
+    const hit = bestTableFor(kind, tables);
+    if (hit) {
+      setTargetTable(hit.table);
+      setTableNote({ found: true, text: `Picked “${hit.table}” for this template. ${hit.reason}` });
+    } else {
+      setTableNote({ found: false, text: `No table in this database looks like ${templateLabel(kind)}. Choose the table to write into.` });
+    }
+  };
+  useEffect(() => {
+    if (pendingKind && schema?.tables) {
+      pickTableFor(pendingKind, schema.tables);
+      setPendingKind(null);
+    }
+  }, [schema, pendingKind]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const applyTemplate = (id: string, cfg: { name: string; topic: string; tone: string; frequency: ScheduleConfig["frequency"]; gen: string; pub: string; approval: boolean; manual?: boolean; length?: GenerationOptions["length"]; kind?: TemplateKind }) => {
     setSelectedTemplateId(id);
+    if (cfg.kind) {
+      if (schema?.tables) pickTableFor(cfg.kind, schema.tables);
+      else setPendingKind(cfg.kind);
+    } else {
+      setTableNote(null);
+    }
     setName(cfg.name);
     setMode(cfg.manual ? "MANUAL" : "AI_GENERATED");
     setAiConfig((p) => ({ ...p, topic: cfg.topic }));
@@ -163,58 +203,102 @@ export const AutomationBuilderPage: React.FC = () => {
 
   const workflowTemplates = [
     { id: "daily_blog", title: "Daily blog post", description: "A new article every day with category, image and SEO fields", icon: FileText, badge: "Popular", color: "text-indigo-600 bg-indigo-50 border-indigo-200",
-      apply: () => applyTemplate("daily_blog", { name: "Daily blog post", topic: "Practical, original articles for our readers about our product area", tone: TONES[0], frequency: "DAILY", gen: "08:30", pub: "09:00", approval: true }) },
+      apply: () => applyTemplate("daily_blog", { name: "Daily blog post", topic: "Practical, original articles for our readers about our product area", tone: TONES[0], frequency: "DAILY", gen: "08:30", pub: "09:00", approval: true, kind: "blog" }) },
     { id: "weekly_deep_dive", title: "Weekly deep dive", description: "One long, detailed article each week, reviewed by email", icon: BookOpen, badge: "Long form", color: "text-violet-600 bg-violet-50 border-violet-200",
-      apply: () => applyTemplate("weekly_deep_dive", { name: "Weekly deep dive", topic: "In-depth guides with examples and step-by-step instructions", tone: TONES[1], frequency: "WEEKLY", gen: "09:00", pub: "11:00", approval: true, length: "long" }) },
+      apply: () => applyTemplate("weekly_deep_dive", { name: "Weekly deep dive", topic: "In-depth guides with examples and step-by-step instructions", tone: TONES[1], frequency: "WEEKLY", gen: "09:00", pub: "11:00", approval: true, length: "long", kind: "longform" }) },
     { id: "news", title: "News and updates", description: "Short, timely news items published twice a day", icon: Zap, badge: "Short", color: "text-amber-600 bg-amber-50 border-amber-200",
-      apply: () => applyTemplate("news", { name: "News updates", topic: "Short news items and announcements relevant to our audience", tone: TONES[3], frequency: "DAILY", gen: "07:30", pub: "08:00", approval: true, length: "short" }) },
+      apply: () => applyTemplate("news", { name: "News updates", topic: "Short news items and announcements relevant to our audience", tone: TONES[3], frequency: "DAILY", gen: "07:30", pub: "08:00", approval: true, length: "short", kind: "news" }) },
     { id: "product_seo", title: "Product descriptions", description: "Benefit-led product copy with SEO fields", icon: Sparkles, badge: "E-commerce", color: "text-emerald-600 bg-emerald-50 border-emerald-200",
-      apply: () => applyTemplate("product_seo", { name: "Product descriptions", topic: "Product highlights, customer benefits and clear specifications", tone: TONES[5], frequency: "WEEKLY", gen: "09:00", pub: "09:30", approval: true, length: "short" }) },
+      apply: () => applyTemplate("product_seo", { name: "Product descriptions", topic: "Product highlights, customer benefits and clear specifications", tone: TONES[5], frequency: "WEEKLY", gen: "09:00", pub: "09:30", approval: true, length: "short", kind: "product" }) },
     { id: "faq", title: "FAQ entries", description: "Question-and-answer pairs grounded in your documents", icon: BookOpen, badge: "Knowledge", color: "text-sky-600 bg-sky-50 border-sky-200",
-      apply: () => applyTemplate("faq", { name: "FAQ entries", topic: "Frequently asked questions with direct, accurate answers", tone: TONES[3], frequency: "DAILY", gen: "10:00", pub: "10:30", approval: true, length: "short" }) },
+      apply: () => applyTemplate("faq", { name: "FAQ entries", topic: "Frequently asked questions with direct, accurate answers", tone: TONES[3], frequency: "DAILY", gen: "10:00", pub: "10:30", approval: true, length: "short", kind: "faq" }) },
     { id: "manual_schedule", title: "Manual (no AI)", description: "Fixed values on a schedule; AI is never called", icon: Calendar, badge: "No AI", color: "text-slate-600 bg-slate-100 border-slate-300",
       apply: () => applyTemplate("manual_schedule", { name: "Scheduled fixed content", topic: "", tone: TONES[0], frequency: "DAILY", gen: "08:30", pub: "09:00", approval: false, manual: true }) },
   ];
 
   // ---------------------------------------------------------------- draft persistence
-  useEffect(() => {
-    try {
-      const raw = sessionStorage.getItem(DRAFT_KEY);
-      if (!raw) return;
-      const d = JSON.parse(raw);
-      if (!d?.name && !d?.targetTable && (d?.step ?? 1) <= 1) return; // nothing worth restoring
-      if (d.name) setName(d.name);
-      if (d.targetTable) setTargetTable(d.targetTable);
-      if (d.mode) setMode(d.mode);
-      if (d.aiConfig) setAiConfig(d.aiConfig);
-      if (d.genOptions) setGenOptions(d.genOptions);
-      if (d.schedule) setSchedule({ ...defaultSchedule(tz0), ...d.schedule });
-      if (d.approval) setApproval(d.approval);
-      if (d.mappings && d.targetTable) {
-        setMappings(d.mappings);
-        mappingsTableRef.current = `${d.connectionId}:${d.targetTable}`;
-      }
-      if (d.connectionId) setSelectedConnId(d.connectionId);
-      if (d.step) setStep(Math.min(d.step, 4));
-      setDraftRestored(true);
-    } catch {
-      // ignore unreadable drafts
-    } finally {
-      setHydrated(true);
+  // The draft lives on the server (every step, the connection, the table and each column choice), so it survives
+  // closing the tab or opening the builder on another device. A draft from the old per-tab storage is moved over once.
+  const applyDraft = (d: any) => {
+    if (d.name) setName(d.name);
+    if (d.targetTable) setTargetTable(d.targetTable);
+    if (d.mode) setMode(d.mode);
+    if (d.aiConfig) setAiConfig((p) => ({ ...p, ...d.aiConfig }));
+    if (d.genOptions) setGenOptions((p) => ({ ...p, ...d.genOptions }));
+    if (d.schedule) setSchedule({ ...defaultSchedule(tz0), ...d.schedule });
+    if (d.approval) setApproval((p) => ({ ...p, ...d.approval }));
+    if (d.mappings && d.targetTable) {
+      setMappings(d.mappings);
+      mappingsTableRef.current = `${d.connectionId}:${d.targetTable}`;
     }
+    if (d.connectionId) setSelectedConnId(d.connectionId);
+    if (d.selectedTemplateId) setSelectedTemplateId(d.selectedTemplateId);
+    if (d.naturalPrompt) setNaturalPrompt(d.naturalPrompt);
+    if (d.docsTouched) setDocsTouched(true);
+    if (d.step) setStep(Math.min(d.step, 5));
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      let d: any = null;
+      try {
+        const res = await api.getDraft("automation");
+        d = res?.draft ? { ...res.draft.payload, step: res.draft.step } : null;
+        setDraftSavedAt(res?.draft?.updated_at ?? null);
+      } catch {
+        // offline: fall back to an old per-tab draft below
+      }
+      if (!d) {
+        try {
+          const raw = sessionStorage.getItem(DRAFT_KEY);
+          d = raw ? JSON.parse(raw) : null;
+        } catch {
+          d = null;
+        }
+      }
+      if (cancelled) return;
+      if (d && (d.name || d.targetTable || (d.step ?? 1) > 1)) {
+        applyDraft(d);
+        setDraftRestored(true);
+      }
+      setHydrated(true);
+    })();
+    return () => { cancelled = true; };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!hydrated) return;
-    try {
-      sessionStorage.setItem(DRAFT_KEY, JSON.stringify({ name, targetTable, mode, aiConfig, genOptions, schedule, approval, mappings, connectionId: selectedConnId, step }));
-    } catch {
-      // storage full or blocked
+    // Nothing started yet (only automatic defaults): no draft to keep.
+    if (!name.trim() && !selectedTemplateId && !naturalPrompt.trim() && step === 1) {
+      setDraftState("idle");
+      return;
     }
-  }, [hydrated, name, targetTable, mode, aiConfig, genOptions, schedule, approval, mappings, selectedConnId, step]);
+    const payload = { name, targetTable, mode, aiConfig, genOptions, schedule, approval, mappings, connectionId: selectedConnId, selectedTemplateId, naturalPrompt, docsTouched };
+    setDraftState("saving");
+    const t = setTimeout(async () => {
+      try {
+        const res = await api.saveDraft("automation", payload, step);
+        setDraftSavedAt(res?.saved_at ?? new Date().toISOString());
+        setDraftState("saved");
+        sessionStorage.removeItem(DRAFT_KEY);
+      } catch {
+        setDraftState("error");
+      }
+    }, 800);
+    return () => clearTimeout(t);
+  }, [hydrated, name, targetTable, mode, aiConfig, genOptions, schedule, approval, mappings, selectedConnId, step, selectedTemplateId, naturalPrompt, docsTouched]);
+
+  const discardDraft = () => {
+    sessionStorage.removeItem(DRAFT_KEY);
+    api.deleteDraft("automation").catch(() => {});
+  };
 
   const handleClearDraft = () => {
-    sessionStorage.removeItem(DRAFT_KEY);
+    discardDraft();
+    setSelectedTemplateId(null);
+    setNaturalPrompt("");
+    setDocsTouched(false);
     setName("");
     setMode("AI_GENERATED");
     setAiConfig((p) => ({ ...p, topic: "", document_ids: [] }));
@@ -257,7 +341,7 @@ export const AutomationBuilderPage: React.FC = () => {
   }, [searchParams]);
 
   useEffect(() => {
-    if (!selectedConnId) return;
+    if (!selectedConnId || !hydrated) return;
     let cancelled = false;
     api.getSchema(selectedConnId).then((s) => {
       if (cancelled) return;
@@ -271,16 +355,23 @@ export const AutomationBuilderPage: React.FC = () => {
       });
     }).catch((err) => !cancelled && setError(err.message));
     return () => { cancelled = true; };
-  }, [selectedConnId, searchParams]);
+  }, [selectedConnId, searchParams, hydrated]);
+
+  // The table currently chosen; a field plan that arrives for an older choice is ignored.
+  const currentPlanKey = useRef("");
+  useEffect(() => {
+    currentPlanKey.current = `${selectedConnId}:${targetTable}`;
+  }, [selectedConnId, targetTable]);
 
   const loadFieldPlan = useCallback(async () => {
     if (!selectedConnId || !targetTable) return;
+    const key = `${selectedConnId}:${targetTable}`;
     setPlanLoading(true);
     setPlanError(null);
     try {
       const plan: FieldPlan = await api.getFieldPlan(selectedConnId, targetTable, genOptions.image_provider);
+      if (currentPlanKey.current !== key) return;
       setFieldPlan(plan);
-      const key = `${selectedConnId}:${targetTable}`;
       setMappings((prev) => {
         const keep = mappingsTableRef.current === key;
         mappingsTableRef.current = key;
@@ -300,8 +391,8 @@ export const AutomationBuilderPage: React.FC = () => {
   }, [selectedConnId, targetTable, genOptions.image_provider]);
 
   useEffect(() => {
-    loadFieldPlan();
-  }, [selectedConnId, targetTable]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (hydrated) loadFieldPlan();
+  }, [selectedConnId, targetTable, hydrated]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // In manual mode, AI mappings are switched to safe non-AI choices.
   useEffect(() => {
@@ -414,6 +505,30 @@ export const AutomationBuilderPage: React.FC = () => {
     }
   };
 
+  // Documents that match the topic are suggested and, until the customer picks documents themselves, selected.
+  const [suggestedDocs, setSuggestedDocs] = useState<{ id: number; title: string; score: number }[]>([]);
+  const [suggesting, setSuggesting] = useState(false);
+  useEffect(() => {
+    const topic = aiConfig.topic.trim();
+    if (step !== 3 || manual || knowledgeDocs.length === 0 || topic.length < 8) return;
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      setSuggesting(true);
+      try {
+        const res = await api.suggestKnowledge(topic);
+        if (cancelled) return;
+        const found = res?.suggestions ?? [];
+        setSuggestedDocs(found);
+        if (!docsTouched) setAiConfig((p) => ({ ...p, document_ids: found.map((d) => d.id) }));
+      } catch {
+        // suggestions are optional
+      } finally {
+        if (!cancelled) setSuggesting(false);
+      }
+    }, 900);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [aiConfig.topic, step, manual, knowledgeDocs.length, docsTouched]);
+
   useEffect(() => {
     if (!isPreviewing) return;
     setPreviewSeconds(0);
@@ -426,7 +541,11 @@ export const AutomationBuilderPage: React.FC = () => {
       setIsPreviewing(true);
       setPreviewError(null);
       setPreview(null);
-      const res = await api.previewAutomation({ ...buildAutomationPayload(), name: name.trim() || "Preview", include_images: true });
+      setPreviewEvents([]);
+      const res = await api.previewAutomationStream(
+        { ...buildAutomationPayload(), name: name.trim() || "Preview", include_images: true },
+        (e) => setPreviewEvents((prev) => [...prev, e]),
+      );
       setPreview(res);
     } catch (err: any) {
       setPreviewError({ message: err.message, events: err.data?.events });
@@ -434,6 +553,35 @@ export const AutomationBuilderPage: React.FC = () => {
       setIsPreviewing(false);
     }
   };
+
+  // The preview's steps for this configuration, and where each one is (from the server's own events).
+  const previewSteps: WorkStep[] = [
+    { key: "read", label: `Read “${targetTable || "your table"}” from your database`, detail: previewEvents.find((e) => e.stage === "TABLE_READ")?.message },
+    ...(!manual && aiConfig.document_ids.length ? [{ key: "docs", label: "Search your documents", detail: previewEvents.find((e) => e.stage.startsWith("RAG_CONTEXT"))?.message }] : []),
+    ...(!manual ? [{ key: "write", label: `Write the content with ${aiConfig.model || aiConfig.provider}`, detail: [...previewEvents].reverse().find((e) => e.stage.startsWith("AI_INFERENCE") || e.stage.startsWith("NOVELTY"))?.message }] : []),
+    ...(!manual && hasImage ? [{ key: "images", label: "Create the images", detail: [...previewEvents].reverse().find((e) => e.stage.startsWith("IMAGE"))?.message }] : []),
+    { key: "check", label: "Check the row against your table (nothing is written)", detail: previewEvents.find((e) => e.stage === "WRITE_CHECKED")?.message },
+  ];
+  const previewStatus: Record<string, StepStatus> = (() => {
+    const has = (pred: (s: string) => boolean) => previewEvents.some((e) => pred(e.stage));
+    const done: Record<string, boolean> = {
+      read: has((s) => s === "TABLE_READ"),
+      docs: has((s) => s.startsWith("RAG_CONTEXT")),
+      write: has((s) => s === "AI_INFERENCE_COMPLETED"),
+      images: has((s) => s.startsWith("WRITE_CHECK")),
+      check: has((s) => s === "WRITE_CHECKED"),
+    };
+    const out: Record<string, StepStatus> = {};
+    let activeSet = false;
+    for (const st of previewSteps) {
+      if (done[st.key]) out[st.key] = "done";
+      else if (!activeSet) {
+        out[st.key] = previewError ? "failed" : isPreviewing ? "active" : "pending";
+        activeSet = true;
+      } else out[st.key] = "pending";
+    }
+    return out;
+  })();
 
   /** Show messages under their fields, on the earliest step that has one. */
   const showFieldErrors = (found: FieldErrors) => {
@@ -457,7 +605,7 @@ export const AutomationBuilderPage: React.FC = () => {
       setIsSubmitting(true);
       setError(null);
       const res: any = await api.createAutomation(buildAutomationPayload());
-      sessionStorage.removeItem(DRAFT_KEY);
+      discardDraft();
       const next = res?.automation?.schedule_summary?.next_run;
       toast.success("Automation saved", next ? `First run: ${new Date(next.generation_at).toLocaleString()}` : "It is now scheduled.");
       navigate("/automations");
@@ -544,6 +692,47 @@ export const AutomationBuilderPage: React.FC = () => {
     setFieldErrors({});
     setStep(to);
     return { success: true, message: `Back to step ${to}.` };
+  };
+
+  // Editing one setting from the review returns straight to the review (after checking the steps in between).
+  const [returnToReview, setReturnToReview] = useState(false);
+  useEffect(() => {
+    if (step === 5) setReturnToReview(false);
+  }, [step]);
+  const editFromReview = (s: number) => {
+    setReturnToReview(true);
+    setError(null);
+    setFieldErrors({});
+    setStep(s);
+  };
+  const backToReview = () => {
+    for (let n = step; n <= 4; n++) {
+      const { message } = stepCheck(n);
+      if (message) {
+        if (n !== step) {
+          setStep(n);
+          setTimeout(() => goNext(n), 60);
+        } else {
+          goNext(n);
+        }
+        return { success: false, message };
+      }
+    }
+    setError(null);
+    setFieldErrors({});
+    setStep(5);
+    return { success: true, message: "Back to the review." };
+  };
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
+  const [nameDraftError, setNameDraftError] = useState<string | null>(null);
+  const saveInlineName = () => {
+    const t = nameDraft.trim();
+    if (!t) return setNameDraftError("Give the automation a name.");
+    if (t.length > 255) return setNameDraftError("Name must be 255 characters or fewer.");
+    setName(t);
+    setEditingName(false);
+    setNameDraftError(null);
   };
 
   // Schedule fields report edits themselves (ScheduleStep calls this).
@@ -795,7 +984,7 @@ export const AutomationBuilderPage: React.FC = () => {
           try {
             setIsSubmitting(true);
             const res: any = await api.createAutomation(buildAutomationPayload());
-            sessionStorage.removeItem(DRAFT_KEY);
+            discardDraft();
             navigate("/automations");
             return { success: true, message: res?.message || "Automation created and enabled.", resource: res?.automation?.id ? { type: "Automation", id: res.automation.id } : undefined };
           } catch (err: any) {
@@ -820,16 +1009,28 @@ export const AutomationBuilderPage: React.FC = () => {
 
   const navButtons = (n: number, nextLabel: string) => (
     <div className="flex flex-col-reverse gap-2 border-t border-slate-100 pt-6 sm:flex-row sm:justify-between">
-      {n > 1 ? (
+      {n > 1 && !returnToReview ? (
         <button type="button" onClick={() => goBack(n - 1)} className="da-btn da-btn-secondary">
           <ArrowLeft className="h-3.5 w-3.5" /> Back
         </button>
       ) : <span />}
-      <button type="button" onClick={() => goNext(n)} className="da-btn da-btn-primary px-5">
-        <span>{nextLabel}</span> <ArrowRight className="h-3.5 w-3.5" />
-      </button>
+      {returnToReview ? (
+        <button type="button" onClick={backToReview} className="da-btn da-btn-primary px-5">
+          <Check className="h-3.5 w-3.5" /> <span>Done, back to review</span>
+        </button>
+      ) : (
+        <button type="button" onClick={() => goNext(n)} className="da-btn da-btn-primary px-5">
+          <span>{nextLabel}</span> <ArrowRight className="h-3.5 w-3.5" />
+        </button>
+      )}
     </div>
   );
+  const reviewBanner = returnToReview && step < 5 ? (
+    <div className="flex flex-col gap-2 rounded-2xl border border-indigo-200 bg-indigo-50/70 px-4 py-3 text-[13px] text-indigo-900 sm:flex-row sm:items-center sm:justify-between">
+      <span className="flex items-center gap-2"><Eye className="h-4 w-4 shrink-0 text-indigo-600" /> You came here from the review. Change what you need; everything else is kept.</span>
+      <button type="button" onClick={backToReview} className="da-btn da-btn-sm shrink-0 border border-indigo-200 bg-white text-indigo-700 hover:bg-indigo-50"><ArrowLeft className="h-3.5 w-3.5" /> Back to review</button>
+    </div>
+  ) : null;
 
   const card = "da-card p-5 sm:p-8 space-y-6";
   const stepMotion = { initial: { opacity: 0, x: 24 }, animate: { opacity: 1, x: 0 }, exit: { opacity: 0, x: -24 }, transition: { duration: 0.35, ease: [0.16, 1, 0.3, 1] as const } };
@@ -843,8 +1044,11 @@ export const AutomationBuilderPage: React.FC = () => {
         actions={
           <>
             <span className="da-chip da-chip-indigo px-3 py-1 text-[12px]">Step {step} of 5</span>
-            {draftRestored && <span className="da-chip da-chip-amber px-3 py-1 text-[12px]"><Check className="h-3 w-3" /> Draft restored</span>}
-            {draftRestored && (
+            {draftState === "saving" && <span className="da-chip px-3 py-1 text-[12px]"><Loader2 className="h-3 w-3 animate-spin" /> Saving draft…</span>}
+            {draftState === "saved" && <span className="da-chip da-chip-emerald px-3 py-1 text-[12px]" title={draftSavedAt ? new Date(draftSavedAt).toLocaleString() : undefined}><Check className="h-3 w-3" /> Draft saved</span>}
+            {draftState === "error" && <span className="da-chip da-chip-amber px-3 py-1 text-[12px]"><AlertCircle className="h-3 w-3" /> Draft not saved (offline?)</span>}
+            {draftState === "idle" && draftRestored && <span className="da-chip da-chip-amber px-3 py-1 text-[12px]"><Check className="h-3 w-3" /> Draft restored</span>}
+            {(draftRestored || name || selectedTemplateId) && (
               <button type="button" onClick={handleClearDraft} className="da-btn da-btn-ghost da-btn-sm">
                 <RotateCcw className="h-3.5 w-3.5" /> Start over
               </button>
@@ -890,6 +1094,8 @@ export const AutomationBuilderPage: React.FC = () => {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {reviewBanner}
 
       <AnimatePresence mode="wait">
         {/* STEP 1 ------------------------------------------------------------ */}
@@ -941,6 +1147,16 @@ export const AutomationBuilderPage: React.FC = () => {
                       {isProposing ? "Reading your schema…" : "Fill in the steps for me"}
                     </button>
                   </div>
+                  {isProposing && (
+                    <div className="space-y-2 rounded-xl border border-indigo-100 bg-white/80 p-3 text-[12.5px] text-slate-600" aria-live="polite">
+                      <p className="flex items-center justify-between gap-2">
+                        <span className="flex items-center gap-1.5"><Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-600" /> Your planning model is reading your tables and drafting the steps…</span>
+                        <span className="font-mono tabular-nums text-slate-400">{proposeSeconds}s</span>
+                      </p>
+                      <div className="h-1 overflow-hidden rounded-full bg-slate-100"><div className="h-full w-1/3 animate-[da-indeterminate_1.4s_ease-in-out_infinite] rounded-full bg-gradient-to-r from-indigo-500 to-cyan-400" /></div>
+                      {proposeSeconds > 20 && <p className="text-[11.5px] text-slate-400">Local models can take a minute or two.</p>}
+                    </div>
+                  )}
                   {proposeFeedback && <p className="flex items-start gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-[12.5px] text-emerald-900"><CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600" />{proposeFeedback}</p>}
                 </div>
 
@@ -963,13 +1179,20 @@ export const AutomationBuilderPage: React.FC = () => {
                       id="automation-table"
                       invalid={!!fieldErrors.table}
                       value={targetTable}
-                      onChange={(v) => setTargetTable(String(v))}
+                      onChange={(v) => { setTargetTable(String(v)); setTableNote(null); }}
                       placeholder={schema ? "Choose a table" : "Loading tables…"}
                       searchPlaceholder="Search tables…"
                       options={(schema?.tables ?? []).filter((t: any) => t.category !== "RESTRICTED").map((t: any) => ({ value: t.name, label: t.name, badge: t.category === "RECOMMENDED" ? "recommended" : t.category === "REVIEW_REQUIRED" ? "review" : undefined }))}
                     />
                     <FieldError id="automation-table" message={fieldErrors.table} />
-                    <p className="da-help">Account, credential and payment tables are hidden: automations can never write to them.</p>
+                    {tableNote ? (
+                      <p className={`mt-1.5 flex items-start gap-1.5 text-[12px] ${tableNote.found ? "text-emerald-700" : "text-amber-700"}`}>
+                        {tableNote.found ? <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" /> : <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />}
+                        <span>{tableNote.text}</span>
+                      </p>
+                    ) : (
+                      <p className="da-help">Account, credential and payment tables are hidden: automations can never write to them.</p>
+                    )}
                   </div>
                 </div>
 
@@ -1112,16 +1335,15 @@ export const AutomationBuilderPage: React.FC = () => {
                     <span className="flex items-center gap-2 text-[14px] font-bold text-slate-900"><Server className="h-4 w-4 text-indigo-600" /> Text model</span>
                     <Link to="/ai-providers" className="text-[12.5px] font-semibold text-indigo-600 hover:text-indigo-700">Manage providers and keys →</Link>
                   </div>
-                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                     {[
                       { id: "ollama", name: "Ollama", note: "Local, free" },
                       { id: "gemini", name: "Gemini", note: "Your key" },
                       { id: "anthropic", name: "Claude", note: "Your key" },
                       { id: "openai", name: "OpenAI", note: "Your key" },
-                      { id: "mock", name: "Test mode", note: "Fake text" },
                     ].map((p) => {
                       const info = availableProviders.find((x) => x.provider_id === p.id);
-                      const ready = info?.is_available || p.id === "mock";
+                      const ready = info?.is_available;
                       const sel = aiConfig.provider === p.id;
                       return (
                         <button key={p.id} type="button" aria-pressed={sel} onClick={() => {
@@ -1149,7 +1371,7 @@ export const AutomationBuilderPage: React.FC = () => {
                           <FieldError id="automation-model" message={fieldErrors.model} />
                         </div>
                         <p className="self-center text-[12.5px] leading-relaxed text-slate-500">
-                          {aiConfig.provider === "ollama" ? "Runs on this machine: private and free. Small models are faster; larger ones write better." : aiConfig.provider === "mock" ? "Test mode writes placeholder text without calling a model. Use it only to try the flow." : "Uses your own encrypted API key."}
+                          {aiConfig.provider === "ollama" ? "Runs on this machine: private and free. Small models are faster; larger ones write better." : "Uses your own encrypted API key."}
                         </p>
                       </div>
                     );
@@ -1161,6 +1383,17 @@ export const AutomationBuilderPage: React.FC = () => {
                     <span className="flex items-center gap-1.5 text-[12.5px] font-semibold text-slate-700"><BookOpen className="h-3.5 w-3.5 text-indigo-600" /> Ground it in your documents (optional)</span>
                     <span className="text-[12px] text-slate-400">{aiConfig.document_ids.length} of {knowledgeDocs.length} selected</span>
                   </div>
+                  {knowledgeDocs.length > 0 && aiConfig.topic.trim().length >= 8 && (
+                    <p className="mb-2 flex items-start gap-1.5 text-[12px] text-slate-500" aria-live="polite">
+                      {suggesting ? <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-indigo-500" /> : <Sparkles className="mt-0.5 h-3.5 w-3.5 shrink-0 text-indigo-500" />}
+                      <span>
+                        {suggesting ? "Looking for documents that match your topic…"
+                          : suggestedDocs.length
+                            ? <>{suggestedDocs.length === 1 ? "This document matches" : "These documents match"} your topic: <strong className="text-slate-700">{suggestedDocs.map((d) => d.title).join(", ")}</strong>{docsTouched ? "." : " (selected for you)."}</>
+                            : "None of your documents clearly matches this topic. You can still pick any."}
+                      </span>
+                    </p>
+                  )}
                   {knowledgeDocs.length === 0 ? (
                     <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50/70 p-5 text-center text-[13px] text-slate-500">
                       No documents yet. Upload Markdown, text or PDF files so the AI can use your facts.
@@ -1185,8 +1418,9 @@ export const AutomationBuilderPage: React.FC = () => {
                               const sel = aiConfig.document_ids.includes(doc.id);
                               return (
                                 <label key={doc.id} className={`flex cursor-pointer items-center gap-2.5 rounded-lg p-2 text-xs ${sel ? "bg-indigo-50 text-indigo-900" : "hover:bg-slate-50"}`}>
-                                  <input type="checkbox" checked={sel} onChange={(e) => setAiConfig((p) => ({ ...p, document_ids: e.target.checked ? [...p.document_ids, doc.id] : p.document_ids.filter((i) => i !== doc.id) }))} className="rounded border-slate-300 text-indigo-600" />
+                                  <input type="checkbox" checked={sel} onChange={(e) => { setDocsTouched(true); setAiConfig((p) => ({ ...p, document_ids: e.target.checked ? [...p.document_ids, doc.id] : p.document_ids.filter((i) => i !== doc.id) })); }} className="rounded border-slate-300 text-indigo-600" />
                                   <span className="min-w-0 flex-1 truncate">{doc.title}</span>
+                                  {suggestedDocs.some((d) => d.id === doc.id) && <span className="rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">Matches topic</span>}
                                   <span className="text-[10px] text-slate-400">{doc.chunk_count || 0} chunks</span>
                                 </label>
                               );
@@ -1249,11 +1483,24 @@ export const AutomationBuilderPage: React.FC = () => {
                     ["Approval", approval.require_approval ? `Email ${approval.reviewer_email || user?.email || "you"} · if no reply: ${approval.timeout_policy === "AUTO_PUBLISH_LATEST" ? "publish" : approval.timeout_policy === "CANCEL" ? "cancel" : "keep draft"}` : "Off: publishes automatically", 4],
                   ].map(([k, v, s]) => (
                     <div key={String(k)} className="flex min-w-0 items-start justify-between gap-2">
-                      <dt className="shrink-0 text-slate-400">{k}</dt>
-                      <dd className="min-w-0 text-right font-semibold text-slate-800">
-                        <span className="break-words">{v}</span>
-                        <button type="button" onClick={() => setStep(Number(s))} className="ml-2 text-[11.5px] font-semibold text-indigo-600 hover:underline">Edit</button>
-                      </dd>
+                      <dt className="shrink-0 pt-0.5 text-slate-400">{k}</dt>
+                      {k === "Name" && editingName ? (
+                        <dd className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5">
+                            <input id="review-name" autoFocus value={nameDraft} onChange={(e) => { setNameDraft(e.target.value); setNameDraftError(null); }}
+                              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); saveInlineName(); } if (e.key === "Escape") setEditingName(false); }}
+                              className={`da-input py-1.5 text-[13px]${invalid(nameDraftError ?? undefined)}`} {...ariaFor("review-name", nameDraftError ?? undefined)} />
+                            <button type="button" onClick={saveInlineName} className="da-btn da-btn-primary da-btn-sm">Save</button>
+                            <button type="button" onClick={() => { setEditingName(false); setNameDraftError(null); }} className="da-btn da-btn-ghost da-btn-sm">Cancel</button>
+                          </div>
+                          <FieldError id="review-name" message={nameDraftError ?? undefined} />
+                        </dd>
+                      ) : (
+                        <dd className="min-w-0 text-right font-semibold text-slate-800">
+                          <span className="break-words">{v}</span>
+                          <button type="button" onClick={() => (k === "Name" ? (setNameDraft(name), setEditingName(true)) : editFromReview(Number(s)))} className="ml-2 text-[11.5px] font-semibold text-indigo-600 hover:underline">Edit</button>
+                        </dd>
+                      )}
                     </div>
                   ))}
                 </dl>
@@ -1272,11 +1519,14 @@ export const AutomationBuilderPage: React.FC = () => {
             </div>
 
             {isPreviewing && (
-              <div className="space-y-2" aria-live="polite">
-                <div className="h-48 animate-pulse rounded-2xl bg-slate-100" />
-                <div className="h-4 w-2/3 animate-pulse rounded bg-slate-100" />
-                <div className="h-4 w-1/2 animate-pulse rounded bg-slate-100" />
-              </div>
+              <WorkProgress
+                title="Generating a sample run"
+                steps={previewSteps}
+                status={previewStatus}
+                seconds={previewSeconds}
+                latest={previewEvents.length ? previewEvents[previewEvents.length - 1].message : "Starting…"}
+                hint={aiConfig.provider === "ollama" ? "On a local model, writing usually takes 20 seconds to 3 minutes." : undefined}
+              />
             )}
             {previewError && (
               <div role="alert" className="space-y-2 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-[13px] text-rose-800">

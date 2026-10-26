@@ -55,7 +55,8 @@ class ToolRunner
         if ($status === 'timeout') {
             return $this->result(false, 'UI_TIMEOUT', 'The page did not respond in time; nothing is confirmed. Use read_screen to see the current state.', retryable: true);
         }
-        if ($status === 'not_mounted') {
+        // A row the page does not list (another page of results, filtered out) was not pressed: same as not on screen.
+        if ($status === 'not_mounted' || ($status === 'ok' && ($res['success'] ?? true) === false && !empty($res['missing']))) {
             return $this->result(false, 'NOT_ON_SCREEN', (string) ($res['message'] ?? 'That surface is not on screen. Use go_to_page or open_form first.'), retryable: true, data: $res);
         }
 

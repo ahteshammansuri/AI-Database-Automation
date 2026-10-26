@@ -8,47 +8,11 @@ use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
 /**
- * Orbit's product knowledge: the guides admins edit, the built-in guides that ship with the app (docs/orbit-agent),
- * and publishing the included guides to the AI service, which re-indexes them for retrieval.
+ * Orbit's product knowledge. The guides live only in the database (edited in the admin panel); publishing sends the
+ * included guides to the AI service, which indexes them for retrieval. No guide is read from files.
  */
 final class OrbitKnowledge
 {
-    public static function bundledPath(): string
-    {
-        return base_path('../docs/orbit-agent');
-    }
-
-    /** The built-in guides: slug, title (the file's "# " heading) and body (the rest). */
-    public static function bundled(): array
-    {
-        $out = [];
-        foreach (glob(self::bundledPath() . '/*.md') ?: [] as $i => $file) {
-            $text = str_replace("\r\n", "\n", (string) file_get_contents($file));
-            $slug = pathinfo($file, PATHINFO_FILENAME);
-            $title = str($slug)->replace(['_', '-'], ' ')->ucfirst()->toString();
-            if (preg_match('/\A#\s+(.+)\n/', $text, $m)) {
-                $title = trim($m[1]);
-                $text = substr($text, strlen($m[0]));
-            }
-            $out[] = ['slug' => $slug, 'title' => mb_substr($title, 0, 120), 'body' => trim($text), 'sort' => ($i + 1) * 10];
-        }
-        return $out;
-    }
-
-    /** Add the built-in guides, or put their original text back (custom guides are kept). Returns how many. */
-    public static function restoreBundled(): int
-    {
-        $guides = self::bundled();
-        DB::transaction(function () use ($guides) {
-            foreach ($guides as $g) {
-                $guide = OrbitKnowledgeGuide::firstOrNew(['slug' => $g['slug']]);
-                $guide->fill($g + ['is_published' => true, 'updated_by' => auth('admin')->id()])->save();
-            }
-        });
-        AdminActivity::record('orbit_knowledge.restored', 'Orbit knowledge', ['guides' => array_column($guides, 'slug')], 'Built-in guides');
-        return count($guides);
-    }
-
     /**
      * Send every included guide to the AI service. The AI service replaces its published set and re-indexes.
      *
@@ -88,6 +52,23 @@ final class OrbitKnowledge
             'version' => $result['version'] ?? null,
             'embedding_backend' => $result['embedding_backend'] ?? null,
         ];
+    }
+
+    /**
+     * Re-publish when the AI service has no product knowledge although guides were published before (for example a
+     * fresh AI service or lost index storage). Returns what was published, or null when nothing was needed.
+     */
+    public static function syncIfLost(): ?array
+    {
+        $live = self::liveStatus();
+        if ($live === null || (int) ($live['chunks'] ?? 0) > 0) {
+            return null;
+        }
+        if (!OrbitKnowledgeGuide::where('is_published', true)->exists()) {
+            return null;
+        }
+
+        return self::publish();
     }
 
     /** What Orbit is using right now, as reported by the AI service (null when it cannot be reached). */

@@ -35,7 +35,11 @@ class FormValidationTest extends TestCase
         $this->postJson('/api/auth/register', ['name' => 'A', 'email' => 'taken@example.test', 'password' => 'short', 'password_confirmation' => 'short'])
             ->assertStatus(422)
             ->assertJsonPath('errors.email.0', 'An account with this email already exists. Sign in instead.')
-            ->assertJsonPath('errors.password.0', 'Password must be at least 8 characters.');
+            ->assertJsonPath('errors.password.0', 'Password must be at least 6 characters.');
+
+        // Six characters is the default minimum (admins can raise it in Settings > Sign-up).
+        $this->postJson('/api/auth/register', ['name' => 'Six', 'email' => 'six@example.test', 'password' => 'abc123', 'password_confirmation' => 'abc123'])
+            ->assertCreated();
 
         $this->postJson('/api/auth/register', ['name' => 'A', 'email' => 'new@example.test', 'password' => 'longenough1', 'password_confirmation' => 'different1'])
             ->assertStatus(422)

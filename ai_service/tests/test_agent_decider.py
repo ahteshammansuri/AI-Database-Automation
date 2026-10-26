@@ -172,7 +172,7 @@ def test_unknown_provider_is_rejected():
 class CapturingOllama(OllamaProvider):
     payloads = []
     installed = ["qwen2.5:3b"]
-    reply = json.dumps({"kind": "ANSWER", "speech_text": "DataAuto connects your own databases."})
+    reply = json.dumps({"kind": "ANSWER", "speech_text": "Rowpilot connects your own databases."})
 
     def _installed_models(self, timeout: float = 5.0):
         return list(self.installed)
@@ -343,3 +343,24 @@ def test_plain_question_sent_as_wait_for_user_is_treated_as_a_clarification():
         "kind": "WAIT_FOR_USER", "speech_text": "Type the password in the form.", "secure_input_type": "database_password",
     }), [])
     assert secret.kind == "WAIT_FOR_USER"
+
+
+def test_runtime_context_keeps_decision_keys_when_long():
+    """A big workspace never pushes the task, the browser flag or the pending confirmation out of the prompt."""
+    from ai_service.app.services.agent_decider import _compact_context, MAX_CONTEXT_CHARS
+    ctx = {
+        "now": "2026-10-23T10:00:00Z",
+        "connections": [{"id": i, "name": f"Connection number {i}", "host": "db.example.test"} for i in range(40)],
+        "automations": [{"id": i, "name": f"Automation with a long descriptive name {i}", "state": "active"} for i in range(60)],
+        "recent_runs": [{"id": i, "status": "PUBLISHED", "automation": "Blog"} for i in range(5)],
+        "browser_present": True,
+        "task": {"id": 9, "awaiting_confirmation_for": {"tool": "update_automation", "args": {"automation_id": 3, "is_active": False}}},
+    }
+    original = json.dumps(ctx)
+    text = _compact_context(ctx, MAX_CONTEXT_CHARS)
+    assert len(text) <= MAX_CONTEXT_CHARS + len("…(truncated)")
+    out = json.loads(text)  # shortened, not cut: still valid JSON
+    assert out["browser_present"] is True
+    assert out["task"]["awaiting_confirmation_for"]["tool"] == "update_automation"
+    assert out["automations_more"] > 0 and len(out["automations"]) + out["automations_more"] == 60
+    assert json.dumps(ctx) == original, "the request is not modified"

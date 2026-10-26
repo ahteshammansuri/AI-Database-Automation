@@ -157,6 +157,14 @@ export const RegisterPage: React.FC = () => {
         <p className="flex items-center justify-center gap-1.5 pt-1 text-[12.5px] text-slate-500">
           <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" /> No credit card, no paid API needed.
         </p>
+        {(config.platform.terms_url || config.platform.privacy_url) && (
+          <p className="text-center text-[12px] text-slate-500">
+            By creating a workspace you agree to the{" "}
+            {config.platform.terms_url && <a href={config.platform.terms_url} target="_blank" rel="noopener noreferrer" className="font-semibold text-indigo-600 hover:underline">Terms of service</a>}
+            {config.platform.terms_url && config.platform.privacy_url && " and the "}
+            {config.platform.privacy_url && <a href={config.platform.privacy_url} target="_blank" rel="noopener noreferrer" className="font-semibold text-indigo-600 hover:underline">Privacy policy</a>}.
+          </p>
+        )}
       </form>
     </AuthShell>
   );

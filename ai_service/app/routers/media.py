@@ -4,6 +4,7 @@ from typing import Optional
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
+from ai_service.app import usage
 from ai_service.app.services.image_generation import ImageGenerationError, generate_image
 
 router = APIRouter(prefix="/v1/ai", tags=["Media"])
@@ -49,6 +50,8 @@ def generate_image_endpoint(req: GenerateImageRequest):
             label=req.label,
             seed=req.seed,
         )
+        if result["provider_used"] in ("openai", "gemini"):
+            usage.record(result["provider_used"], result.get("model_used"), kind="image")
         return GenerateImageResponse(
             success=True,
             provider_used=result["provider_used"],

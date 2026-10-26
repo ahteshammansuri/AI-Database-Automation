@@ -54,6 +54,19 @@ export const AutomationsListPage: React.FC = () => {
 
   useOrbitSurface("automations.list", () => {
     const find = (row?: string) => automations.find((a: any) => String(a.id) === String(row));
+    const setActive = async (row: string | undefined, active: boolean) => {
+      const a: any = find(row);
+      if (!a) return { success: false, missing: true, message: `No automation ${row} in the list.` };
+      const now = a.is_active !== undefined ? !!a.is_active : a.status === "ACTIVE";
+      if (now === active) return { success: true, message: `${a.name} is already ${active ? "active" : "paused"}.`, resource: { type: "Automation", id: a.id } };
+      try {
+        await api.updateAutomation(a.id, { is_active: active, status: active ? "ACTIVE" : "PAUSED" });
+        loadData();
+        return { success: true, message: `${a.name} is now ${active ? "active" : "paused"}.`, resource: { type: "Automation", id: a.id } };
+      } catch (err: any) {
+        return { success: false, message: err.message || "Could not change the status." };
+      }
+    };
     return {
       describe: () => automations.map((a: any) => ({
         id: a.id, name: a.name, table: a.target_table, schedule: a.schedule_type,
@@ -65,7 +78,7 @@ export const AutomationsListPage: React.FC = () => {
         run_now: {
           target: (row) => `automations.row.${row}`,
           run: async (row) => {
-            if (!find(row)) return { success: false, message: `No automation ${row} in the list.` };
+            if (!find(row)) return { success: false, missing: true, message: `No automation ${row} in the list.` };
             try {
               setRunningId(Number(row));
               const res: any = await api.triggerAutomation(Number(row));
@@ -78,11 +91,14 @@ export const AutomationsListPage: React.FC = () => {
             }
           },
         },
+        // Explicit pause / resume: pressing one never flips an automation the other way.
+        pause: { target: (row) => `automations.row.${row}`, run: (row) => setActive(row, false) },
+        resume: { target: (row) => `automations.row.${row}`, run: (row) => setActive(row, true) },
         toggle: {
           target: (row) => `automations.row.${row}`,
           run: async (row) => {
             const a: any = find(row);
-            if (!a) return { success: false, message: `No automation ${row} in the list.` };
+            if (!a) return { success: false, missing: true, message: `No automation ${row} in the list.` };
             const active = a.is_active !== undefined ? a.is_active : a.status === "ACTIVE";
             try {
               await api.updateAutomation(a.id, { is_active: !active, status: !active ? "ACTIVE" : "PAUSED" });
@@ -96,7 +112,7 @@ export const AutomationsListPage: React.FC = () => {
         remove: {
           target: (row) => `automations.row.${row}`,
           run: async (row) => {
-            if (!find(row)) return { success: false, message: `No automation ${row} in the list.` };
+            if (!find(row)) return { success: false, missing: true, message: `No automation ${row} in the list.` };
             if (!(await askDelete(Number(row)))) return { success: false, message: "Deletion was not confirmed in the popup; nothing changed." };
             try {
               await api.deleteAutomation(Number(row));
@@ -439,21 +455,15 @@ export const AutomationsListPage: React.FC = () => {
                 const p = String(val);
                 setEditingProvider(p);
                 setModalErrors((x) => clearError(x, "ai_model"));
-                setEditingModel(
-                  p === "ollama" ? "llama3.2:1b"
-                  : p === "gemini" ? "gemini-1.5-flash"
-                  : p === "openai" ? "gpt-4o-mini"
-                  : p === "anthropic" ? "claude-3-5-sonnet"
-                  : "mock-llama3-synthetic"
-                );
+                // Empty: the "Writing content" model when it uses this provider, else the provider's default.
+                setEditingModel("");
               }}
               placeholder="Select AI inference provider..."
               options={[
                 { value: "ollama", label: "Ollama (Local LLM) - Zero Cost", badge: "Local" },
                 { value: "gemini", label: "Google Gemini (Cloud Fast)", badge: "Cloud" },
                 { value: "anthropic", label: "Anthropic Claude (Cloud Smart)", badge: "Cloud" },
-                { value: "openai", label: "OpenAI (GPT-4o)", badge: "Cloud" },
-                { value: "mock", label: "Local Mock (Offline Synthetic)", badge: "Synthetic" },
+                { value: "openai", label: "OpenAI", badge: "Cloud" },
               ]}
             />
           </div>

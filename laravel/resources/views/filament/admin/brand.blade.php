@@ -6,7 +6,7 @@
         </svg>
     </span>
     <span class="da-brand-text">
-        <span class="da-brand-name">{{ config('platform.brand_name', 'DataAuto') }}</span>
+        <span class="da-brand-name">{{ config('platform.brand_name', 'Rowpilot') }}</span>
         <span class="da-brand-tag">Admin</span>
     </span>
 </div>

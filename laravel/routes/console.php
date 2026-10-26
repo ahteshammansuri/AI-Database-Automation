@@ -9,6 +9,10 @@ Artisan::command('inspire', function () {
 })->purpose('Display an inspiring quote');
 
 Schedule::command('automations:check-schedule')->everyMinute();
+// Data autopilot: scheduled AI sample rows.
+Schedule::command('data:run-autopilots')->everyMinute()->withoutOverlapping();
+// Orbit's product knowledge lives in the database; a fresh or wiped AI service gets the published guides again.
+Schedule::command('orbit:sync-knowledge')->everyTenMinutes()->withoutOverlapping();
 
 
 // Orbit Remote: remove ended phone sessions (and unscanned codes) after a week.

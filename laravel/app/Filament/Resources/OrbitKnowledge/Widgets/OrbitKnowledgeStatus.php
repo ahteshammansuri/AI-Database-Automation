@@ -50,12 +50,12 @@ class OrbitKnowledgeStatus extends StatsOverviewWidget
         $indexed = !empty($live['indexed_at']) ? Carbon::parse($live['indexed_at'])->diffForHumans() : null;
 
         return [
-            Stat::make('Orbit is using', $guides . ' ' . ($published ? 'published' : 'built-in') . ' ' . str('guide')->plural($guides))
+            Stat::make('Orbit is using', $published ? $guides . ' published ' . str('guide')->plural($guides) : 'No guides')
                 ->description($lost
-                    ? 'The AI service lost the published guides. Publish again.'
-                    : ($published ? 'Version ' . ($live['version'] ?? '—') : 'The guides that ship with the app'))
+                    ? 'The AI service lost the published guides. They are sent again automatically within 10 minutes, or publish now.'
+                    : ($published ? 'Version ' . ($live['version'] ?? '—') : 'Publish guides so Orbit can answer questions about the website'))
                 ->descriptionIcon($lost ? 'heroicon-m-exclamation-triangle' : 'heroicon-m-book-open')
-                ->color($lost ? 'danger' : 'primary'),
+                ->color($lost || !$published ? 'danger' : 'primary'),
             Stat::make('Sections Orbit can find', (string) ($live['chunks'] ?? 0))
                 ->description(($backend === '' ? 'Not indexed yet' : (str_starts_with($backend, 'ollama')
                     ? 'Semantic search · ' . substr($backend, 7)

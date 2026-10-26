@@ -2,8 +2,11 @@
 
 namespace App\Services;
 
+use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Support\Facades\Http;
 use Exception;
+use Psr\Http\Message\RequestInterface;
+use Psr\Http\Message\ResponseInterface;
 
 class AiServiceClient
 {
@@ -18,18 +21,32 @@ class AiServiceClient
 
     protected function client()
     {
-        return Http::withHeaders([
+        return $this->withUsage(Http::withHeaders([
             'X-Service-Token' => $this->serviceToken,
             'Accept' => 'application/json',
-        ])->timeout(300);
+        ])->timeout(300));
     }
 
     protected function agentClient(int $timeout = 60)
     {
-        return Http::withHeaders([
+        return $this->withUsage(Http::withHeaders([
             'X-Service-Token' => $this->serviceToken,
             'Accept' => 'application/json',
-        ])->timeout($timeout);
+        ])->timeout($timeout));
+    }
+
+    /** The AI service reports the model usage of each request (X-AI-Usage); it is stored per customer (AiUsage). */
+    private function withUsage(PendingRequest $request): PendingRequest
+    {
+        return $request->withMiddleware(function (callable $handler) {
+            return function (RequestInterface $request, array $options) use ($handler) {
+                $path = $request->getUri()->getPath();
+                return $handler($request, $options)->then(function (ResponseInterface $response) use ($path) {
+                    AiUsage::recordFromHeader($path, $response->getHeaderLine('X-AI-Usage'));
+                    return $response;
+                });
+            };
+        });
     }
 
     /**
@@ -39,7 +56,7 @@ class AiServiceClient
     {
         // Long articles on a CPU-only local model can take several minutes; stay below the job timeout (690s).
         $res = $this->client()->timeout((int) ($params['timeout'] ?? 600))->post("{$this->baseUrl}/v1/ai/generate", [
-            'provider' => $params['provider'] ?? 'mock',
+            'provider' => $params['provider'] ?? 'ollama',
             'model' => $params['model'] ?? null,
             'api_key' => $params['api_key'] ?? null,
             'prompt' => $params['prompt'],
@@ -54,6 +71,7 @@ class AiServiceClient
             'field_specs' => $params['field_specs'] ?? null,
             'length' => $params['length'] ?? 'medium',
             'max_output_tokens' => $params['max_output_tokens'] ?? null,
+            'temperature' => isset($params['temperature']) ? (float) $params['temperature'] : null,
         ]);
 
         if (!$res->successful()) {
@@ -120,7 +138,7 @@ class AiServiceClient
     public function proposeAutomation(
         string $goalPrompt,
         array $tables,
-        string $provider = 'mock',
+        string $provider = 'ollama',
         ?string $model = null,
         ?string $apiKey = null
     ): array {
@@ -145,25 +163,30 @@ class AiServiceClient
     }
 
     /**
+     * Run the four real readiness checks against a model (JSON, action choice, query plan, correction).
+     * Returns the AI service report: checks[{key,label,passed,details,seconds}], passed, total, score, seconds.
+     */
+    public function modelReadiness(string $provider, ?string $model, ?string $apiKey, int $budgetSeconds = 240): array
+    {
+        $res = $this->agentClient($budgetSeconds + 30)->post("{$this->baseUrl}/v1/ai/readiness", [
+            'provider' => $provider,
+            'model' => $model,
+            'api_key' => $apiKey,
+            'budget_seconds' => $budgetSeconds,
+        ]);
+        if (!$res->successful()) {
+            throw new Exception("AI service error ({$res->status()})");
+        }
+        return $res->json();
+    }
+
+    /**
      * Check provider health & available models.
      */
     public function checkHealth(string $provider = 'ollama', ?string $model = null, ?string $apiKey = null): array
     {
-        if ($provider === 'mock') {
-            return [
-                'provider' => 'mock',
-                'available' => true,
-                'latency_ms' => 1.2,
-                'models' => ['mock-llama3-synthetic', 'mock-mistral-synthetic'],
-                'message' => 'Local mock generator ready (Offline testing & demo mode).',
-            ];
-        }
-
         try {
-            $res = Http::withHeaders([
-                'X-Service-Token' => $this->serviceToken,
-                'Accept' => 'application/json',
-            ])->timeout(5)->post("{$this->baseUrl}/v1/ai/health", [
+            $res = $this->agentClient(5)->post("{$this->baseUrl}/v1/ai/health", [
                 'provider' => $provider,
                 'model' => $model,
                 'api_key' => $apiKey,
@@ -268,6 +291,19 @@ class AiServiceClient
         } catch (\Throwable) {
             return null;
         }
+    }
+
+    /**
+     * Realistic sample rows for a table from its column rules (Laravel validates every value before writing).
+     * Returns: success, rows[], requested, problems[], seconds, error.
+     */
+    public function sampleRows(array $params, int $budgetSeconds = 240): array
+    {
+        $res = $this->agentClient($budgetSeconds + 30)->post("{$this->baseUrl}/v1/ai/sample-rows", $params + ['budget_seconds' => $budgetSeconds]);
+        if (!$res->successful()) {
+            throw new Exception('The AI service could not create sample rows (HTTP ' . $res->status() . ').');
+        }
+        return $res->json();
     }
 
     /**

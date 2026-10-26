@@ -66,6 +66,7 @@ class SystemHealth extends Page
                 ['Platform database', 'heroicon-o-circle-stack', Health::database()],
                 ['AI service', 'heroicon-o-cpu-chip', Health::aiService()],
                 ['Local models (Ollama)', 'heroicon-o-sparkles', Health::ollama()],
+                ['Orbit knowledge', 'heroicon-o-book-open', Health::orbitKnowledge()],
                 ['Real-time server', 'heroicon-o-signal', Health::reverb()],
                 ['Scheduler', 'heroicon-o-clock', Health::scheduler()],
                 ['Email', 'heroicon-o-envelope', Health::mail()],

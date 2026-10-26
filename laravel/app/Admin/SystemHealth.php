@@ -79,6 +79,25 @@ final class SystemHealth
             "{$installed} " . str('model')->plural($installed) . ' installed · default ' . $model, (int) round((float) ($res['latency_ms'] ?? 0)));
     }
 
+    /** Whether Orbit has the website guides indexed (they live in the database and are published to the AI service). */
+    public static function orbitKnowledge(): array
+    {
+        $included = \App\Models\OrbitKnowledgeGuide::where('is_published', true)->count();
+        $live = OrbitKnowledge::liveStatus();
+        if ($live === null) {
+            return self::row('down', 'Unknown', 'The AI service cannot be reached to report what Orbit knows.');
+        }
+        $chunks = (int) ($live['chunks'] ?? 0);
+        if ($chunks === 0) {
+            return self::row($included ? 'warn' : 'down', 'No guides indexed', $included
+                ? "{$included} guides are included; they are sent again automatically within 10 minutes, or publish them in Orbit › Knowledge."
+                : 'No guide is included. Orbit cannot answer questions about the website.');
+        }
+        $semantic = str_starts_with((string) ($live['embedding_backend'] ?? ''), 'ollama');
+        return self::row($semantic ? 'ok' : 'warn', ((int) ($live['guides'] ?? 0)) . ' guides · ' . $chunks . ' sections',
+            ($semantic ? 'Semantic search' : 'Keyword search only (embedding model not reachable)') . ' · version ' . ($live['version'] ?? '—'));
+    }
+
     public static function reverb(): array
     {
         if (config('broadcasting.default') !== 'reverb') {

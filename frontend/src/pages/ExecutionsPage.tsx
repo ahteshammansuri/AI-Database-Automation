@@ -19,8 +19,23 @@ import { ContentPreview } from "../components/content/ContentPreview";
 import { WysiwygEditor } from "../components/content/WysiwygEditor";
 import { looksLikeHtml } from "../components/content/RichText";
 import { formatInstant, relativeFromNow } from "../lib/schedule";
+import { humanStatus } from "../components/common/statusText";
 
 const TRIGGER_LABEL: Record<string, string> = { SCHEDULE: "Scheduled", MANUAL: "Run now", MANUAL_PUBLISH: "Manual post" };
+
+/** Run statuses in plain words, in the order a run moves through them. */
+const STATUS_LABEL: Record<string, string> = {
+  QUEUED: "Waiting to start", RUNNING: "Running", GENERATING: "Writing", REGENERATING: "Rewriting",
+  PENDING_APPROVAL: "Waiting for approval", APPROVED: "Approved", READY_TO_PUBLISH: "Ready to publish", PUBLISHING: "Publishing",
+  PUBLISHED: "Published", PAUSED: "Paused", FAILED: "Failed", CANCELLED: "Cancelled", SKIPPED: "Skipped", MISSED: "Missed", REJECTED: "Rejected",
+};
+const statusLabel = (s: string) => STATUS_LABEL[s] ?? humanStatus(s);
+
+/** The version that was (or will be) written: the published one, else the newest. */
+const currentVersion = (versions: any[] | undefined) => {
+  const list = versions ?? [];
+  return [...list].reverse().find((v) => v?.status === "PUBLISHED") ?? list[list.length - 1];
+};
 
 export const ExecutionsPage: React.FC = () => {
   const [executions, setExecutions] = useState<any[]>([]);
@@ -46,6 +61,8 @@ export const ExecutionsPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const automationFilter = searchParams.get("automation") ? Number(searchParams.get("automation")) : undefined;
   const [versionIdx, setVersionIdx] = useState<number>(0);
+  const [summary, setSummary] = useState<Record<string, number>>({});
+  const [automations, setAutomations] = useState<{ id: number; name: string }[]>([]);
 
   const loadData = async (silent = false) => {
     try {
@@ -60,10 +77,11 @@ export const ExecutionsPage: React.FC = () => {
         : [];
       setExecutions(items);
       setTotalPages(res?.last_page || res?.total_pages || 1);
+      if (res?.summary && typeof res.summary === "object") setSummary(res.summary);
     } catch (err: any) {
       console.error(err);
       if (!silent) {
-        toast.error("Failed to Load Executions", err.message);
+        toast.error("Runs could not be loaded", err.message);
       }
     } finally {
       setLoading(false);
@@ -73,6 +91,17 @@ export const ExecutionsPage: React.FC = () => {
   useEffect(() => {
     loadData();
   }, [page, selectedStatus, automationFilter]);
+
+  // Automations for the filter, and a run named in the link (?id=) opened directly.
+  useEffect(() => {
+    api.listAutomations().then((list: any) => {
+      const arr = Array.isArray(list) ? list : Array.isArray(list?.data) ? list.data : [];
+      setAutomations(arr.map((a: any) => ({ id: a.id, name: a.name })));
+    }).catch(() => {});
+    const id = Number(searchParams.get("id"));
+    if (id) void handleViewExecution({ id });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Subscribe to live SSE events to update table state in real time
   useEffect(() => {
@@ -93,7 +122,7 @@ export const ExecutionsPage: React.FC = () => {
     const rowCall = (verb: string, call: (id: number) => Promise<any>, ask?: (id: number) => Promise<boolean>) => ({
       target: (row?: string) => `executions.row.${row}`,
       run: async (row?: string) => {
-        if (!find(row)) return { success: false, message: `No run ${row} in the visible list (try the status filter or read_screen).` };
+        if (!find(row)) return { success: false, missing: true, message: `No run ${row} in the visible list (try the status filter or read_screen).` };
         if (ask && !(await ask(Number(row)))) return { success: false, message: `${verb} was not confirmed in the popup; nothing changed.` };
         try {
           setProcessingId(Number(row));
@@ -125,7 +154,7 @@ export const ExecutionsPage: React.FC = () => {
           target: (row) => `executions.row.${row}`,
           run: async (row) => {
             const e = find(row);
-            if (!e) return { success: false, message: `No run ${row} in the visible list.` };
+            if (!e) return { success: false, missing: true, message: `No run ${row} in the visible list.` };
             await handleViewExecution(e);
             return { success: true, message: "Run details opened.", data: { status: e.status, error: e.error_message } };
           },
@@ -144,7 +173,7 @@ export const ExecutionsPage: React.FC = () => {
     setActiveModalTab("preview");
     setVersionIdx(0);
     setCopiedJson(false);
-    const initialPayload = execSummary?.versions?.[0]?.payload || execSummary?.payload || {};
+    const initialPayload = currentVersion(execSummary?.versions)?.payload || execSummary?.payload || {};
     setEditRecordPayload(initialPayload);
     setEditRecordOriginal(initialPayload);
     setRecordErrors({});
@@ -153,11 +182,12 @@ export const ExecutionsPage: React.FC = () => {
       setLoadingDetail(true);
       const full = await api.getExecution(execSummary.id);
       setSelectedExecution(full);
-      const fullPayload = full?.versions?.[0]?.payload || full?.payload || initialPayload;
+      const fullPayload = currentVersion(full?.versions)?.payload || full?.payload || initialPayload;
       setEditRecordPayload(fullPayload);
       setEditRecordOriginal(fullPayload);
     } catch (err: any) {
-      console.error("Failed to load execution details", err);
+      if (!execSummary?.automation_id) setSelectedExecution(null);
+      toast.error("The run could not be opened", err.message);
     } finally {
       setLoadingDetail(false);
     }
@@ -315,6 +345,23 @@ export const ExecutionsPage: React.FC = () => {
                 One automation · <span className="underline">show all</span>
               </button>
             )}
+            {automations.length > 1 && (
+              <div className="w-56">
+                <SearchableSelect
+                  value={automationFilter ?? ""}
+                  onChange={(val) => {
+                    const next = new URLSearchParams(searchParams);
+                    if (val) next.set("automation", String(val)); else next.delete("automation");
+                    setSearchParams(next);
+                    setPage(1);
+                  }}
+                  placeholder="All automations"
+                  searchPlaceholder="Search automations…"
+                  allowClear={true}
+                  options={[{ value: "", label: "All automations" }, ...automations.map((a) => ({ value: a.id, label: a.name }))]}
+                />
+              </div>
+            )}
             <div className="w-56">
               <SearchableSelect
                 value={selectedStatus}
@@ -326,17 +373,8 @@ export const ExecutionsPage: React.FC = () => {
                 searchPlaceholder="Filter status..."
                 allowClear={true}
                 options={[
-                  { value: "", label: "All Statuses" },
-                  { value: "QUEUED", label: "QUEUED", badge: "wait" },
-                  { value: "RUNNING", label: "RUNNING", badge: "active" },
-                  { value: "GENERATING", label: "GENERATING", badge: "ai" },
-                  { value: "PENDING_APPROVAL", label: "PENDING_APPROVAL", badge: "review" },
-                  { value: "READY_TO_PUBLISH", label: "READY_TO_PUBLISH", badge: "held" },
-                  { value: "PUBLISHING", label: "PUBLISHING", badge: "atomic" },
-                  { value: "PUBLISHED", label: "PUBLISHED", badge: "done" },
-                  { value: "PAUSED", label: "PAUSED", badge: "held" },
-                  { value: "FAILED", label: "FAILED", badge: "error" },
-                  { value: "CANCELLED", label: "CANCELLED", badge: "abort" },
+                  { value: "", label: "All statuses" },
+                  ...Object.keys(STATUS_LABEL).map((k) => ({ value: k, label: statusLabel(k), badge: summary[k] ? String(summary[k]) : undefined })),
                 ]}
               />
             </div>
@@ -371,6 +409,27 @@ export const ExecutionsPage: React.FC = () => {
         )}
       </AnimatePresence>
 
+      {Object.keys(summary).length > 0 && (
+        <div className="flex flex-wrap gap-2" role="group" aria-label="Runs by status">
+          {[
+            { k: "PUBLISHED", tone: "da-chip-emerald" },
+            { k: "PENDING_APPROVAL", tone: "da-chip-amber" },
+            { k: "QUEUED", tone: "da-chip-slate" },
+            { k: "GENERATING", tone: "da-chip-indigo" },
+            { k: "REGENERATING", tone: "da-chip-violet" },
+            { k: "FAILED", tone: "da-chip-rose" },
+            { k: "SKIPPED", tone: "da-chip-slate" },
+            { k: "CANCELLED", tone: "da-chip-slate" },
+          ].filter((c) => summary[c.k]).map((c) => (
+            <button key={c.k} type="button" aria-pressed={selectedStatus === c.k}
+              onClick={() => { setSelectedStatus(selectedStatus === c.k ? "" : c.k); setPage(1); }}
+              className={`da-chip ${c.tone} px-3 py-1 text-[12px] transition ${selectedStatus === c.k ? "ring-2 ring-indigo-400 ring-offset-1" : "hover:opacity-80"}`}>
+              {statusLabel(c.k)} · <strong>{summary[c.k]}</strong>
+            </button>
+          ))}
+        </div>
+      )}
+
       {loading && executions.length === 0 ? (
         <Card><Loading label="Loading runs…" /></Card>
       ) : executions.length === 0 ? (
@@ -385,7 +444,7 @@ export const ExecutionsPage: React.FC = () => {
                   <th className="py-3 px-3 sm:px-4">Automation</th>
                   <th className="py-3 px-3 sm:px-4">Status</th>
                   <th className="py-3 px-3 sm:px-4 hidden md:table-cell">Publishes</th>
-                  <th className="py-3 px-4 hidden xl:table-cell">Generation time</th>
+                  <th className="py-3 px-4 hidden xl:table-cell">Took</th>
                   <th className="py-3 px-4 hidden xl:table-cell">Retries</th>
                   <th className="py-3 px-4 hidden lg:table-cell">Record</th>
                   <th className="py-3 px-3 sm:px-4 text-right">Actions</th>
@@ -404,7 +463,7 @@ export const ExecutionsPage: React.FC = () => {
                       ref={(el: HTMLTableRowElement | null) =>
                         el ? orbitTargets.register(`executions.row.${e.id}`, el) : orbitTargets.unregister(`executions.row.${e.id}`)
                       }
-                      className="font-mono transition-colors hover:bg-indigo-50/30"
+                      className="transition-colors hover:bg-indigo-50/30"
                     >
                       <td className="py-3 px-3 sm:px-4 align-top">
                         <span className="font-bold text-slate-900">#{e.id}</span>
@@ -418,8 +477,8 @@ export const ExecutionsPage: React.FC = () => {
                         <div className="flex flex-wrap items-center gap-1.5">
                           <StatusPill status={e.status} size="sm" />
                           {e.failure_category && (
-                            <span className="text-[9px] bg-rose-100 text-rose-800 px-1.5 py-0.5 rounded font-mono font-bold">
-                              {e.failure_category}
+                            <span className="rounded bg-rose-100 px-1.5 py-0.5 text-[10.5px] font-semibold text-rose-800">
+                              {humanStatus(e.failure_category)}
                             </span>
                           )}
                         </div>
@@ -447,7 +506,7 @@ export const ExecutionsPage: React.FC = () => {
                           onClick={() => handleViewExecution(e)}
                           className="da-btn da-btn-secondary da-btn-sm"
                         >
-                          <Eye className="w-3 h-3" /> View
+                          <Eye className="w-3 h-3" /> Details
                         </motion.button>
 
                         {/* Publish Now for Ready/Approved */}
@@ -459,7 +518,7 @@ export const ExecutionsPage: React.FC = () => {
                             onClick={() => handlePublishNow(e.id)}
                             className="da-btn da-btn-primary da-btn-sm"
                           >
-                            Publish Now
+                            Publish now
                           </motion.button>
                         )}
 
@@ -510,7 +569,8 @@ export const ExecutionsPage: React.FC = () => {
                             disabled={isProcessing}
                             onClick={() => handleCancel(e.id)}
                             className="da-icon-btn h-7 w-7 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
-                            title="Cancel execution before target write"
+                            title="Cancel this run (nothing has been written yet)"
+                            aria-label="Cancel this run"
                           >
                             <XCircle className="w-3 h-3" />
                           </motion.button>
@@ -576,7 +636,9 @@ export const ExecutionsPage: React.FC = () => {
                       )}
                     </div>
                     <p className="text-xs text-slate-500 mt-0.5">
-                      Pipeline: <span className="font-semibold text-slate-800">{selectedExecution.automation?.name || `Automation #${selectedExecution.automation_id}`}</span> • Target Table: <span className="font-mono text-indigo-600 font-semibold">{selectedExecution.automation?.target_table || "posts"}</span>
+                      <span className="font-semibold text-slate-800">{selectedExecution.automation?.name || (selectedExecution.automation_id ? `Automation #${selectedExecution.automation_id}` : "Loading…")}</span>
+                      {selectedExecution.automation?.target_table && <> · writes to <span className="font-mono font-semibold text-indigo-600">{selectedExecution.automation.target_table}</span></>}
+                      {selectedExecution.automation?.connection?.name && <> in {selectedExecution.automation.connection.name}</>}
                     </p>
                   </div>
                 </div>
@@ -596,13 +658,13 @@ export const ExecutionsPage: React.FC = () => {
               {/* Top Metrics Ribbon */}
               <div className="hidden shrink-0 grid-cols-2 sm:grid sm:grid-cols-4 gap-2 text-xs font-mono">
                 <div className="da-panel p-3">
-                  <span className="text-[10px] text-slate-400 uppercase font-sans font-bold block">Target Record</span>
+                  <span className="text-[10px] text-slate-400 uppercase font-sans font-bold block">Row written</span>
                   <span className="font-bold text-slate-900 text-xs">
-                    {selectedExecution.target_record_id ? `#${selectedExecution.target_record_id}` : "Pending Write"}
+                    {selectedExecution.target_record_id ? `#${selectedExecution.target_record_id}` : "Not written yet"}
                   </span>
                 </div>
                 <div className="da-panel p-3">
-                  <span className="text-[10px] text-slate-400 uppercase font-sans font-bold block">Queue Wait</span>
+                  <span className="text-[10px] text-slate-400 uppercase font-sans font-bold block">Waited to start</span>
                   <span className="font-bold text-indigo-600 text-xs">
                     {selectedExecution.queue_wait_ms !== null && selectedExecution.queue_wait_ms !== undefined
                       ? `${(Math.max(0, selectedExecution.queue_wait_ms) / 1000).toFixed(2)}s`
@@ -610,17 +672,21 @@ export const ExecutionsPage: React.FC = () => {
                   </span>
                 </div>
                 <div className="da-panel p-3">
-                  <span className="text-[10px] text-slate-400 uppercase font-sans font-bold block">Execution Duration</span>
+                  <span className="text-[10px] text-slate-400 uppercase font-sans font-bold block">Took</span>
                   <span className="font-bold text-emerald-600 text-xs">
                     {selectedExecution.execution_duration_ms !== null && selectedExecution.execution_duration_ms !== undefined
                       ? `${(selectedExecution.execution_duration_ms / 1000).toFixed(2)}s`
                       : "-"}
                   </span>
                 </div>
-                <div className="da-panel truncate p-3">
-                  <span className="text-[10px] text-slate-400 uppercase font-sans font-bold block">Idempotency Key</span>
-                  <span className="text-slate-700 text-[11px] truncate block" title={selectedExecution.idempotency_key}>
-                    {selectedExecution.idempotency_key ? String(selectedExecution.idempotency_key).slice(0, 14) + "..." : "-"}
+                <div className="da-panel truncate p-3" title={(selectedExecution.ai_usage?.models || []).join(", ") || undefined}>
+                  <span className="text-[10px] text-slate-400 uppercase font-sans font-bold block">AI used</span>
+                  <span className="block truncate text-[11px] font-bold text-slate-700">
+                    {selectedExecution.ai_usage
+                      ? selectedExecution.ai_usage.calls
+                        ? `${(selectedExecution.ai_usage.prompt_tokens + selectedExecution.ai_usage.completion_tokens).toLocaleString()} tokens · ${selectedExecution.ai_usage.calls} call${selectedExecution.ai_usage.calls === 1 ? "" : "s"}`
+                        : "No AI calls"
+                      : "-"}
                   </span>
                 </div>
               </div>
@@ -649,7 +715,7 @@ export const ExecutionsPage: React.FC = () => {
                   }`}
                 >
                   <Cpu className="w-3.5 h-3.5" />
-                  <span>AI & RAG Provenance</span>
+                  <span>How it was made</span>
                 </button>
                 <button
                   type="button"
@@ -661,7 +727,7 @@ export const ExecutionsPage: React.FC = () => {
                   }`}
                 >
                   <Clock className="w-3.5 h-3.5" />
-                  <span>Process Timeline ({((selectedExecution.timeline || selectedExecution.timeline_events) || []).length})</span>
+                  <span>Timeline ({((selectedExecution.timeline || selectedExecution.timeline_events) || []).length})</span>
                 </button>
                 <button
                   type="button"
@@ -673,7 +739,7 @@ export const ExecutionsPage: React.FC = () => {
                   }`}
                 >
                   <Zap className="w-3.5 h-3.5" />
-                  <span>Raw Technical JSON</span>
+                  <span>Technical details</span>
                 </button>
                 {selectedExecution.status === "PUBLISHED" && selectedExecution.target_record_id && (
                   <button
@@ -686,7 +752,7 @@ export const ExecutionsPage: React.FC = () => {
                     }`}
                   >
                     <FileEdit className="w-3.5 h-3.5" />
-                    <span>Edit Published Record #{selectedExecution.target_record_id}</span>
+                    <span>Edit row #{selectedExecution.target_record_id}</span>
                   </button>
                 )}
               </div>

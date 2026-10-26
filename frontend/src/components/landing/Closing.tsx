@@ -124,7 +124,7 @@ export const FinalCta: React.FC = () => {
 
 export const LandingFooter: React.FC = () => {
   const { isAuthenticated } = useAuth();
-  const { content } = usePlatform();
+  const { content, config } = usePlatform();
   const account = isAuthenticated
     ? [{ to: "/dashboard", label: "Dashboard" }, { to: "/connections", label: "Connections" }, { to: "/automations", label: "Automations" }]
     : [{ to: "/login", label: "Sign in" }, { to: "/register", label: "Create account" }];
@@ -157,7 +157,12 @@ export const LandingFooter: React.FC = () => {
       <div className="border-t border-white/[0.06]">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 flex flex-col sm:flex-row items-center justify-between gap-3 text-[13px] text-slate-500">
           <span>{content.footer_copyright}</span>
-          <span>{content.footer_stack}</span>
+          <span className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1">
+            {config.platform.terms_url && <a href={config.platform.terms_url} target="_blank" rel="noopener noreferrer" className="hover:text-white">Terms</a>}
+            {config.platform.privacy_url && <a href={config.platform.privacy_url} target="_blank" rel="noopener noreferrer" className="hover:text-white">Privacy</a>}
+            {config.platform.support_email && <a href={`mailto:${config.platform.support_email}`} className="hover:text-white">{config.platform.support_email}</a>}
+            <span>{content.footer_stack}</span>
+          </span>
         </div>
       </div>
     </footer>

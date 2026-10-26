@@ -168,6 +168,10 @@ class DecideRequest(BaseModel):
     tool_schemas: List[ToolSchema] = Field(default_factory=list)
     # Catalog of on-screen surfaces (page, fields, actions) Orbit can operate with the UI tools.
     portal_map: List[Dict[str, Any]] = Field(default_factory=list)
+    # The product's name as set in the admin panel (Settings > General > Brand).
+    product_name: str = Field("Rowpilot", min_length=1, max_length=60)
+    # The customer's 'Orbit & planning' temperature; low values make decisions steadier.
+    temperature: Optional[float] = Field(None, ge=0.0, le=1.5)
     observations: List[Observation] = Field(default_factory=list)
     conversation_summary: List[Dict[str, Any]] = Field(default_factory=list)
     slots: Dict[str, Any] = Field(default_factory=dict)

@@ -134,69 +134,63 @@ class RAGService:
     # ------------------------------------------------------------------
 
     PRODUCT_DOC_BASE_ID = 999000
-    PRODUCT_DOC_DIR = "docs/orbit-agent"
 
-    def _product_doc_paths(self) -> List[str]:
-        """Every Markdown guide in docs/orbit-agent (product overview, automations, security, tour)."""
-        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
-        for base in (repo_root, os.getcwd()):
-            folder = os.path.join(base, self.PRODUCT_DOC_DIR)
-            if os.path.isdir(folder):
-                return sorted(os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".md"))
-        return []
-
-    def _published_guide_dir(self) -> str:
-        """Guides published from the admin panel (Laravel) live next to the indexes, in the AI service's own storage."""
+    # Product knowledge comes only from the admin panel (Laravel stores the guides in its database and publishes
+    # them here). Nothing is read from Markdown files; older versions kept published guides in this folder.
+    def _legacy_guide_dir(self) -> str:
         return os.path.join(os.path.dirname(os.path.abspath(settings.INDEX_DIR)), "product_guides")
 
-    def _published_guide_paths(self) -> List[str]:
-        folder = self._published_guide_dir()
+    def _remove_legacy_guide_files(self) -> None:
+        folder = self._legacy_guide_dir()
         if not os.path.isdir(folder):
-            return []
-        return sorted(os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".md"))
+            return
+        for f in os.listdir(folder):
+            if f.endswith(".md"):
+                os.remove(os.path.join(folder, f))
+        try:
+            os.rmdir(folder)
+        except OSError:
+            pass
 
     def publish_product_guides(self, guides: List[Dict[str, str]]) -> Dict[str, Any]:
         """
-        Replace Orbit's product knowledge with the guides an admin published (name, title, content), then re-index.
-        Names are slugs; anything else is refused. An empty list removes the published set (the bundled guides apply).
+        Replace Orbit's product knowledge with the guides an admin published (name, title, content) and index them.
+        Names are slugs; anything else is refused. An empty list leaves Orbit without product knowledge.
         """
-        wanted = {}
+        docs: List[Tuple[str, str, str]] = []
+        seen = set()
         for g in guides:
             name = str(g.get("name", "")).strip()
             if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,80}", name):
                 raise ValueError(f"Invalid guide name: {name!r}")
+            if name in seen:
+                raise ValueError(f"Guide {name!r} was sent twice")
+            seen.add(name)
             content = str(g.get("content", "")).strip()
-            title = str(g.get("title", "")).strip()
-            if title and not content.startswith("# "):
+            title = str(g.get("title", "")).strip() or name
+            if not content.startswith("# "):
                 content = f"# {title}\n\n{content}"
-            wanted[f"{name}.md"] = content + "\n"
-        folder = self._published_guide_dir()
-        os.makedirs(folder, exist_ok=True)
-        for f in os.listdir(folder):
-            if f.endswith(".md") and f not in wanted:
-                os.remove(os.path.join(folder, f))
-        for f, content in wanted.items():
-            with open(os.path.join(folder, f), "w", encoding="utf-8") as fh:
-                fh.write(content)
-        vectors = self.ensure_product_context_indexed()
+            docs.append((name, title, content + "\n"))
+        self._index_product_guides(docs)
+        self._remove_legacy_guide_files()
         manifest = self._read_manifest(0)
         return {
-            "guides": len(wanted),
-            "vectors": vectors,
+            "guides": len(docs),
+            "vectors": self._get_user_index(0).index.ntotal,
             "chunks": manifest.get("chunks", 0),
             "version": manifest.get("version"),
             "indexed_at": manifest.get("indexed_at"),
             "embedding_backend": manifest.get("embedding_backend"),
-            "source": "published" if wanted else "bundled",
+            "source": "published" if docs else "none",
         }
 
     def product_guides_status(self) -> Dict[str, Any]:
         manifest = self._read_manifest(0)
-        published = self._published_guide_paths()
+        chunks = int(manifest.get("chunks", 0) or 0)
         return {
-            "source": "published" if published else "bundled",
-            "guides": len(published) if published else len(self._product_doc_paths()),
-            "chunks": manifest.get("chunks", 0),
+            "source": "published" if chunks else "none",
+            "guides": len(manifest.get("guides") or []) if chunks else 0,
+            "chunks": chunks,
             "version": manifest.get("version"),
             "indexed_at": manifest.get("indexed_at"),
             "embedding_backend": manifest.get("embedding_backend"),
@@ -212,72 +206,68 @@ class RAGService:
         except (OSError, ValueError):
             return {}
 
-    def ensure_product_context_indexed(self, doc_paths: Optional[List[str]] = None) -> int:
-        """
-        Index the product guides into the user_0 partition. Re-indexes when any guide's content,
-        the set of guides, the embedding backend or the dimension changes. Returns total vectors.
-        """
-        if isinstance(doc_paths, str):
-            doc_paths = [doc_paths]
-        # Guides published from the admin panel replace the bundled ones in docs/orbit-agent.
-        paths = [p for p in (doc_paths or self._published_guide_paths() or self._product_doc_paths()) if os.path.exists(p)]
-        if not paths:
-            logger.warning("Product guides not found; product RAG is empty.")
-            return 0
-
-        docs = []
+    def _index_product_guides(self, docs: List[Tuple[str, str, str]]) -> int:
+        """Chunk, embed and store (name, title, content) guides in the product partition (user 0); returns vectors."""
         digest = hashlib.sha256()
-        for path in paths:
-            with open(path, "r", encoding="utf-8") as f:
-                content = f.read()
-            name = os.path.splitext(os.path.basename(path))[0]
+        for name, _, content in docs:
             digest.update(name.encode("utf-8") + b"\0" + content.encode("utf-8") + b"\0")
-            title = next((ln[2:].strip() for ln in content.splitlines() if ln.startswith("# ")), name)
-            docs.append((path, name, title, content))
         sha = digest.hexdigest()
 
-        # Probe first so backend/dimension reflect what this query will use.
         self.embedder._ensure_ollama_ready()
-        backend, dim = self.embedder.backend, self.embedder.dimension
-
-        manifest = self._read_manifest(0)
-        user_index = self._get_user_index(0)
-        if (
-            manifest.get("sha256") == sha
-            and manifest.get("embedding_backend") == backend
-            and user_index.index.ntotal > 0
-            and user_index.index.d == dim
-        ):
-            return user_index.index.ntotal
-
         chunks: List[Dict[str, Any]] = []
-        for i, (_, name, title, content) in enumerate(docs):
+        for i, (name, title, content) in enumerate(docs):
             for c in chunk_markdown_by_heading(content, document_id=self.PRODUCT_DOC_BASE_ID + i):
                 c["source"] = name
                 c["heading"] = f"{title} › {c['heading']}" if c.get("heading") and c["heading"] != title else title
                 chunks.append(c)
-        vectors = self.embedder.encode_batch([c["text"] for c in chunks])
-        actual_dim = vectors.shape[1] if vectors.ndim == 2 and vectors.shape[0] else dim
+        return self._store_product_chunks(chunks, sha, [{"name": n, "title": t} for n, t, _ in docs])
 
-        fresh = UserVectorIndex(user_id=0, dimension=actual_dim)
-        fresh.index = faiss.IndexFlatIP(actual_dim)
+    def _store_product_chunks(self, chunks: List[Dict[str, Any]], sha: str, guides: List[Dict[str, str]]) -> int:
+        dim = self.embedder.dimension
+        if chunks:
+            vectors = self.embedder.encode_batch([c["text"] for c in chunks])
+            dim = vectors.shape[1] if vectors.ndim == 2 and vectors.shape[0] else dim
+        fresh = UserVectorIndex(user_id=0, dimension=dim)
+        fresh.index = faiss.IndexFlatIP(dim)
         fresh.chunks_metadata = []
-        fresh.add_chunks(chunks, vectors)
+        if chunks:
+            fresh.add_chunks(chunks, vectors)
+        else:
+            fresh._save()
 
         version = sha[:12]
         with open(self._manifest_path(0), "w", encoding="utf-8") as f:
             json.dump({
-                "sources": [os.path.relpath(p) for p, *_ in docs],
+                "guides": guides,
                 "sha256": sha,
                 "version": version,
                 "embedding_backend": self.embedder.backend,
-                "dimension": actual_dim,
+                "dimension": dim,
                 "chunks": len(chunks),
                 "indexed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }, f, indent=2)
-        logger.info("Product guides indexed: %d files, %d chunks, version=%s, backend=%s",
-                    len(docs), len(chunks), version, self.embedder.backend)
+        logger.info("Product guides indexed: %d guides, %d chunks, version=%s, backend=%s",
+                    len(guides), len(chunks), version, self.embedder.backend)
         return fresh.index.ntotal
+
+    def ensure_product_context_indexed(self) -> int:
+        """
+        Product guides as published from the admin panel. When the embedding backend or dimension changed since they
+        were indexed (for example Ollama became reachable), they are re-embedded from the stored sections.
+        Returns the number of vectors (0 until an admin publishes guides).
+        """
+        manifest = self._read_manifest(0)
+        if not manifest.get("chunks"):
+            return 0
+        self.embedder._ensure_ollama_ready()
+        backend, dim = self.embedder.backend, self.embedder.dimension
+        stored = UserVectorIndex(user_id=0, dimension=int(manifest.get("dimension") or dim))
+        if manifest.get("embedding_backend") == backend and stored.index.ntotal > 0 and stored.index.d == dim:
+            return stored.index.ntotal
+        chunks = [dict(c) for c in stored.chunks_metadata]
+        if not chunks:
+            return 0
+        return self._store_product_chunks(chunks, str(manifest.get("sha256") or ""), list(manifest.get("guides") or []))
 
     def query_product_context(self, query_text: str, top_k: int = 3) -> List[Dict[str, Any]]:
         """Queries the global product knowledge base (user_id=0)."""

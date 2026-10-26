@@ -59,14 +59,29 @@ class CustomerActivityResource extends Resource
                     ->label('Customer')
                     ->placeholder('Deleted account')
                     ->url(fn (AuditLog $record) => $record->user && CustomerResource::canViewAny() ? CustomerResource::getUrl('view', ['record' => $record->user]) : null),
+                TextColumn::make('what')
+                    ->label('What happened')
+                    ->state(fn (AuditLog $record) => \App\Admin\AuditDescriber::describe($record))
+                    ->description(fn (AuditLog $record) => ($n = count(\App\Admin\AuditDescriber::changes($record))) ? "{$n} field" . ($n === 1 ? '' : 's') . ' changed' : null)
+                    ->wrap(),
                 TextColumn::make('action')->badge()->formatStateUsing(fn ($state) => self::action($state))
-                    ->color(fn ($state) => str_contains((string) $state, 'DELETED') || str_contains((string) $state, 'SUSPENDED') ? 'danger' : (str_contains((string) $state, 'ADMIN') ? 'warning' : 'gray'))
-                    ->searchable(),
+                    ->color(fn ($state) => preg_match('/DELETED|SUSPENDED|refused|MISSED|mismatch/i', (string) $state) ? 'danger' : (str_contains((string) $state, 'ADMIN') ? 'warning' : 'gray'))
+                    ->searchable()
+                    ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('resource_type')->label('On')->formatStateUsing(fn ($state, AuditLog $record) => trim($state . ($record->resource_id ? " #{$record->resource_id}" : '')))->placeholder('—'),
                 TextColumn::make('ip_address')->label('IP')->placeholder('—')->toggleable(isToggledHiddenByDefault: true),
             ])
             ->defaultSort('id', 'desc')
             ->filters([
+                SelectFilter::make('category')
+                    ->label('Area')
+                    ->options(['connections' => 'Connections', 'automations' => 'Automations', 'approvals' => 'Approvals', 'data' => 'Data', 'ai' => 'AI & knowledge', 'account' => 'Account', 'orbit' => 'Orbit'])
+                    ->query(fn (Builder $query, array $data) => $query->when($data['value'] ?? null, fn ($q, $cat) => $q->where(function ($w) use ($cat) {
+                        foreach (\App\Http\Controllers\Api\AuditLogController::CATEGORIES[$cat] ?? [] as $pattern) {
+                            $w->orWhere('action', 'like', $pattern);
+                        }
+                    }))),
+                SelectFilter::make('user_id')->label('Customer')->relationship('user', 'name')->searchable(),
                 SelectFilter::make('action')
                     ->options(fn () => AuditLog::query()->select('action')->distinct()->orderBy('action')->pluck('action', 'action')->map(fn ($a) => self::action($a))->all())
                     ->searchable()
@@ -77,7 +92,7 @@ class CustomerActivityResource extends Resource
                         ->when($data['from'] ?? null, fn ($q, $d) => $q->whereDate('created_at', '>=', $d))
                         ->when($data['until'] ?? null, fn ($q, $d) => $q->whereDate('created_at', '<=', $d))),
             ])
-            ->recordActions([ViewAction::make()->modalHeading(fn (AuditLog $record) => self::action($record->action))]);
+            ->recordActions([ViewAction::make()->modalHeading(fn (AuditLog $record) => \App\Admin\AuditDescriber::describe($record))]);
     }
 
     public static function infolist(Schema $schema): Schema
@@ -87,9 +102,16 @@ class CustomerActivityResource extends Resource
             TextEntry::make('user.name')->label('Customer')->placeholder('Deleted account'),
             TextEntry::make('resource_type')->label('On')->formatStateUsing(fn ($state, AuditLog $record) => trim($state . ($record->resource_id ? " #{$record->resource_id}" : '')))->placeholder('—'),
             TextEntry::make('ip_address')->label('IP')->placeholder('—'),
+            TextEntry::make('what')->label('What happened')->state(fn (AuditLog $record) => \App\Admin\AuditDescriber::describe($record))->columnSpanFull(),
+            TextEntry::make('changes')
+                ->label('What changed')
+                ->state(fn (AuditLog $record) => \App\Admin\AuditDescriber::changes($record))
+                ->listWithLineBreaks()
+                ->columnSpanFull()
+                ->visible(fn (AuditLog $record) => \App\Admin\AuditDescriber::changes($record) !== []),
             KeyValueEntry::make('metadata')
                 ->label('Details')
-                ->state(fn (AuditLog $record) => collect((array) $record->metadata)->map(fn ($v) => is_scalar($v) || $v === null ? (string) $v : json_encode($v))->all())
+                ->state(fn (AuditLog $record) => collect((array) $record->metadata)->except('changes')->map(fn ($v) => is_scalar($v) || $v === null ? (string) $v : json_encode($v))->all())
                 ->columnSpanFull(),
         ])->columns(2);
     }

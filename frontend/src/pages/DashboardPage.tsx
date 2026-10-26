@@ -13,6 +13,7 @@ import { useLiveEvents } from "../context/LiveEventsContext";
 import { useToast } from "../context/ToastContext";
 import { useOrbitSurface } from "../hooks/useOrbitSurface";
 import { OrbitRemoteCard } from "../components/remote/OrbitRemoteCard";
+import { NextUpCard } from "../components/dashboard/NextUpCard";
 import { pageStateService } from "../services/pageStateService";
 import { usePlatform } from "../context/PlatformContext";
 
@@ -134,7 +135,6 @@ export const DashboardPage: React.FC = () => {
   const failedJobsCount = stats?.failed_count ?? 0;
   const automationsCount = stats?.automations_count ?? automations.length;
   const analytics = stats?.analytics || {};
-  const nextRun = stats?.upcoming?.next_run;
   const firstName = (user?.name || "").split(/\s+/)[0];
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
@@ -247,49 +247,8 @@ export const DashboardPage: React.FC = () => {
             </div>
           </div>
 
-          {/* Next up */}
-          <div className="rounded-3xl border border-white/10 bg-white/[0.05] p-5 backdrop-blur">
-            <div className="flex items-center justify-between">
-              <span className="flex items-center gap-2 text-[12px] font-semibold uppercase tracking-[0.14em] text-slate-400">
-                <Clock className="h-3.5 w-3.5 text-cyan-300" /> Next up
-              </span>
-              <span className="rounded-full bg-white/10 px-2.5 py-0.5 text-[11.5px] font-semibold text-slate-200">
-                {stats?.upcoming?.total_scheduled_active || 0} active schedules
-              </span>
-            </div>
-            {nextRun ? (
-              <>
-                <div className="mt-4 text-[18px] font-bold tracking-[-0.02em] text-white">{nextRun.name}</div>
-                <div className="mt-1 font-mono text-[12.5px] text-slate-400">→ {nextRun.target_table}</div>
-                <div className="mt-5 grid grid-cols-[auto_1fr_auto] items-center gap-3">
-                  <div>
-                    <div className="text-[11px] text-slate-500">Writes</div>
-                    <div className="text-[20px] font-bold tabular-nums text-indigo-200">{time(nextRun.next_generation_at)}</div>
-                  </div>
-                  <div className="relative h-px bg-gradient-to-r from-indigo-400/60 via-violet-400/60 to-emerald-400/60">
-                    <span className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 whitespace-nowrap rounded-full border border-white/10 bg-ink px-2 py-0.5 text-[10.5px] text-slate-400">
-                      review window
-                    </span>
-                  </div>
-                  <div className="text-right">
-                    <div className="text-[11px] text-slate-500">Publishes</div>
-                    <div className="text-[20px] font-bold tabular-nums text-emerald-300">{time(nextRun.next_publication_at)}</div>
-                  </div>
-                </div>
-                <p className="mt-4 text-[12px] leading-relaxed text-slate-500">
-                  Publication is always at least 15 minutes after writing, so reviewers have time to decide.
-                </p>
-              </>
-            ) : (
-              <div className="py-8 text-center">
-                <Clock className="mx-auto h-8 w-8 text-slate-600" />
-                <p className="mt-3 text-[13px] text-slate-400">Nothing scheduled for today.</p>
-                <Link to="/automations/new" className="mt-3 inline-flex items-center gap-1 text-[13px] font-semibold text-indigo-300 hover:text-white">
-                  Schedule an automation <ArrowRight className="h-3.5 w-3.5" />
-                </Link>
-              </div>
-            )}
-          </div>
+          {/* Next up: live countdown, the run in progress, then the next one */}
+          <NextUpCard />
         </div>
       </motion.section>
 

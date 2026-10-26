@@ -52,9 +52,12 @@ class AppServiceProvider extends ServiceProvider
         });
         // The admin panel's System health page shows whether the scheduler is running.
         Event::listen(ScheduledTaskStarting::class, fn () => SystemHealth::schedulerBeat());
+        // AI usage attribution belongs to one request; a long-lived server must not carry it into the next one.
+        Event::listen(\Illuminate\Foundation\Http\Events\RequestHandled::class, fn () => \App\Services\AiUsage::reset());
         Event::listen(JobProcessing::class, function (JobProcessing $e) {
             // Workers run for hours: pick up settings an admin changed since this worker started.
             PlatformSettings::refreshIfStale();
+            \App\Services\AiUsage::reset();
             if (str_contains((string) $e->job->getQueue(), 'agent')) {
                 AgentQueueStatus::workerHeartbeat();
             }

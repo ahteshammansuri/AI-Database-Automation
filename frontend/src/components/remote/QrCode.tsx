@@ -4,7 +4,7 @@ import { Database } from "lucide-react";
 
 /**
  * A QR code drawn as one crisp SVG path, generated in the browser (the pairing code never leaves this page except
- * to the phone that scans it). Error correction "Q" leaves room for the DataAuto mark in the middle.
+ * to the phone that scans it). Error correction "Q" leaves room for the brand mark in the middle.
  */
 export const QrCode: React.FC<{ value: string; size?: number; className?: string; label?: string }> = ({ value, size = 232, className = "", label }) => {
   const { path, count } = useMemo(() => {

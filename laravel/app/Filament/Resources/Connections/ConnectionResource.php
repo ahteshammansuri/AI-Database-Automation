@@ -155,6 +155,24 @@ class ConnectionResource extends Resource
                         TextEntry::make('automations_count')->label('Automations')->state(fn (DbConnection $record) => $record->automations()->count()),
                         TextEntry::make('error_message')->label('Last error')->placeholder('None')->columnSpanFull(),
                     ]),
+                Section::make('Data and protection')
+                    ->description('What the schema scan found and how the customer protects this database. Row data itself is never shown here.')
+                    ->columns(4)
+                    ->components([
+                        TextEntry::make('tables_found')->label('Tables found')
+                            ->state(fn (DbConnection $record) => count($record->schemaSnapshot?->schema_payload['tables'] ?? []) ?: null)->placeholder('Not scanned'),
+                        TextEntry::make('restricted_tables')->label('Restricted tables')
+                            ->state(fn (DbConnection $record) => collect($record->schemaSnapshot?->schema_payload['tables'] ?? [])->filter(fn ($t) => ($t['category'] ?? null) === 'RESTRICTED' || !empty($t['is_sensitive']))->count()),
+                        TextEntry::make('table_overrides')->label('Table access set by the owner')
+                            ->state(fn (DbConnection $record) => collect((array) (((array) $record->data_policy)['table_overrides'] ?? []))->map(fn ($v, $t) => "{$t}: " . ($v === 'writable' ? 'editable' : 'view only'))->values()->all())
+                            ->listWithLineBreaks()->placeholder('Defaults')->columnSpan(2),
+                        TextEntry::make('autopilots')->label('Data autopilots')
+                            ->state(fn (DbConnection $record) => \App\Models\DataAutopilot::where('connection_id', $record->id)->count() . ' (' . \App\Models\DataAutopilot::where('connection_id', $record->id)->where('is_active', true)->count() . ' active)'),
+                        TextEntry::make('data_changes')->label('Row changes, last 30 days')
+                            ->state(fn (DbConnection $record) => \App\Models\DataChangeRequest::where('connection_id', $record->id)->where('status', 'executed')->where('executed_at', '>=', now()->subDays(30))->count()),
+                        TextEntry::make('refusals')->label('Refused writes, last 30 days')
+                            ->state(fn (DbConnection $record) => \App\Models\AuditLog::where('resource_type', 'db_connections')->where('resource_id', (string) $record->id)->whereIn('action', ['data.write_refused', 'data.delete_refused'])->where('created_at', '>=', now()->subDays(30))->count()),
+                    ]),
                 Section::make('Customer')
                     ->columns(3)
                     ->components([

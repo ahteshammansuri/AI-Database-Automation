@@ -153,6 +153,49 @@ class KnowledgeController extends Controller
     /**
      * Test retrieval diagnostics: query tenant's FAISS index and return relevant chunks & scores.
      */
+    /**
+     * Knowledge documents that match an automation's topic, best first. Measured on nomic-embed-text: matching
+     * topics score about 0.75-0.8 and unrelated ones 0.3-0.45, so only clear matches are suggested.
+     */
+    public function suggest(Request $request)
+    {
+        $validated = $request->validate(['topic' => 'required|string|min:3|max:4000']);
+        $userId = $request->user()->id;
+        $docs = KnowledgeDocument::where('user_id', $userId)->pluck('title', 'id');
+        if ($docs->isEmpty()) {
+            return response()->json(['suggestions' => [], 'backend' => null]);
+        }
+
+        try {
+            $chunks = $this->aiClient->queryKnowledge($userId, mb_substr($validated['topic'], 0, 1000), 12);
+        } catch (\Throwable) {
+            return response()->json(['suggestions' => [], 'backend' => null, 'message' => 'Suggestions are unavailable right now.']);
+        }
+
+        $best = [];
+        $backend = null;
+        foreach ($chunks as $c) {
+            $id = (int) ($c['document_id'] ?? 0);
+            if (!$docs->has($id)) {
+                continue;
+            }
+            $best[$id] = max($best[$id] ?? 0.0, (float) ($c['score'] ?? 0));
+            $backend ??= $c['embedding_backend'] ?? null;
+        }
+        arsort($best);
+        $floor = str_starts_with((string) $backend, 'ollama') ? 0.6 : 0.35;
+        $top = $best ? reset($best) : 0.0;
+
+        $suggestions = [];
+        foreach ($best as $id => $score) {
+            if ($score >= $floor && $score >= $top - 0.15 && count($suggestions) < 5) {
+                $suggestions[] = ['id' => $id, 'title' => $docs[$id], 'score' => round($score, 3)];
+            }
+        }
+
+        return response()->json(['suggestions' => $suggestions, 'backend' => $backend]);
+    }
+
     public function query(Request $request)
     {
         $validated = $request->validate([

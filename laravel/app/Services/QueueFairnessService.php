@@ -97,7 +97,7 @@ class QueueFairnessService
                     'scheduled_generation_at' => $occ['generation_at'],
                     'idempotency_key' => $idempotencyKey,
                     'publication_time' => $occ['publication_at'],
-                    'max_retries' => 3,
+                    'max_retries' => max(0, (int) config('automation.max_retries', 3)),
                     'retry_count' => 0,
                 ]);
 

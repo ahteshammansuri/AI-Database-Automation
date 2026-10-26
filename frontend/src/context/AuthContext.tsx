@@ -1,10 +1,12 @@
 import React, { createContext, useContext, useState, useEffect } from "react";
 import { api } from "../services/api";
+import { setPreferredTimeZone } from "../lib/schedule";
 
 export interface User {
   id: number;
   name: string;
   email: string;
+  timezone?: string | null;
 }
 
 interface AuthContextType {
@@ -23,6 +25,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(() => localStorage.getItem("auth_token"));
   const [isLoading, setIsLoading] = useState<boolean>(true);
+
+  // Times and new schedules use the account's timezone when one is chosen in Account settings. Set while rendering
+  // (not in an effect) so pages mounting in the same commit already read it.
+  setPreferredTimeZone(user?.timezone ?? null);
 
   useEffect(() => {
     const initAuth = async () => {

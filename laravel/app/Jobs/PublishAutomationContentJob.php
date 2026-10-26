@@ -3,6 +3,7 @@
 namespace App\Jobs;
 
 use App\Models\AutomationExecution;
+use App\Services\AiUsage;
 use App\Models\ContentVersion;
 use App\Models\AuditLog;
 use App\Services\SafeDatabaseExecutor;
@@ -27,6 +28,12 @@ class PublishAutomationContentJob implements ShouldQueue
     ) {}
 
     public function handle(SafeDatabaseExecutor $executor): void
+    {
+        $run = AutomationExecution::query()->select(['id', 'user_id'])->find($this->executionId);
+        AiUsage::using($run?->user_id, 'content', $run, fn () => $this->publish($executor));
+    }
+
+    private function publish(SafeDatabaseExecutor $executor): void
     {
         $startTime = microtime(true);
 

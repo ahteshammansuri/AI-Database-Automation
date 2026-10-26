@@ -25,6 +25,8 @@ import { AIProvidersPage } from "./pages/AIProvidersPage";
 import { ExecutionsPage } from "./pages/ExecutionsPage";
 import { AuditLogsPage } from "./pages/AuditLogsPage";
 import { SecuritySettingsPage } from "./pages/SecuritySettingsPage";
+import { AccountSettingsPage } from "./pages/AccountSettingsPage";
+import { DataPage } from "./pages/DataPage";
 import { actionBridge } from "./services/actionBridge";
 import { orbitTargets } from "./services/orbitTargets";
 import { orbitSurfaces } from "./services/orbitSurfaces";
@@ -103,6 +105,7 @@ const PortalApp: React.FC = () => {
               <Route path="dashboard" element={<DashboardPage />} />
               <Route path="connections" element={<ConnectionsPage />} />
               <Route path="explorer" element={<SchemaExplorerPage />} />
+              <Route path="data" element={<DataPage />} />
               <Route path="automations" element={<AutomationsListPage />} />
               <Route path="automations/new" element={<AutomationBuilderPage />} />
               <Route path="manual-schedule" element={<ManualSchedulePage />} />
@@ -112,6 +115,7 @@ const PortalApp: React.FC = () => {
               <Route path="executions" element={<ExecutionsPage />} />
               <Route path="audit-logs" element={<AuditLogsPage />} />
               <Route path="security" element={<SecuritySettingsPage />} />
+              <Route path="account" element={<AccountSettingsPage />} />
             </Route>
 
             <Route path="*" element={<Navigate to="/" replace />} />

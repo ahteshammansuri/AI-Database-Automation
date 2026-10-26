@@ -1,5 +1,7 @@
-# AI-Powered Multi-User Database Automation Platform
-### With Autonomous Voice-First AI Operator (Orbit)
+# Rowpilot
+### AI-powered, multi-user database automation, with Orbit, a voice-first operator
+
+The product name is a setting (admin panel › Settings › General); `Rowpilot` is the default.
 
 [![Docker Ready](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](docker-compose.yml)
 [![Laravel 11](https://img.shields.io/badge/Laravel-11.x-FF2D20?logo=laravel&logoColor=white)](laravel/)
@@ -58,7 +60,7 @@ The application is engineered into three cleanly decoupled tiers, supervised by 
 +---------------------------------------------------------------------------------------+
 |                      Python 3.12 FastAPI AI Service (Port 8001)                       |
 |   - Local Ollama Adapter (http://localhost:11434 / host.docker.internal:11434)        |
-|   - High-Fidelity Mock Provider (Deterministic Instant Generation / Offline Testing)  |
+|   - Test-only mock provider (off unless AI_ALLOW_MOCK_PROVIDER=true; tests only)  |
 |   - Optional Cloud Adapters (OpenAI, Gemini, Anthropic Claude)                        |
 |   - Document Ingestion: Markdown (.md), Plain Text (.txt), and PDF (PyMuPDF)          |
 |   - Overlapping Sliding Chunks, Dense Vector Embeddings, FAISS Vector Search Index    |
@@ -231,17 +233,15 @@ Follow this end-to-end walkthrough on a clean installation:
 3. Click **Test Connection**. The backend verifies connectivity and SSRF boundaries.
 4. Click **Save Connection**. Credentials are encrypted at rest with AES-256.
 
-### Step 3: Real-Time Schema Explorer
-1. Navigate to **Schema Explorer** (`/explorer`).
-2. Select your newly added connection.
-3. Observe real-time introspection:
-   - `users` and `payments` are flagged with a red badge: **RESTRICTED** (Default-deny security policy).
-   - `categories` and `tags` are marked **ELIGIBLE (REFERENCE)**.
-   - `posts` is marked with a green badge: **RECOMMENDED (PRIMARY TARGET)**.
+### Step 3: Schema Explorer and Data
+1. Navigate to **Schema Explorer** (`/explorer`) and select your connection.
+2. Each table shows its tier (*Recommended*, *Review needed*, *Restricted*: `users`, `payments`, credential tables), a row estimate and its column count. A table's page shows what a new row needs, every column (type, required or default, allowed values, which table it links to, *Secret* / *Personal* badges), the tables it belongs to and the tables that use it.
+3. **Table access on this connection:** financial, order, permission and audit tables are *View only* by default; the owner can switch a table to *Editable* (asked first, audited). Credential and session tables are always hidden.
+4. **Data** (`/data`): browse rows (search, sort, linked values by name, personal data masked until revealed), add or edit rows with a preview and Undo, delete only in `read_write_delete` mode with a typed phrase, add **AI sample rows** (every value checked) or let a **data autopilot** add rows on a schedule.
 
 ### Step 4: Configure AI Provider & Knowledge Base
 1. Navigate to **AI Providers** (`/ai-providers`).
-2. Select **Local Ollama** (default, no paid API needed) or **Mock Provider** (instant deterministic generation for testing).
+2. **Local Ollama** is the default (no paid API needed); OpenAI, Gemini and Claude are optional with your own key. Choose the model for each role: *Orbit and planning* and *Writing content*, each with a temperature (lower = steadier, higher = more varied), and run the readiness test.
 3. *(Optional)* Navigate to **Knowledge Base** (`/knowledge`) and upload `.md`, `.txt`, or `.pdf` technical guidelines to index into the FAISS vector store.
 
 ### Step 5: Create an automation (any table: posts, articles, news, products, FAQs)
@@ -259,7 +259,9 @@ Follow this end-to-end walkthrough on a clean installation:
 1. At generation time the background worker writes the content (your browser can be closed).
 2. If approval is on, the reviewer gets an HTML email with the rendered article and images, the exact database steps (e.g. *1. Create category "Cloud Databases" · 2. Insert into posts*), the publication time in the automation's timezone, and what happens without a decision.
 3. **Review and approve** / **Request changes** open a secure page where one click decides. Requesting changes regenerates a new version with your notes (up to 3 times).
-4. At publication time the approved version is written in one transaction. Check the run in **Execution history** (rendered content, write plan, timeline) and **Audit Logs**.
+4. At publication time the approved version is written in one transaction. Check the run in **Execution history** (rendered content, write plan, timeline, AI tokens used) and **Audit Logs** (plain sentences, before → after for changes, Orbit's own actions, CSV export).
+
+**Manual Publishing** (`/manual-schedule`) writes one row without AI: linked columns offer the linked table's real rows by name, or *Add a new …* (created first in the same transaction). Unfinished rows are kept as a draft. **Account settings** (`/account`): profile, timezone, password, signed-in sessions and your own AI usage.
 
 Images: with an OpenAI or Gemini key saved on **AI Providers**, images are AI-generated with that key. Without a key, a designed cover (title + category, colours from the topic) is created locally for free. Set `MEDIA_PUBLIC_URL` so the stored image URLs are reachable by your website.
 
@@ -271,10 +273,10 @@ Orbit is the articulated companion in the bottom-right corner of the signed-in p
 
 1. Every request you speak (or type) goes to **your configured model**, together with live context: current page and form, your connections, the current task, recent conversation, and relevant passages from the product guide and your knowledge base.
 2. The model picks a **real registered tool**. Laravel checks it (ownership, arguments, confirmation policy), runs it, verifies the result, and sends the result back to the model, which decides the next step.
-3. Orbit **visibly operates the page**: it flies to the real button or field, types values visibly through the page's own inputs, picks options and presses controls. It then speaks only what actually happened.
-4. Product knowledge comes from retrieval (embeddings + FAISS) over the guides in [`docs/orbit-agent/`](docs/orbit-agent/) (product overview, automations, security, portal tour) and your own knowledge base, not from hard-coded answers.
+3. Orbit **visibly operates the page**: it flies to the real button or field, types values visibly through the page's own inputs, picks options and presses controls. With the portal open, actions such as run now, pause/resume, retry or cancel a run, approve and send back are always carried out on screen (the server presses the page's own button and checks the real state afterwards), falling back to a background call only when the item is not on screen. It then speaks only what actually happened.
+4. Product knowledge comes from retrieval (embeddings + FAISS) over the **guides stored in the platform database** (admin panel › Orbit › Knowledge; product overview, portal tour, automations, security, data tools) and your own knowledge base, not from hard-coded answers or files. `{brand}` in a guide becomes the brand name when it is published; `php artisan orbit:sync-knowledge` (scheduled every 10 minutes) re-sends the published guides when the AI service has none indexed.
 
-How it is built: [`docs/orbit-agent/ARCHITECTURE.md`](docs/orbit-agent/ARCHITECTURE.md). The pre-upgrade audit: [`docs/orbit-agent/CURRENT_STATE_AUDIT.md`](docs/orbit-agent/CURRENT_STATE_AUDIT.md).
+How it is built: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md).
 
 ### Required local models (no paid API)
 
@@ -311,7 +313,7 @@ php artisan queue:work agent --queue=agent --sleep=1 --tries=1 --timeout=1600
 ### Orbit Remote: talk to Orbit from your phone
 On the dashboard choose **Connect your phone** (also in the Orbit panel and the navbar phone icon) and scan the QR
 code with the phone's camera. The phone shows only Orbit's face. **Hold the face and speak; let go to send.** The
-request goes to the open DataAuto tab and the web Orbit does it there, exactly as if you had spoken to it on the
+request goes to the open Rowpilot tab and the web Orbit does it there, exactly as if you had spoken to it on the
 computer. The phone mirrors the web Orbit live: thinking, speaking (lips follow the real voice), listening, done or
 stuck, and its eyes follow the web Orbit as it moves around the page. Tap **Type** to type instead, **Stop** to stop
 the current task.
@@ -323,7 +325,7 @@ the current task.
 - **Same Wi-Fi**: when the computer uses `localhost`, the QR code uses this machine's Wi-Fi address instead (pick one if
   there are several). For a public deployment set `ORBIT_REMOTE_PUBLIC_URL`.
 - **Voice needs https on phones** (browsers only allow the microphone on secure pages). For local development run the
-  frontend over https and open DataAuto from it:
+  frontend over https and open Rowpilot from it:
   ```bash
   cd frontend && npm run dev:https      # https://localhost:5174 (self-signed; accept it once on the computer and the phone)
   ```
@@ -352,12 +354,12 @@ Each admin can turn on an authenticator app (two-factor, with recovery codes) fr
 | Area | Pages |
 | :--- | :--- |
 | Overview | Customers, active this week, connections, automations, run success rate, Orbit success, paired phones; sign-up and run charts; newest customers; recent failed runs |
-| Customers | Customers (usage per customer: connections, automations, runs, success rate, Orbit requests, last active; **suspend / reactivate / sign out everywhere / delete**), Connections (credentials never shown; force read-only), Automations (pause / resume), Runs (timeline), Activity log |
-| Orbit | Requests (what customers asked and how it went), Paired phones (disconnect), **Knowledge** (the guides Orbit answers from; edit, then *Publish to Orbit* to re-index) |
+| Customers | Customers (usage per customer: connections, automations, runs, success rate, Orbit requests, last active, **models in use and AI tokens**; **suspend / reactivate / sign out everywhere / delete**), Connections (credentials never shown; tables found, table-access overrides, row changes; force read-only), Automations (model actually used, approval, last run, tokens; pause / resume), Automation runs (timeline, versions and review notes, AI usage), Activity log (plain sentences, before → after, **CSV export**), **AI usage** (every AI call: customer, purpose, model, tokens) |
+| Orbit | Requests (what customers asked, the conversation, each step with its outcome, model and tokens), Paired phones (session details, commands; disconnect), **Knowledge** (the guides Orbit answers from, stored in the database; edit, then *Publish to Orbit* to re-index) |
 | Website | Website content: announcement bar, hero, every section heading, FAQ, closing call to action, footer, sign-in panel, page title and description. Write `{brand}` to insert the brand name |
 | Settings | General (brand, tagline, support email, portal URL, email sender), Sign-up & limits (registration on/off, password length, per-customer limits, upload sizes), AI & models, Automations, Data assistant, Orbit (on/off and its limits), Orbit Remote (on/off, pairing and session times), Features |
-| Team & access | Admins, Roles (permissions per area: view / manage), Admin activity (who changed what; secret values are never recorded) |
-| System | Health (database, AI service, Ollama, real-time server, scheduler, queue workers, email, storage, failed jobs, read-only server environment), Failed jobs (retry / delete) |
+| Team & access | Admins, Roles (permissions per area: view / manage), Admin activity (who changed what, before → after; secret values are never recorded; CSV export) |
+| System | Health (database, AI service, Ollama, Orbit knowledge, real-time server, scheduler, queue workers, email, storage, failed jobs, read-only server environment), Failed jobs (retry / delete) |
 
 **Roles.** `super_admin` can do everything; only a super admin manages super admins, and the last active one cannot be
 removed. Preset roles `support` (read-only), `operations` (customers, connections, automations, Orbit, system) and
@@ -392,7 +394,7 @@ The application enforces strict non-negotiable security rules:
    - **DELETE**: only when the connection owner sets access mode `read_write_delete`, with impact analysis, a typed confirmation, a transaction, an encrypted backup and an audit record.
    - Every connection starts in `read_only` mode.
 3. **Sensitive Table Auto-Deny:**
-   Tables matching patterns like `users`, `auth`, `passwords`, `tokens`, `payments`, `billing`, and `audit_logs` are classified as restricted by default.
+   Tables matching patterns like `users`, `auth`, `passwords`, `tokens`, `payments`, `billing`, and `audit_logs` are classified as restricted by default. Credential, token and session tables are never shown; financial, order (`orders`, `order_items`), permission and audit tables are view only until the connection owner makes a table editable (audited).
 4. **Encrypted Credentials at Rest:**
    Database passwords and provider API keys are encrypted at rest with AES-256 (`Crypt::encryptString`) and masked in all UI responses (`********`).
 5. **SSRF Defense:**
@@ -415,7 +417,7 @@ php artisan test
 *Result: 46 passed, 589 assertions.*
 
 ### 2. Python AI Service Test Suite
-Tests service token authentication, Mock provider generation, Ollama error handling, PyMuPDF parsing, and FAISS RAG vector indexing/retrieval:
+Tests service token authentication, Ollama error handling, token usage reporting, model readiness checks, sample rows, PyMuPDF parsing, FAISS RAG indexing/retrieval and the published product guides (the mock provider is enabled only inside the test run):
 ```bash
 source .venv/bin/activate
 pytest ai_service/tests/ -v

@@ -10,6 +10,7 @@ use Filament\Facades\Filament;
 use Filament\Forms\Components\Repeater;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\Textarea;
+use Filament\Forms\Components\TagsInput;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Toggle;
 use Filament\Notifications\Notification;
@@ -90,7 +91,10 @@ abstract class SettingsPage extends Page
 
         $components = [];
         foreach ($sections as $title => $fields) {
-            $components[] = Section::make($title)->columns(2)->components($fields);
+            $components[] = Section::make($title)
+                ->description(SettingsRegistry::sectionDescription(static::$settingsGroup, $title))
+                ->columns(2)
+                ->components($fields);
         }
 
         return $schema
@@ -179,6 +183,8 @@ abstract class SettingsPage extends Page
             'email' => TextInput::make($name)->email()->maxLength(255)->required(!($def['nullable'] ?? false)),
             'url' => TextInput::make($name)->url()->maxLength(255)->required(!($def['nullable'] ?? false))->placeholder('https://'),
             'select' => Select::make($name)->options($def['options'])->native(false)->required(),
+            'tags' => TagsInput::make($name)->placeholder('Type a name and press Enter')->reorderable()->columnSpanFull()
+                ->nestedRecursiveRules(['max:' . ($def['item_max'] ?? 120)]),
             'text' => Textarea::make($name)->rows(3)->maxLength($def['max'] ?? 2000)->columnSpanFull()
                 ->required($def['group'] !== 'content' && !($def['nullable'] ?? false)),
             'list' => Repeater::make($name)

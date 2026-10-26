@@ -91,16 +91,11 @@ docker compose -f fixtures/docker-compose.yml restart
 | `/api/data-agent/undo-change` | `POST` | Revert any completed change using encrypted before-image. |
 | `/api/model-roles/readiness-test` | `POST` | Benchmark model against JSON conformance, tool-calling, and NL planning. |
 
-### 5.3 Vector Store (Qdrant) Corpus Ingestion
-Markdown policy documents (`docs/orbit-agent/product_context_rag.md`, `docs/SECURITY_MODEL.md`, `docs/DECISIONS.md`) and all `prompts/` are embedded via local Ollama `nomic-embed-text` and indexed in Qdrant:
+### 5.3 Orbit product knowledge
+Orbit's website guides are stored in the platform database (admin panel › Orbit › Knowledge) and published to the AI service, which indexes them with local Ollama `nomic-embed-text` (FAISS partition `user_0`). No guide is read from files. If the AI service storage is new or was wiped, the scheduler re-sends the published guides within 10 minutes; to do it at once:
 ```bash
-# Ingest corpus via API:
-curl -s -X POST -H "X-Service-Token: platform_secret_internal_key_2026" \
-  http://127.0.0.1:8001/v1/rag/ingest-corpus
+cd laravel && php artisan orbit:sync-knowledge
 ```
-
----
-
 ## 6. Verification Commands
 
 Run all automated test suites to ensure full system integrity:
