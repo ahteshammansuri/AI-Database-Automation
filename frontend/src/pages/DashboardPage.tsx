@@ -7,7 +7,8 @@ import {
 } from "lucide-react";
 import { api } from "../services/api";
 import { StatusPill } from "../components/common/StatusPill";
-import { Card, CardHeader, EmptyState, Loading, StatCard, Tone } from "../components/ui/kit";
+import { Card, CardHeader, EmptyState, StatCard, Tone } from "../components/ui/kit";
+import { DashboardSkeleton } from "../components/ui/PageSkeletons";
 import { useAuth } from "../context/AuthContext";
 import { useLiveEvents } from "../context/LiveEventsContext";
 import { useToast } from "../context/ToastContext";
@@ -122,7 +123,7 @@ export const DashboardPage: React.FC = () => {
   }));
 
   if (loading && !stats) {
-    return <Loading label="Loading your workspace…" className="py-32" />;
+    return <DashboardSkeleton />;
   }
 
   const connectionsCount = stats?.connections_count ?? 0;

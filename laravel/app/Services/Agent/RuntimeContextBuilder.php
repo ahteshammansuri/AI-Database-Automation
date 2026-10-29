@@ -25,16 +25,21 @@ class RuntimeContextBuilder
     public function build(User $user, AgentTask $task, array $modelInfo, ?string $utterance = null): array
     {
         $connections = DbConnection::where('user_id', $user->id)->orderBy('id')->limit(20)->get()
-            ->map(fn ($c) => [
-                'id' => $c->id,
-                'name' => $c->name,
-                'host' => $c->host,
-                'port' => $c->port,
-                'database_name' => $c->database_name,
-                'username' => $c->username,
-                'status' => $c->status,
-                'last_tested_at' => $c->last_tested_at?->toIso8601String(),
-            ])->all();
+            ->map(function ($c) use ($user) {
+                $tables = $this->tablesFor($user, $c);
+                $tableNames = array_map(fn ($t) => $t['name'], $tables);
+                return [
+                    'id' => $c->id,
+                    'name' => $c->name,
+                    'host' => $c->host,
+                    'port' => $c->port,
+                    'database_name' => $c->database_name,
+                    'username' => $c->username,
+                    'status' => $c->status,
+                    'last_tested_at' => $c->last_tested_at?->toIso8601String(),
+                    'tables' => $tableNames,
+                ];
+            })->all();
 
         $automations = Automation::where('user_id', $user->id)->orderByDesc('id')->limit(15)->get()
             ->map(fn ($a) => [
@@ -94,9 +99,8 @@ class RuntimeContextBuilder
             ], fn ($v) => $v !== null),
         ];
 
-        if ($utterance !== null && ($hint = $this->dataHint($user, $utterance))) {
-            $context['data_hint'] = $hint;
-        }
+        // Which tables (and databases) the utterance is about is retrieved by the AI service from schemaDocuments(),
+        // by meaning; no word matching here.
 
         $focusConnection = $this->focusedConnectionId($task, $connections);
         if ($focusConnection) {
@@ -134,87 +138,105 @@ class RuntimeContextBuilder
     }
 
     /**
-     * Tables and stored values of the user's own databases that the utterance names (in any language the
-     * words are mixed into, e.g. "kaun sa user ... order refund"): a schema-derived signal that the user
-     * is asking about their data. Uses the latest scan, else the briefly cached live catalog.
+     * Every table of the user's connected databases, described in plain words from the latest schema scan (columns,
+     * types, keys, allowed values, links, size, automation use). The AI service retrieves the ones a request is about
+     * by meaning, across all databases, so the model sees each database that has a table and can tell them apart.
+     * A connection not scanned yet is described from the briefly cached live catalog instead.
+     *
+     * @return list<array{connection_id: int, connection: string, database: ?string, table: string, text: string}>
      */
-    public function dataHint(User $user, string $utterance): ?array
+    public function schemaDocuments(User $user): array
     {
-        $stem = function (string $w): string {
-            $w = strtolower($w);
-            return match (true) {
-                str_ends_with($w, 'ies') && strlen($w) > 4 => substr($w, 0, -3) . 'y',
-                str_ends_with($w, 'ses') && strlen($w) > 4 => substr($w, 0, -2),
-                str_ends_with($w, 's') && !str_ends_with($w, 'ss') && strlen($w) > 3 => substr($w, 0, -1),
-                default => $w,
-            };
-        };
-        $words = array_values(array_unique(array_filter(
-            array_map($stem, preg_split('/[^\p{L}\p{N}_]+/u', mb_strtolower($utterance)) ?: []),
-            fn ($w) => mb_strlen($w) >= 3,
-        )));
-        if (!$words) {
-            return null;
-        }
-
-        $best = null;
-        foreach (DbConnection::where('user_id', $user->id)->where('is_active', true)->orderBy('id')->limit(5)->get() as $conn) {
-            $tables = $this->tablesFor($user, $conn);
-            $matchedTables = [];
-            $values = [];
-            foreach ($tables as $t) {
-                if (in_array($stem($t['name']), $words, true)) {
-                    $matchedTables[] = $t['name'];
+        $docs = [];
+        foreach (DbConnection::where('user_id', $user->id)->where('is_active', true)->orderBy('id')->limit(20)->get() as $conn) {
+            $snapshot = SchemaSnapshot::where('user_id', $user->id)->where('connection_id', $conn->id)->latest('id')->first();
+            $tables = $snapshot ? ($snapshot->schema_payload['tables'] ?? []) : $this->liveTables($conn);
+            foreach (array_slice($tables, 0, 250) as $t) {
+                $name = (string) ($t['name'] ?? $t['table_name'] ?? '');
+                if ($name === '') {
+                    continue;
                 }
-                foreach ($t['enums'] as $col => $vals) {
-                    foreach ($vals as $v) {
-                        $lv = strtolower((string) $v);
-                        foreach ($words as $w) {
-                            if (mb_strlen($w) >= 5 && (str_starts_with($lv, $w) || str_starts_with($w, $lv)) && count($values) < 6) {
-                                $values[] = "{$t['name']}.{$col} = '{$v}'";
-                            }
-                        }
-                    }
-                }
-            }
-            $score = count($matchedTables) * 2 + count($values);
-            if ($score > 0 && (!$best || $score > $best['score'])) {
-                $best = ['score' => $score, 'connection_id' => $conn->id, 'connection' => $conn->name,
-                    'tables' => array_slice(array_values(array_unique($matchedTables)), 0, 6), 'values' => array_values(array_unique($values))];
+                $docs[] = [
+                    'connection_id' => $conn->id,
+                    'connection' => (string) $conn->name,
+                    'database' => $conn->database_name,
+                    'table' => $name,
+                    'text' => self::describeTable($conn, $name, $t),
+                ];
             }
         }
-        if (!$best) {
-            return null;
-        }
-        unset($best['score']);
-        $best['meaning'] = 'The utterance names data in this database: it is a question about the user\'s data (use ask_database).';
 
-        return $best;
+        return $docs;
     }
 
-    /**
-     * The portal page (from the server's surface catalog) whose title or route the utterance names, e.g.
-     * "security page" -> /security. Lets Orbit open a page without the long agent prompt.
-     */
-    public function pageHint(string $utterance): ?array
+    /** One table in plain words, e.g. 'Table users in "Shop DB" (connection_id 3, database shop): ~120 rows; columns …'. */
+    public static function describeTable(DbConnection $conn, string $name, array $t): string
     {
-        $words = array_unique(array_filter(preg_split('/[^\p{L}\p{N}]+/u', mb_strtolower($utterance)) ?: [], fn ($w) => mb_strlen($w) >= 3));
-        $stem = fn (string $w) => str_ends_with($w, 's') && strlen($w) > 3 ? substr($w, 0, -1) : $w;
-        $words = array_map($stem, $words);
-        $best = null;
-        foreach (SurfaceCatalog::data()['pages'] ?? [] as $page) {
-            $tokens = array_unique(array_filter(array_map($stem, preg_split('/[^\p{L}\p{N}]+/u', mb_strtolower($page['title'] . ' ' . str_replace(['/', '-'], ' ', $page['route']))) ?: []), fn ($w) => mb_strlen($w) >= 3));
-            $score = count(array_intersect($tokens, $words));
-            if ($score > 0 && (!$best || $score > $best['score'])) {
-                $best = ['score' => $score, 'route' => $page['route'], 'title' => $page['title']];
+        $columns = [];
+        $enums = [];
+        foreach (array_slice($t['columns'] ?? [], 0, 40) as $c) {
+            $col = (string) ($c['name'] ?? '');
+            if ($col === '') {
+                continue;
+            }
+            $flags = array_filter([
+                !empty($c['is_primary_key']) ? 'primary key' : null,
+                empty($c['is_primary_key']) && !empty($c['is_unique']) ? 'unique' : null,
+                empty($c['is_nullable']) && empty($c['is_primary_key']) && ($c['default'] ?? null) === null ? 'required' : null,
+            ]);
+            $columns[] = $col . ' ' . ($c['type'] ?? $c['data_type'] ?? '') . ($flags ? ' (' . implode(', ', $flags) . ')' : '');
+            if (!empty($c['enum_values'])) {
+                $enums[] = $col . ': ' . implode(', ', array_slice(array_map('strval', $c['enum_values']), 0, 8));
             }
         }
-        if (!$best) {
-            return null;
-        }
-        unset($best['score']);
+        $more = max(0, count($t['columns'] ?? []) - 40);
+        $links = array_values(array_filter(array_map(fn ($r) => isset($r['foreign_key'], $r['referenced_table'])
+            ? "{$r['foreign_key']} → {$r['referenced_table']}" : null, array_slice($t['relationships'] ?? [], 0, 6))));
+        $use = match (true) {
+            !empty($t['is_sensitive']) || ($t['category'] ?? null) === 'RESTRICTED' => 'restricted for automations (sensitive data)',
+            ($t['category'] ?? null) === 'RECOMMENDED' => 'a content table suited to automations',
+            default => null,
+        };
 
-        return $best;
+        $text = "Table {$name} in \"{$conn->name}\" (connection_id {$conn->id}, database {$conn->database_name})"
+            . (isset($t['approx_rows']) ? ": about {$t['approx_rows']} rows" : '')
+            . '; columns: ' . implode(', ', $columns) . ($more ? ", and {$more} more" : '')
+            . ($enums ? '; allowed values: ' . implode('; ', $enums) : '')
+            . ($links ? '; links: ' . implode(', ', $links) : '')
+            . ($use ? "; {$use}" : '') . '.';
+
+        return mb_substr($text, 0, 2400);
+    }
+
+    /** The live catalog of a connection not scanned yet, in the scan's shape (empty when the database cannot be read). */
+    protected function liveTables(DbConnection $conn): array
+    {
+        try {
+            $catalog = app(\App\Services\Data\LiveSchemaService::class)->getCatalog($conn);
+        } catch (\Throwable) {
+            return [];
+        }
+
+        return collect($catalog['tables'] ?? [])->map(function ($t, $name) {
+            $unique = collect($t['unique_keys'] ?? [])->filter(fn ($cols) => count($cols) === 1)->flatten()->all();
+            return [
+                'name' => (string) $name,
+                'approx_rows' => $t['rows_estimate'] ?? null,
+                'is_sensitive' => ($t['class'] ?? null) === 'blocked',
+                'columns' => collect($t['columns'] ?? [])->map(fn ($c, $col) => [
+                    'name' => (string) $col,
+                    'type' => $c['raw_type'] ?? $c['data_type'] ?? '',
+                    'is_primary_key' => in_array($col, $t['primary_key'] ?? [], true),
+                    'is_unique' => in_array($col, $unique, true),
+                    'is_nullable' => (bool) ($c['nullable'] ?? true),
+                    'default' => !empty($c['auto']) ? 'auto' : ($c['default'] ?? null),
+                    'enum_values' => array_values($c['enum'] ?? []),
+                ])->values()->all(),
+                'relationships' => collect($t['foreign_keys'] ?? [])->map(fn ($fk) => [
+                    'foreign_key' => $fk['columns'][0] ?? null, 'referenced_table' => $fk['ref_table'] ?? null,
+                ])->all(),
+            ];
+        })->values()->all();
     }
 
     /** @return list<array{name: string, enums: array<string, list<string>>}> */

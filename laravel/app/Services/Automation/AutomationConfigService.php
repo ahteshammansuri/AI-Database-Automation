@@ -25,7 +25,7 @@ class AutomationConfigService
     /** Null when the table may be automated, otherwise a user-facing reason. */
     public function tableProblem(DbConnection $connection, string $table): ?string
     {
-        if (!preg_match('/^[A-Za-z0-9_]+$/', $table)) {
+        if (!preg_match('/^[A-Za-z0-9_$\\-]+$/', $table)) {
             return "'{$table}' is not a valid table name.";
         }
         if (!in_array(strtolower((string) ($connection->db_type ?: 'mysql')), ['mysql', 'mariadb'], true)) {

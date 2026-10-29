@@ -9,7 +9,8 @@ import { actionTarget, fieldTarget } from "../services/orbitSurfaces";
 import { api } from "../services/api";
 import { KnowledgeDocument } from "../types";
 import { StatusPill } from "../components/common/StatusPill";
-import { CardHeader, EmptyState, FieldError, Loading, PageHeader } from "../components/ui/kit";
+import { CardHeader, EmptyState, FieldError, PageHeader } from "../components/ui/kit";
+import { DocumentListSkeleton } from "../components/ui/PageSkeletons";
 import { usePlatform } from "../context/PlatformContext";
 import { ariaFor, clearError, focusFirstError, invalid, knowledgeFileRules, rules, serverFieldErrors, validate, validateField, type FieldErrors } from "../lib/validation";
 import { useToast } from "../context/ToastContext";
@@ -350,12 +351,12 @@ export const KnowledgeBasePage: React.FC = () => {
           <CardHeader
             icon={BookOpen}
             tone="violet"
-            title={`Your documents · ${docs.length}`}
+            title={loading && docs.length === 0 ? "Your documents" : `Your documents · ${docs.length}`}
             description="Only you can see and search these."
           />
           <div className="mt-5 flex-1">
             {loading && docs.length === 0 ? (
-              <Loading label="Loading documents…" className="py-14" />
+              <DocumentListSkeleton />
             ) : docs.length === 0 ? (
               <EmptyState icon={BookOpen} title="No documents yet" description="Upload Markdown, TXT or PDF files so drafts and answers can use your facts." className="py-10" />
             ) : (

@@ -2,7 +2,8 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { motion } from "framer-motion";
 import { RefreshCw, ShieldCheck, Download, Search, ArrowRight, Bot, CheckCircle2, XCircle, Loader2, ChevronDown, ExternalLink } from "lucide-react";
-import { EmptyState, FormAlert, Loading, ModalShell, PageHeader } from "../components/ui/kit";
+import { EmptyState, FormAlert, ModalShell, PageHeader } from "../components/ui/kit";
+import { AuditListSkeleton } from "../components/ui/PageSkeletons";
 import { api } from "../services/api";
 import { orbitTargets } from "../services/orbitTargets";
 import { useOrbitSurface } from "../hooks/useOrbitSurface";
@@ -193,7 +194,7 @@ export const AuditLogsPage: React.FC = () => {
           <div className="border-b border-slate-100 px-5 py-3 text-[12.5px] text-slate-500">
             Each action Orbit took for you, with the request it answered. Orbit works through the same checks as the portal: secrets are never typed or read, and changes need your confirmation.
           </div>
-          {loading && !calls.length ? <Loading label="Loading Orbit's activity…" className="py-14" /> : calls.length === 0 ? (
+          {loading && !calls.length ? <AuditListSkeleton variant="orbit" label="Loading Orbit's activity…" /> : calls.length === 0 ? (
             <EmptyState icon={Bot} title="Orbit has not acted yet" description={search ? "Nothing matches that search." : "When you ask Orbit to do something, every step it takes is listed here."} />
           ) : (
             <ul className="divide-y divide-slate-100">
@@ -219,7 +220,7 @@ export const AuditLogsPage: React.FC = () => {
         </div>
       ) : (
         <div className="da-card overflow-hidden">
-          {loading && !logs.length ? <Loading label="Loading the audit log…" className="py-14" /> : logs.length === 0 ? (
+          {loading && !logs.length ? <AuditListSkeleton /> : logs.length === 0 ? (
             <EmptyState icon={ShieldCheck} title="No matching events" description={search || from || to ? "Try another search or date range." : "Events appear here as you use the workspace."} />
           ) : (
             <ul className="divide-y divide-slate-100">

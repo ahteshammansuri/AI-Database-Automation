@@ -7,7 +7,8 @@ import { ContentPreview } from "../components/content/ContentPreview";
 import { WysiwygEditor } from "../components/content/WysiwygEditor";
 import { looksLikeHtml } from "../components/content/RichText";
 import { formatInstant, relativeFromNow } from "../lib/schedule";
-import { Card, EmptyState, FieldError, Loading, ModalShell, PageHeader } from "../components/ui/kit";
+import { EmptyState, FieldError, ModalShell, PageHeader } from "../components/ui/kit";
+import { ApprovalListSkeleton } from "../components/ui/PageSkeletons";
 import { draftPayloadErrors, draftRelationColumns, focusFirstError, invalid, rules, serverFieldErrors, validateField, type FieldErrors } from "../lib/validation";
 
 /** Input id for an edited draft column, so its message sits under it. */
@@ -326,8 +327,8 @@ export const ApprovalsPage: React.FC = () => {
         }
       />
 
-      {loading ? (
-        <Card><Loading label="Checking for drafts to review…" /></Card>
+      {loading && approvals.length === 0 && rewriting.length === 0 ? (
+        <ApprovalListSkeleton />
       ) : approvals.length === 0 && rewriting.length === 0 ? (
         <EmptyState
           icon={CheckCircle2}

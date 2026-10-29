@@ -60,7 +60,7 @@ class AutomationRequirementsService
 
         // 2. Target Table
         $tableField = ['status' => 'missing', 'value' => null, 'label' => 'Target Content Table'];
-        if (preg_match('/(?:into|in|to)\s+(?:the\s+)?([a-zA-Z0-9_]+)\s+table/i', $u, $m)) {
+        if (preg_match('/(?:into|in|to)\s+(?:the\s+)?([a-zA-Z0-9_$\\-]+)\s+table/i', $u, $m)) {
             $tableField = ['status' => 'provided', 'value' => $m[1], 'display' => $m[1]];
         } elseif (preg_match('/(?:post|blog|article|news|faq|product)/i', $uLower, $m)) {
             $cand = match (strtolower($m[0])) {

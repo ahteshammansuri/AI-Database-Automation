@@ -99,7 +99,7 @@ class ToolPolicyGate
      */
     public static function needsPanelButton(string $tool, array $args): bool
     {
-        if (!empty(AgentToolRegistry::TOOL_META[$tool]['confirm_by_button'])) {
+        if (!empty(AgentToolRegistry::definition($tool)['confirm_by_button'])) {
             return true;
         }
         if ($tool !== 'press') {

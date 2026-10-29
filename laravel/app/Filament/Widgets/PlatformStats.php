@@ -10,6 +10,7 @@ use App\Models\DbConnection;
 use App\Models\OrbitRemoteSession;
 use App\Models\User;
 use App\Services\Automation\ScheduleCalculator;
+use App\Filament\Widgets\Concerns\HasSkeletonPlaceholder;
 use App\Filament\Widgets\Concerns\RequiresDashboardPermission;
 use Filament\Widgets\StatsOverviewWidget;
 use Filament\Widgets\StatsOverviewWidget\Stat;
@@ -18,6 +19,7 @@ use Illuminate\Support\Carbon;
 /** Headline numbers: customers, usage, success rates. Every figure is counted from the database. */
 class PlatformStats extends StatsOverviewWidget
 {
+    use HasSkeletonPlaceholder;
     use RequiresDashboardPermission;
 
     protected static ?int $sort = 1;

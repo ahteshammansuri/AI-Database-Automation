@@ -120,6 +120,12 @@ class SecretVault
         return (bool) preg_match('/pass(word)?|secret|token|api[_-]?key|credential/i', $key);
     }
 
+    /** The secure-input kind that fills a secret-named tool argument (e.g. password => database_password). */
+    public static function kindForParam(string $param): string
+    {
+        return self::SECRET_FIELDS[strtolower($param)] ?? strtolower($param);
+    }
+
     /**
      * Server-side safety net: remove secrets spoken/typed inline in an utterance.
      * Returns [redactedText, ['database_password' => '...', 'api_key' => '...']].

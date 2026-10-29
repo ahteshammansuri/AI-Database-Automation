@@ -1,11 +1,12 @@
 import json
 import re
+import threading
 import time
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import httpx
 
 from ai_service.app import usage
-from ai_service.app.providers.base import BaseAIProvider, ProviderError, ProviderUnavailableError
+from ai_service.app.providers.base import BaseAIProvider, ProviderError, ProviderHTTPError, ProviderUnavailableError
 from ai_service.app.providers.mock_provider import MockAIProvider
 
 
@@ -43,23 +44,75 @@ def _split_system(messages: List[Dict[str, str]], json_schema: Dict[str, Any]):
     return system, convo
 
 
-def _post_json(url: str, headers: Dict[str, str], payload: Dict[str, Any], timeout: float, label: str) -> Dict[str, Any]:
-    max_retries = 3
+# Models seen unavailable recently (process-wide): model -> (until, reason). A model that is out of quota, overloaded,
+# missing or stalled is skipped for a while instead of being retried with back-off on every request.
+_COOLDOWN: Dict[str, Tuple[float, str]] = {}
+_COOLDOWN_LOCK = threading.Lock()
+
+
+def cooldown_reason(model: str) -> Optional[str]:
+    with _COOLDOWN_LOCK:
+        until, reason = _COOLDOWN.get(model, (0.0, ""))
+        if until > time.monotonic():
+            return reason
+        _COOLDOWN.pop(model, None)
+        return None
+
+
+def cool_down(model: str, seconds: float, reason: str) -> None:
+    with _COOLDOWN_LOCK:
+        _COOLDOWN[model] = (time.monotonic() + seconds, reason)
+
+
+def reset_cooldowns() -> None:
+    with _COOLDOWN_LOCK:
+        _COOLDOWN.clear()
+
+
+def cooldown_for(status: int, detail: str) -> Optional[Tuple[float, str]]:
+    """How long to skip a model after this HTTP error, and why; None when it is not about the model's availability."""
+    text = (detail or "").lower()
+    if status == 429 and ("quota" in text or "billing" in text):
+        return 900.0, "its quota is used up"
+    if status == 429:
+        return 60.0, "rate limited"
+    if status in (500, 502, 503, 504):
+        return 60.0, "busy (high demand)"
+    if status == 404:
+        return 6 * 3600.0, "not available for this key"
+    return None
+
+
+def _http_error(res: httpx.Response, label: str) -> ProviderHTTPError:
+    detail = ""
+    try:
+        detail = (res.json().get("error") or {}).get("message", "") or ""
+    except Exception:
+        detail = res.text[:150]
+    msg = f"{label} returned HTTP {res.status_code}" + (f": {detail}" if detail else ".")
+    return ProviderHTTPError(msg, status=res.status_code, detail=detail)
+
+
+def _post_json(url: str, headers: Dict[str, str], payload: Dict[str, Any], timeout: float, label: str,
+               retries: int = 3) -> Dict[str, Any]:
+    """
+    POST and return the JSON body. Transient errors are retried with a short back-off (`retries` times); a quota error
+    is never retried (it will not recover within the request), and callers with fallbacks pass retries=0.
+    """
     backoff = 1.5
-    last_res = None
-    for attempt in range(max_retries + 1):
+    for attempt in range(retries + 1):
+        last = attempt == retries
         try:
             with httpx.Client(timeout=timeout) as client:
                 res = client.post(url, headers=headers, json=payload)
-                last_res = res
         except httpx.TimeoutException:
-            if attempt == max_retries:
+            if last:
                 raise ProviderError(f"{label} did not answer within {int(timeout)}s.")
             time.sleep(backoff)
             backoff *= 1.5
             continue
         except httpx.HTTPError as e:
-            if attempt == max_retries:
+            if last:
                 raise ProviderUnavailableError(f"{label} is not reachable ({type(e).__name__}).")
             time.sleep(backoff)
             backoff *= 1.5
@@ -67,35 +120,16 @@ def _post_json(url: str, headers: Dict[str, str], payload: Dict[str, Any], timeo
 
         if res.status_code in (401, 403):
             raise ProviderUnavailableError(f"{label} rejected the configured API key (HTTP {res.status_code}).")
-
-        # Retry on transient capacity/rate errors (503 High Demand / 429 Rate Limit / 502 / 504)
-        if res.status_code in (503, 429, 502, 504) and attempt < max_retries:
+        if res.status_code == 200:
+            return res.json()
+        err = _http_error(res, label)
+        quota = res.status_code == 429 and any(w in err.detail.lower() for w in ("quota", "billing"))
+        if res.status_code in (503, 429, 502, 504) and not quota and not last:
             time.sleep(backoff)
             backoff *= 1.5
             continue
-
-        if res.status_code != 200:
-            detail = ""
-            try:
-                err_data = res.json()
-                detail = err_data.get("error", {}).get("message", "")
-            except Exception:
-                detail = res.text[:150]
-            msg = f"{label} returned HTTP {res.status_code}" + (f": {detail}" if detail else ".")
-            raise ProviderError(msg)
-
-        return res.json()
-
-    if last_res is not None and last_res.status_code != 200:
-        detail = ""
-        try:
-            err_data = last_res.json()
-            detail = err_data.get("error", {}).get("message", "")
-        except Exception:
-            detail = last_res.text[:150]
-        msg = f"{label} returned HTTP {last_res.status_code}" + (f": {detail}" if detail else ".")
-        raise ProviderError(msg)
-    raise ProviderError(f"{label} failed after {max_retries} retries.")
+        raise err
+    raise ProviderError(f"{label} failed after {retries} retries.")
 
 
 class OpenAIProvider(BaseAIProvider):
@@ -288,6 +322,59 @@ class GeminiProvider(BaseAIProvider):
     def list_models(self) -> List[str]:
         return ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.8-flash", "gemini-flash-latest"]
 
+    FALLBACKS = ("gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.8-flash")
+    # A model that has not answered in this long while another one could is given up for this request.
+    STALL_SECONDS = 45.0
+
+    def _call(self, payload: Dict[str, Any], timeout: float, kind: str, deadline: Optional[float] = None) -> Tuple[str, Dict[str, Any]]:
+        """
+        generateContent with the chosen model first, then the fallbacks. A model that is out of quota, overloaded,
+        missing or stalled is skipped at once (and for a while afterwards) instead of being retried with back-off;
+        why another model answered is noted for the user. Returns (model that answered, response).
+        """
+        chain = [self.model_name] + [m for m in self.FALLBACKS if m != self.model_name]
+        ready = [m for m in chain if not cooldown_reason(m)] or chain
+        for m in chain:
+            if m not in ready and m == self.model_name:
+                usage.note(f"{m}: {cooldown_reason(m)}")
+        last_err: Optional[Exception] = None
+        for i, mod in enumerate(ready):
+            is_last = i == len(ready) - 1
+            budget = timeout if deadline is None else max(5.0, min(timeout, deadline - time.monotonic()))
+            per_call = budget if is_last else min(budget, self.STALL_SECONDS)
+            try:
+                data = _post_json(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{mod}:generateContent",
+                    {"Content-Type": "application/json", "x-goog-api-key": self.api_key},
+                    payload, per_call, f"Gemini ({mod})", retries=1 if is_last else 0,
+                )
+            except ProviderHTTPError as e:
+                last_err = e
+                cool = cooldown_for(e.status, e.detail)
+                if cool is None:
+                    raise
+                cool_down(mod, *cool)
+                if mod == self.model_name:
+                    usage.note(f"{mod}: {cool[1]}")
+                continue
+            except ProviderUnavailableError:
+                raise
+            except ProviderError as e:  # stalled
+                last_err = e
+                cool_down(mod, 120.0, "too slow to answer")
+                if mod == self.model_name:
+                    usage.note(f"{mod}: too slow to answer")
+                if is_last:
+                    raise
+                continue
+            usage.record_gemini(mod, data, kind)
+            if mod != self.model_name:
+                usage.note(f"answered with {mod}")
+            return mod, data
+        if last_err:
+            raise last_err
+        raise ProviderError("Gemini failed across all candidate models.")
+
     def chat_structured(self, messages, json_schema, timeout: float = 120.0, temperature: float = 0.2, deadline=None, max_output_tokens=None, **_) -> str:
         if deadline is not None:
             timeout = max(5.0, min(timeout, deadline - time.monotonic()))
@@ -305,37 +392,12 @@ class GeminiProvider(BaseAIProvider):
                                  **({"maxOutputTokens": int(max_output_tokens)} if max_output_tokens else {})},
         }
 
-        # Candidate models with fast high-availability flash-lite fallback if primary hits 503 high demand / 429
-        candidates = [self.model_name]
-        for fb in ("gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.8-flash"):
-            if fb not in candidates:
-                candidates.append(fb)
-
-        last_err = None
-        for mod in candidates:
-            try:
-                data = _post_json(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/{mod}:generateContent",
-                    {"Content-Type": "application/json", "x-goog-api-key": self.api_key},
-                    payload,
-                    timeout,
-                    f"Gemini ({mod})",
-                )
-                usage.record_gemini(mod, data)
-                parts = (data.get("candidates") or [{}])[0].get("content", {}).get("parts", [])
-                text = parts[0].get("text", "") if parts else ""
-                if text.strip():
-                    return _clean_json_output(text)
-            except Exception as e:
-                last_err = e
-                # Fall through to next candidate if model is overloaded (503), rate limited (429), or deprecated (404)
-                if any(code in str(e) for code in ("503", "429", "404", "high demand", "UNAVAILABLE")):
-                    continue
-                raise
-
-        if last_err:
-            raise last_err
-        raise ProviderError("Gemini failed across all candidate models.")
+        _, data = self._call(payload, timeout, "chat", deadline)
+        parts = (data.get("candidates") or [{}])[0].get("content", {}).get("parts", [])
+        text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
+        if not text.strip():
+            raise ProviderError("Gemini returned an empty answer.")
+        return _clean_json_output(text)
 
 
     def generate_structured_data(
@@ -368,37 +430,12 @@ class GeminiProvider(BaseAIProvider):
             }
         }
 
-        candidates = [self.model_name]
-        for fb in ("gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.8-flash"):
-            if fb not in candidates:
-                candidates.append(fb)
-
-        last_err = None
-        for mod in candidates:
-            try:
-                data = _post_json(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/{mod}:generateContent",
-                    {"Content-Type": "application/json", "x-goog-api-key": self.api_key},
-                    payload,
-                    180.0,
-                    f"Gemini ({mod})",
-                )
-                usage.record_gemini(mod, data, "generate")
-                candidates_list = data.get("candidates", [])
-                if not candidates_list:
-                    continue
-
-                raw = candidates_list[0]["content"]["parts"][0]["text"]
-                return json.loads(_clean_json_output(raw))
-            except Exception as e:
-                last_err = e
-                if any(code in str(e) for code in ("503", "429", "404", "high demand", "UNAVAILABLE")):
-                    continue
-                raise
-
-        if last_err:
-            raise last_err
-        raise RuntimeError("Gemini structured data generation failed.")
+        _, data = self._call(payload, 180.0, "generate")
+        candidates_list = data.get("candidates", [])
+        if not candidates_list:
+            raise ProviderError("Gemini returned no content.")
+        raw = "".join(p.get("text", "") for p in candidates_list[0].get("content", {}).get("parts", []) if not p.get("thought"))
+        return json.loads(_clean_json_output(raw))
 
 
 class ClaudeProvider(BaseAIProvider):

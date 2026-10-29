@@ -26,8 +26,6 @@ use Illuminate\Support\Str;
  */
 class AutomationTools
 {
-    private const IN_FLIGHT = ['QUEUED', 'GENERATING', 'REGENERATING', 'PUBLISHING', 'PENDING_GENERATION', 'RUNNING'];
-
     // ------------------------------------------------------------------
     // Automations
     // ------------------------------------------------------------------
@@ -420,7 +418,7 @@ class AutomationTools
         if ($e->status === 'PUBLISHED') {
             return ['success' => false, 'error' => 'That run is already published; start a new run instead.'];
         }
-        if (in_array($e->status, self::IN_FLIGHT, true)) {
+        if (in_array($e->status, AutomationExecution::IN_FLIGHT_STATUSES, true)) {
             return ['success' => false, 'error' => "Run #{$e->id} is already {$e->status}."];
         }
         $updates = ['status' => 'QUEUED', 'retry_count' => ($e->retry_count ?? 0) + 1, 'error_message' => null, 'failure_category' => null, 'lease_expires_at' => now()->addMinutes(15)];

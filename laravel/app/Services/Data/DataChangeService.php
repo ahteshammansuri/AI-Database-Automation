@@ -6,6 +6,7 @@ use App\Models\AuditLog;
 use App\Models\DataChangeRequest;
 use App\Models\DbConnection;
 use App\Models\User;
+use App\Services\Data\Dialects\Dialect;
 use App\Services\Data\Dialects\DialectRegistry;
 use PDO;
 
@@ -70,13 +71,9 @@ class DataChangeService
         // Read target rows
         $dialect = $this->dialectRegistry->get($connection->driver ?: 'mysql');
         $qTable = $dialect->quoteIdentifier($tableName);
-        $whereSql = [];
-        $bindings = [];
-
-        foreach ($filter as $col => $val) {
-            $whereSql[] = $dialect->quoteIdentifier($col) . ' = ?';
-            $bindings[] = $val;
-        }
+        [$whereSql, $bindings, $normalizedFilter] = $this->buildFilterConditions(
+            $dialect, $tableName, $tableMeta, $filter
+        );
 
         $whereClause = !empty($whereSql) ? 'WHERE ' . implode(' AND ', $whereSql) : '';
         $sql = "SELECT * FROM {$qTable} {$whereClause} LIMIT " . (self::maxWriteRows() + 1);
@@ -122,7 +119,7 @@ class DataChangeService
             'action' => 'update',
             'target_table' => $tableName,
             'primary_keys' => $pks,
-            'filter_spec' => $filter,
+            'filter_spec' => $normalizedFilter,
             'patch_values' => $patchValues,
             'affected_count' => $count,
             'preview_rows' => $maskedPreview,
@@ -134,6 +131,7 @@ class DataChangeService
 
         return [
             'success' => true,
+            'message' => "Preview created: {$count} row(s) in '{$tableName}' will be updated. Awaiting confirmation.",
             'change_request_id' => $changeRequest->id,
             'action' => 'update',
             'table' => $tableName,
@@ -206,6 +204,7 @@ class DataChangeService
 
         return [
             'success' => true,
+            'message' => "Preview created: " . count($clean) . " row(s) will be added to '{$tableName}'. Awaiting confirmation.",
             'change_request_id' => $change->id,
             'action' => 'insert',
             'table' => $tableName,
@@ -280,6 +279,178 @@ class DataChangeService
     }
 
     /**
+     * Normalize filter input and build WHERE conditions + bindings.
+     * Supports scalar values, indexed lists of IDs, comma-separated lists, and operator dicts.
+     *
+     * @param  Dialect  $dialect
+     * @param  string  $tableName
+     * @param  array<string, mixed>  $tableMeta
+     * @param  mixed  $filter
+     * @return array{0: array<string>, 1: array<mixed>, 2: array<string, mixed>} [$whereSql, $bindings, $normalizedFilter]
+     */
+    protected function buildFilterConditions(
+        Dialect $dialect,
+        string $tableName,
+        array $tableMeta,
+        mixed $filter
+    ): array {
+        $pkCols = $tableMeta['primary_key'] ?? ['id'];
+        $primaryKey = $pkCols[0] ?? 'id';
+        $columns = $tableMeta['columns'] ?? [];
+
+        // If string that looks like JSON, decode it
+        if (is_string($filter)) {
+            $trimmed = trim($filter);
+            if ((str_starts_with($trimmed, '{') && str_ends_with($trimmed, '}')) ||
+                (str_starts_with($trimmed, '[') && str_ends_with($trimmed, ']'))) {
+                $decoded = json_decode($trimmed, true);
+                if (is_array($decoded)) {
+                    $filter = $decoded;
+                }
+            } elseif (preg_match('/^\s*\d+\s*(,\s*\d+\s*)*$/', $trimmed)) {
+                // Comma-separated numbers: "11, 12" -> ['id' => [11, 12]]
+                $filter = [$primaryKey => array_map('trim', explode(',', $trimmed))];
+            }
+        }
+
+        // If scalar (e.g. 11 or '11')
+        if (is_scalar($filter)) {
+            $filter = [$primaryKey => $filter];
+        }
+
+        if (!is_array($filter)) {
+            $filter = (array) $filter;
+        }
+
+        // If filter is an indexed list of IDs: [11, 12] or list of row maps: [['id' => 11], ['id' => 12]]
+        if (array_is_list($filter) && !empty($filter)) {
+            if (is_scalar($filter[0])) {
+                $filter = [$primaryKey => $filter];
+            } elseif (is_array($filter[0]) && isset($filter[0][$primaryKey])) {
+                $filter = [$primaryKey => array_column($filter, $primaryKey)];
+            }
+        }
+
+        $whereSql = [];
+        $bindings = [];
+        $normalized = [];
+
+        foreach ($filter as $col => $val) {
+            $colName = (string) $col;
+
+            // Handle common aliases like 'ids' -> primaryKey or 'rows'
+            if ($colName === 'ids' && !isset($columns['ids']) && isset($columns[$primaryKey])) {
+                $colName = $primaryKey;
+            }
+
+            // Find matching column in table metadata (case-insensitive if needed)
+            if (!empty($columns) && !isset($columns[$colName])) {
+                $found = null;
+                foreach (array_keys($columns) as $actualCol) {
+                    if (strcasecmp($actualCol, $colName) === 0) {
+                        $found = $actualCol;
+                        break;
+                    }
+                }
+                if ($found) {
+                    $colName = $found;
+                }
+            }
+
+            $qCol = $dialect->quoteIdentifier($colName);
+            $normalized[$colName] = $val;
+
+            if ($val === null) {
+                $whereSql[] = "{$qCol} IS NULL";
+                continue;
+            }
+
+            // If string that looks like a JSON array or comma-separated list of IDs
+            if (is_string($val)) {
+                $trimmedVal = trim($val);
+                if (str_starts_with($trimmedVal, '[') && str_ends_with($trimmedVal, ']')) {
+                    $decoded = json_decode($trimmedVal, true);
+                    if (is_array($decoded)) {
+                        $val = $decoded;
+                    }
+                } elseif (preg_match('/^\s*\d+\s*(,\s*\d+\s*)+$/', $trimmedVal)) {
+                    $val = array_map('trim', explode(',', $trimmedVal));
+                }
+            }
+
+            if (is_array($val)) {
+                // Check if it's an operator array: ['in' => ...], ['=' => ...], etc.
+                if (isset($val['in']) && is_array($val['in'])) {
+                    $items = array_values($val['in']);
+                    if (empty($items)) {
+                        $whereSql[] = '1 = 0';
+                    } else {
+                        $placeholders = implode(', ', array_fill(0, count($items), '?'));
+                        $whereSql[] = "{$qCol} IN ({$placeholders})";
+                        foreach ($items as $item) {
+                            $bindings[] = is_scalar($item) ? $item : (string) $item;
+                        }
+                    }
+                } elseif (isset($val['not_in']) && is_array($val['not_in'])) {
+                    $items = array_values($val['not_in']);
+                    if (empty($items)) {
+                        $whereSql[] = '1 = 1';
+                    } else {
+                        $placeholders = implode(', ', array_fill(0, count($items), '?'));
+                        $whereSql[] = "{$qCol} NOT IN ({$placeholders})";
+                        foreach ($items as $item) {
+                            $bindings[] = is_scalar($item) ? $item : (string) $item;
+                        }
+                    }
+                } elseif (isset($val['='])) {
+                    $whereSql[] = "{$qCol} = ?";
+                    $bindings[] = is_scalar($val['=']) ? $val['='] : (string) $val['='];
+                } elseif (isset($val['!=']) || isset($val['<>'])) {
+                    $opVal = $val['!='] ?? $val['<>'];
+                    $whereSql[] = "{$qCol} <> ?";
+                    $bindings[] = is_scalar($opVal) ? $opVal : (string) $opVal;
+                } elseif (isset($val['>'])) {
+                    $whereSql[] = "{$qCol} > ?";
+                    $bindings[] = is_scalar($val['>']) ? $val['>'] : (string) $val['>'];
+                } elseif (isset($val['>='])) {
+                    $whereSql[] = "{$qCol} >= ?";
+                    $bindings[] = is_scalar($val['>=']) ? $val['>='] : (string) $val['>='];
+                } elseif (isset($val['<'])) {
+                    $whereSql[] = "{$qCol} < ?";
+                    $bindings[] = is_scalar($val['<']) ? $val['<'] : (string) $val['<'];
+                } elseif (isset($val['<='])) {
+                    $whereSql[] = "{$qCol} <= ?";
+                    $bindings[] = is_scalar($val['<=']) ? $val['<='] : (string) $val['<='];
+                } elseif (isset($val['like'])) {
+                    $whereSql[] = "{$qCol} LIKE ?";
+                    $bindings[] = is_scalar($val['like']) ? $val['like'] : (string) $val['like'];
+                } else {
+                    // Indexed list array: [11, 12] or ['a', 'b']
+                    $items = array_values($val);
+                    if (empty($items)) {
+                        $whereSql[] = '1 = 0';
+                    } elseif (count($items) === 1) {
+                        $whereSql[] = "{$qCol} = ?";
+                        $bindings[] = is_scalar($items[0]) ? $items[0] : (string) $items[0];
+                    } else {
+                        $placeholders = implode(', ', array_fill(0, count($items), '?'));
+                        $whereSql[] = "{$qCol} IN ({$placeholders})";
+                        foreach ($items as $item) {
+                            $bindings[] = is_scalar($item) ? $item : (string) $item;
+                        }
+                    }
+                }
+            } else {
+                // Scalar value
+                $whereSql[] = "{$qCol} = ?";
+                $bindings[] = $val;
+            }
+        }
+
+        return [$whereSql, $bindings, $normalized];
+    }
+
+    /**
      * Step 1 (Delete): Impact analysis, cascade counts, soft-delete suggestion, typed phrase.
      */
     public function previewDelete(
@@ -306,13 +477,9 @@ class DataChangeService
         // Read target rows
         $dialect = $this->dialectRegistry->get($connection->driver ?: 'mysql');
         $qTable = $dialect->quoteIdentifier($tableName);
-        $whereSql = [];
-        $bindings = [];
-
-        foreach ($filter as $col => $val) {
-            $whereSql[] = $dialect->quoteIdentifier($col) . ' = ?';
-            $bindings[] = $val;
-        }
+        [$whereSql, $bindings, $normalizedFilter] = $this->buildFilterConditions(
+            $dialect, $tableName, $tableMeta, $filter
+        );
 
         if (empty($whereSql)) {
             throw new DataException('TABLE_WIDE_DELETE_PROHIBITED', "Table-wide deletions without WHERE criteria are strictly prohibited.");
@@ -392,7 +559,7 @@ class DataChangeService
             'action' => 'delete',
             'target_table' => $tableName,
             'primary_keys' => $pks,
-            'filter_spec' => $filter,
+            'filter_spec' => $normalizedFilter,
             'affected_count' => $count,
             'preview_rows' => $maskedPreview,
             'impact_analysis' => $impactAnalysis,
@@ -404,6 +571,7 @@ class DataChangeService
 
         return [
             'success' => true,
+            'message' => "Preview created: {$count} row(s) in '{$tableName}' will be permanently deleted. Typed confirmation phrase required: \"{$typedPhrase}\".",
             'change_request_id' => $changeRequest->id,
             'action' => 'delete',
             'table' => $tableName,
@@ -446,7 +614,9 @@ class DataChangeService
 
         // For delete: strictly verify typed phrase
         if ($change->action === 'delete') {
-            if (!$typedPhrase || trim($typedPhrase) !== $change->confirmation_phrase) {
+            $expected = trim($change->confirmation_phrase);
+            $actual = $typedPhrase !== null ? trim(trim($typedPhrase), "'\" \t\n\r\0\x0B.") : '';
+            if ($actual === '' || strcasecmp($actual, $expected) !== 0) {
                 AuditLog::log($user->id, 'data.delete_confirmation_mismatch', 'data_change_requests', (string) $change->id);
                 throw new DataException('TYPED_CONFIRMATION_REQUIRED', "Typed confirmation phrase does not match. You must type exactly: '{$change->confirmation_phrase}'. Voice confirmation alone is not accepted.");
             }
@@ -489,7 +659,7 @@ class DataChangeService
 
                 foreach ($patch as $col => $val) {
                     $setSql[] = $dialect->quoteIdentifier($col) . ' = ?';
-                    $bindings[] = $val;
+                    $bindings[] = is_array($val) ? json_encode($val) : $val;
                 }
 
                 foreach ($pks as $pk) {

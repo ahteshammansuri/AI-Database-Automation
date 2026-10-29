@@ -77,4 +77,31 @@ describe("SecretRedactor Service Tests", () => {
     assert.equal(contentString.indexOf(secretValue), -1);
     assert.ok(!new RegExp(secretValue).test(contentString));
   });
+
+  test("everyday words that contain 'pass' or 'secret' are never taken for a password", () => {
+    // Real message (Hindi "mere pass to …" = "I have …"): the database name was redacted, so Orbit never saw it.
+    for (const clean of [
+      "Tumhen Itna bhi nahin Pata mere pass to Soviet hi data bheja",
+      "my compass is broken",
+      "bypass to the next step",
+      "the secret to a good blog is consistency",
+      "add the api key field to the form later",
+    ]) {
+      const result = redactSecretsFromUtterance(clean);
+      assert.equal(result.hasRedaction, false, clean);
+      assert.equal(result.redactedText, clean);
+    }
+  });
+
+  test("passwords stated in other common ways are still redacted", () => {
+    for (const [raw, secret] of [
+      ["set the password to hunter2x", "hunter2x"],
+      ["pwd: s3cr3t!", "s3cr3t!"],
+      ["my secret is abc123", "abc123"],
+    ] as const) {
+      const result = redactSecretsFromUtterance(raw);
+      assert.equal(result.hasRedaction, true, raw);
+      assert.ok(!result.redactedText.includes(secret), raw);
+    }
+  });
 });

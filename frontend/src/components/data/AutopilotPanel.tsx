@@ -3,8 +3,10 @@ import { AlertCircle, CalendarClock, CheckCircle2, Loader2, Pause, Play, Plus, R
 import { api } from "../../services/api";
 import { useToast } from "../../context/ToastContext";
 import { FieldError, FormAlert } from "../ui/kit";
+import { AutopilotSkeleton } from "../ui/PageSkeletons";
 import { TimePicker } from "../ui/TimePicker";
 import { TimezoneSelect } from "../ui/TimezoneSelect";
+import { Select2 } from "../ui/Select2";
 import { defaultTimeZone } from "../../lib/schedule";
 import { serverFieldErrors } from "../../lib/validation";
 import type { Autopilot } from "./types";
@@ -19,11 +21,15 @@ interface Props {
 }
 
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const HOUR_OPTIONS = [1, 2, 3, 4, 6, 8, 12, 24].map((h) => ({
+  value: h,
+  label: h === 1 ? "1 hour" : `${h} hours`,
+}));
 const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "—");
 
 /** Data autopilot for one table: AI sample rows added on a schedule, each run checked and undoable. */
 export const AutopilotPanel: React.FC<Props> = ({ connectionId, table, maxRows, canInsert, onUndo }) => {
-  const { toast } = useToast();
+  const { toast, confirm } = useToast();
   const [items, setItems] = useState<Autopilot[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
@@ -80,7 +86,7 @@ export const AutopilotPanel: React.FC<Props> = ({ connectionId, table, maxRows, 
     }
   };
 
-  if (loading) return <div className="py-8 text-center"><Loader2 className="mx-auto h-5 w-5 animate-spin text-slate-400" /></div>;
+  if (loading) return <AutopilotSkeleton />;
 
   return (
     <div className="space-y-4">
@@ -118,9 +124,13 @@ export const AutopilotPanel: React.FC<Props> = ({ connectionId, table, maxRows, 
             {form.frequency === "hourly" ? (
               <div>
                 <label htmlFor="ap-hours" className="da-label">Every</label>
-                <select id="ap-hours" value={form.every_hours} onChange={(e) => setForm((f) => ({ ...f, every_hours: Number(e.target.value) }))} className="da-input cursor-pointer">
-                  {[1, 2, 3, 4, 6, 8, 12, 24].map((h) => <option key={h} value={h}>{h === 1 ? "hour" : `${h} hours`}</option>)}
-                </select>
+                <Select2
+                  id="ap-hours"
+                  value={form.every_hours}
+                  onChange={(val) => setForm((f) => ({ ...f, every_hours: Number(val) }))}
+                  options={HOUR_OPTIONS}
+                  showSearch={false}
+                />
               </div>
             ) : (
               <div>
@@ -190,7 +200,23 @@ export const AutopilotPanel: React.FC<Props> = ({ connectionId, table, maxRows, 
                   {p.last_status === "added" && p.last_change_id && (
                     <button type="button" onClick={() => onUndo(p.last_change_id!).then(load)} className="da-btn da-btn-ghost da-btn-sm"><RotateCcw className="h-3.5 w-3.5" /> Undo last run</button>
                   )}
-                  <button type="button" onClick={() => window.confirm(`Delete the autopilot “${p.name}”? Rows it already added stay.`) && act(() => api.deleteAutopilot(p.id), "Autopilot deleted")} className="da-btn da-btn-ghost da-btn-sm text-rose-600" aria-label={`Delete ${p.name}`}><Trash2 className="h-3.5 w-3.5" /></button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const ok = await confirm({
+                        title: `Delete autopilot “${p.name}”?`,
+                        text: "Rows it already added will stay in your database.",
+                        confirmButtonText: "Delete Autopilot",
+                        cancelButtonText: "Keep Autopilot",
+                        isDestructive: true,
+                      });
+                      if (ok) act(() => api.deleteAutopilot(p.id), "Autopilot deleted");
+                    }}
+                    className="da-btn da-btn-ghost da-btn-sm text-rose-600"
+                    aria-label={`Delete ${p.name}`}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
                 </div>
               </div>
             </li>

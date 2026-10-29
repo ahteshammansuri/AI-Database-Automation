@@ -24,7 +24,7 @@ class EnsureCustomerActive
                     'reason' => 'suspended',
                 ], 403);
             }
-            if (!$user->last_active_at || $user->last_active_at->lt(now()->subMinutes(5))) {
+            if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'last_active_at') && (!$user->last_active_at || $user->last_active_at->lt(now()->subMinutes(5)))) {
                 $user->forceFill(['last_active_at' => now()])->saveQuietly();
             }
         }

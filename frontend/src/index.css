@@ -174,6 +174,54 @@
   .da-modal { @apply relative w-full overflow-hidden rounded-3xl border border-slate-200/70 bg-white shadow-[0_40px_120px_-30px_rgba(15,23,42,0.55)]; }
 }
 
+/* ---- Skeleton loaders ------------------------------------------------------------------
+ * Placeholders in the shape of the content that is loading (components/ui/Skeleton.tsx). The colours are
+ * tokens, so a skeleton placed on a dark surface (ink panels, the sidebar, landing sections, or a future
+ * `.dark` theme) turns dark by itself; white cards and modals switch back to the light tokens.
+ */
+:root, .da-card, .da-modal, .da-skel-light {
+  --skel-base: rgba(226, 232, 240, 0.95);
+  --skel-accent: rgba(224, 231, 255, 1);
+  --skel-shine: rgba(255, 255, 255, 0.7);
+  --skel-line: rgba(226, 232, 240, 0.9);
+}
+.bg-ink, .bg-ink-800, .da-ink, .da-skel-dark, .dark {
+  --skel-base: rgba(148, 163, 184, 0.13);
+  --skel-accent: rgba(129, 140, 248, 0.2);
+  --skel-shine: rgba(199, 210, 254, 0.14);
+  --skel-line: rgba(255, 255, 255, 0.08);
+}
+/* In the components layer so utilities (h-*, w-*, rounded-*, hidden sm:block) still shape each block. */
+@layer components {
+  .da-skel {
+    position: relative;
+    display: block;
+    overflow: hidden;
+    isolation: isolate;
+    border-radius: 0.5rem;
+    background-color: var(--skel-base);
+  }
+  .da-skel-accent { background-color: var(--skel-accent); }
+  /* One calm sweep, then a pause, so a page full of placeholders does not flicker. */
+  .da-skel::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    transform: translateX(-100%);
+    background: linear-gradient(100deg, transparent 20%, var(--skel-shine) 50%, transparent 80%);
+    animation: da-skel-sweep 1.9s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+    animation-delay: var(--skel-delay, 0s);
+  }
+  /* Fades in, so an answer that arrives within a few frames never flashes a placeholder. */
+  .da-skel-root { animation: da-skel-in 0.35s ease-out both; }
+  @media (prefers-reduced-motion: reduce) {
+    .da-skel::after { animation: none; opacity: 0; }
+    .da-skel-root { animation: none; }
+  }
+}
+@keyframes da-skel-sweep { 0% { transform: translateX(-100%); } 65%, 100% { transform: translateX(100%); } }
+@keyframes da-skel-in { from { opacity: 0; } to { opacity: 1; } }
+
 /* Light grid behind the top of the portal canvas */
 .portal-canvas-grid {
   background-image:

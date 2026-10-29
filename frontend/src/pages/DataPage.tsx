@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { motion } from "framer-motion";
 import {
@@ -9,11 +9,14 @@ import { api } from "../services/api";
 import { useToast } from "../context/ToastContext";
 import { usePlatform } from "../context/PlatformContext";
 import { EmptyState, FormAlert, ModalShell, PageHeader } from "../components/ui/kit";
+import { SkeletonGroup, SkeletonListRows } from "../components/ui/Skeleton";
+import { DataPageSkeleton, DataRowsSkeleton, DataTablesSkeleton } from "../components/ui/PageSkeletons";
 import { DataCell } from "../components/data/DataCell";
 import { RowForm, fieldId } from "../components/data/RowForm";
 import { ChangeConfirmModal } from "../components/data/ChangeConfirmModal";
 import { SampleRowsModal } from "../components/data/SampleRowsModal";
 import { AutopilotPanel } from "../components/data/AutopilotPanel";
+import { Select2 } from "../components/ui/Select2";
 import type { ChangePreview, DataTableInfo, RowsResponse } from "../components/data/types";
 import { useOrbitSurface } from "../hooks/useOrbitSurface";
 import { isEditable } from "../components/data/types";
@@ -32,6 +35,7 @@ export const DataPage: React.FC = () => {
   const [params, setParams] = useSearchParams();
 
   const [connections, setConnections] = useState<any[]>([]);
+  const [connectionsLoaded, setConnectionsLoaded] = useState(false);
   const [connectionId, setConnectionId] = useState<number | null>(params.get("connection") ? Number(params.get("connection")) : null);
   const [tables, setTables] = useState<DataTableInfo[]>([]);
   const [tablesLoading, setTablesLoading] = useState(false);
@@ -60,12 +64,23 @@ export const DataPage: React.FC = () => {
   const [sampleOpen, setSampleOpen] = useState(false);
   const [lastChange, setLastChange] = useState<{ id: number; text: string; canUndo: boolean } | null>(null);
   const [history, setHistory] = useState<any[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  // The connection the table list belongs to, and the connection:table the rows belong to. Until both match what is
+  // chosen the page is busy, so Orbit never picks a table, or opens a form, of the previously chosen database.
+  const [tablesFor, setTablesFor] = useState<number | null>(null);
+  const [rowsFor, setRowsFor] = useState<string | null>(null);
+  const tablesRequest = useRef(0);
+  const rowsRequest = useRef(0);
 
+  // URL updates start from the latest URL (not this render's copy): two changes in a row, such as Orbit choosing a
+  // connection and then a table, must not undo each other.
   const selectTable = (name: string) => {
-    const next = new URLSearchParams(params);
-    if (connectionId) next.set("connection", String(connectionId));
-    next.set("table", name);
-    setParams(next, { replace: true });
+    setParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (!next.get("connection") && connectionId) next.set("connection", String(connectionId));
+      next.set("table", name);
+      return next;
+    }, { replace: true });
     setPage(1);
     setSearch("");
     setSearchInput("");
@@ -75,32 +90,63 @@ export const DataPage: React.FC = () => {
     setLastChange(null);
   };
 
+  /** Switch database (the picker or Orbit). The open table belonged to the previous one, so it is cleared. */
+  const chooseConnection = (id: number) => {
+    if (id === connectionId) return;
+    setConnectionId(id);
+    setTables([]);
+    setTablesFor(null);
+    setData(null);
+    setRowsFor(null);
+    setParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.set("connection", String(id));
+      next.delete("table");
+      return next;
+    }, { replace: true });
+  };
+
   // Connections
   useEffect(() => {
     api.listConnections().then((list) => {
       const conns = Array.isArray(list) ? list : [];
       setConnections(conns);
-      setConnectionId((cur) => (cur && conns.some((c) => c.id === cur) ? cur : conns[0]?.id ?? null));
-    }).catch((e) => setTablesError(e.message));
+      const qConn = Number(params.get("connection"));
+      const validQConn = qConn && conns.some((c) => c.id === qConn) ? qConn : null;
+      setConnectionId((cur) => (cur && conns.some((c) => c.id === cur) ? cur : validQConn ?? conns[0]?.id ?? null));
+    }).catch((e) => setTablesError(e.message)).finally(() => setConnectionsLoaded(true));
   }, []);
+
+  useEffect(() => {
+    const qConn = Number(params.get("connection"));
+    if (qConn && connections.some((c) => c.id === qConn) && qConn !== connectionId) {
+      setConnectionId(qConn);
+    }
+  }, [params, connections, connectionId]);
 
   // Tables of the chosen connection
   const loadTables = useCallback(async (refresh = false) => {
     if (!connectionId) return;
+    const request = ++tablesRequest.current;
     setTablesLoading(true);
     setTablesError(null);
     try {
       const res = await api.dataTables(connectionId, refresh);
+      if (request !== tablesRequest.current) return; // another database was chosen meanwhile
       setTables(res.tables ?? []);
       if (!params.get("table")) {
         const first = (res.tables ?? []).find((t: DataTableInfo) => !t.blocked);
         if (first) selectTable(first.name);
       }
     } catch (e: any) {
+      if (request !== tablesRequest.current) return;
       setTablesError(e.message);
       setTables([]);
     } finally {
-      setTablesLoading(false);
+      if (request === tablesRequest.current) {
+        setTablesLoading(false);
+        setTablesFor(connectionId);
+      }
     }
   }, [connectionId]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { loadTables(); }, [loadTables]);
@@ -108,26 +154,35 @@ export const DataPage: React.FC = () => {
   // Rows
   const loadRows = useCallback(async () => {
     if (!connectionId || !table) return;
+    const request = ++rowsRequest.current;
     setRowsLoading(true);
     setRowsError(null);
     try {
       const res: RowsResponse = await api.dataRows(connectionId, table, { page, per_page: perPage, sort: sort.col, dir: sort.col ? sort.dir : undefined, search, reveal });
+      if (request !== rowsRequest.current) return; // another table was chosen meanwhile
       setData(res);
     } catch (e: any) {
+      if (request !== rowsRequest.current) return;
       setRowsError(e.message);
       setData(null);
     } finally {
-      setRowsLoading(false);
+      if (request === rowsRequest.current) {
+        setRowsLoading(false);
+        setRowsFor(`${connectionId}:${table}`);
+      }
     }
   }, [connectionId, table, page, perPage, sort, search, reveal]);
   useEffect(() => { if (tab === "rows") loadRows(); }, [loadRows, tab]);
 
   const loadHistory = useCallback(async () => {
     if (!connectionId || !table) return;
+    setHistoryLoading(true);
     try {
       setHistory((await api.dataHistory(connectionId, table)).changes ?? []);
     } catch {
       setHistory([]);
+    } finally {
+      setHistoryLoading(false);
     }
   }, [connectionId, table]);
   useEffect(() => { if (tab === "history") loadHistory(); }, [tab, loadHistory]);
@@ -159,9 +214,14 @@ export const DataPage: React.FC = () => {
 
   // Orbit: choose the connection and table, search, and open the add form or AI sample rows. Every change still ends
   // in the page's own preview, confirmed by the user; Orbit has no action that writes rows here.
+  const connectionName = connections.find((c: any) => c.id === connectionId)?.name ?? null;
+  const where = `"${table}" in ${connectionName ?? `connection ${connectionId}`}`;
   useOrbitSurface("data.page", () => ({
+    busy: () => !connectionsLoaded || (connectionId !== null && tablesFor !== connectionId)
+      || (!!table && !rowsError && rowsFor !== `${connectionId}:${table}`),
     describe: () => ({
       connection_id: connectionId,
+      connection: connectionName,
       table: table || null,
       tables: tables.slice(0, 60).map((t) => ({ name: t.name, rows: t.rows_estimate, locked: t.blocked, can_add: !!t.permissions?.insert })),
       columns: (data?.columns ?? []).slice(0, 40).map((c) => c.name),
@@ -176,9 +236,7 @@ export const DataPage: React.FC = () => {
         set: (v) => {
           const id = Number(v);
           if (!connections.some((c: any) => c.id === id)) return `Connection ${v} is not in this workspace.`;
-          setConnectionId(id);
-          setParams(new URLSearchParams({ connection: String(id) }), { replace: true });
-          setData(null);
+          chooseConnection(id);
           return null;
         },
         options: () => connections.map((c: any) => ({ value: c.id, label: `${c.name} (${c.database_name ?? ""})` })),
@@ -200,11 +258,19 @@ export const DataPage: React.FC = () => {
       refresh: { run: async () => { await loadRows(); return { success: true, message: "Rows reloaded." }; } },
       add_row: {
         enabled: () => !!perms?.insert,
-        run: () => { startAdd(); return { success: true, message: "The add-row form is open. The user checks the preview and confirms the change on the page." }; },
+        run: () => {
+          startAdd();
+          return { success: true, message: `The add-row form is open for ${where}. The user checks the preview and confirms the change on the page.`,
+            data: { connection_id: connectionId, connection: connectionName, table } };
+        },
       },
       sample_rows: {
         enabled: () => !!perms?.insert && !!features.sample_data,
-        run: () => { setSampleOpen(true); return { success: true, message: "The AI sample rows window is open. The user chooses how many and confirms the rows before anything is added." }; },
+        run: () => {
+          setSampleOpen(true);
+          return { success: true, message: `The AI sample rows window is open for ${where}. The user chooses how many and confirms the rows before anything is added.`,
+            data: { connection_id: connectionId, connection: connectionName, table } };
+        },
       },
     },
   }));
@@ -306,15 +372,30 @@ export const DataPage: React.FC = () => {
         description="Browse the rows of your tables and change them safely. Every change is checked against the table, shown to you first, and can be undone."
         actions={
           connections.length > 0 && (
-            <select value={connectionId ?? ""} onChange={(e) => { setConnectionId(Number(e.target.value)); setParams(new URLSearchParams({ connection: e.target.value }), { replace: true }); setData(null); }}
-              className="da-input w-auto cursor-pointer py-2 text-[13px] font-semibold" aria-label="Connection">
-              {connections.map((c) => <option key={c.id} value={c.id}>{c.name} ({c.database_name || c.database})</option>)}
-            </select>
+            <div className="w-64 sm:w-72">
+              <Select2
+                id="data-connection-select"
+                size="sm"
+                value={connectionId ?? ""}
+                onChange={(val) => chooseConnection(Number(val))}
+                options={connections.map((c) => ({
+                  value: c.id,
+                  label: c.name,
+                  badge: c.database_name || c.database || "db",
+                  icon: <Database className="h-3.5 w-3.5 text-slate-400" />,
+                }))}
+                placeholder="Choose database connection"
+                ariaLabel="Connection"
+                showSearch={connections.length > 4}
+              />
+            </div>
           )
         }
       />
 
-      {connections.length === 0 && !tablesError ? (
+      {!connectionsLoaded ? (
+        <DataPageSkeleton />
+      ) : connections.length === 0 && !tablesError ? (
         <EmptyState icon={Database} title="Connect a database first" description="The Data Explorer shows the tables of your connected databases."
           action={<Link to="/connections" className="da-btn da-btn-primary"><Database className="h-4 w-4" /> Go to Connections</Link>} />
       ) : (
@@ -331,6 +412,7 @@ export const DataPage: React.FC = () => {
             </div>
             {tablesError && <p className="rounded-xl bg-rose-50 p-2.5 text-[12px] text-rose-700">{tablesError}</p>}
             <nav aria-label="Tables" className="max-h-[60vh] space-y-0.5 overflow-y-auto">
+              {tablesLoading && tables.length === 0 && <DataTablesSkeleton />}
               {filteredTables.map((t) => (
                 <button key={t.name} type="button" disabled={t.blocked} onClick={() => selectTable(t.name)} title={t.blocked ? t.permissions.reason ?? "" : undefined}
                   className={`flex w-full items-center justify-between gap-2 rounded-xl px-2.5 py-2 text-left text-[13px] transition ${t.name === table ? "bg-slate-950 text-white" : t.blocked ? "cursor-not-allowed text-slate-300" : "text-slate-700 hover:bg-slate-100"}`}>
@@ -401,7 +483,7 @@ export const DataPage: React.FC = () => {
                     {rowsError ? (
                       <p className="m-4 flex items-start gap-2 rounded-xl bg-rose-50 p-3 text-[13px] text-rose-800"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /> {rowsError}</p>
                     ) : !data && rowsLoading ? (
-                      <div className="space-y-2 p-4">{[0, 1, 2, 3, 4].map((i) => <div key={i} className="h-9 animate-pulse rounded-lg bg-slate-100" />)}</div>
+                      <DataRowsSkeleton />
                     ) : data && data.rows.length === 0 ? (
                       <EmptyState icon={Table2} title={search ? "No rows match your search" : "This table is empty"} description={perms?.insert ? "Add a row, or let the AI create sample rows." : undefined} className="py-12" />
                     ) : data ? (
@@ -440,9 +522,23 @@ export const DataPage: React.FC = () => {
                           {data.hidden_columns.length > 0 && ` · ${data.hidden_columns.length} protected column${data.hidden_columns.length === 1 ? "" : "s"} hidden`}
                         </span>
                         <span className="flex items-center gap-2">
-                          <select value={perPage} onChange={(e) => { setPerPage(Number(e.target.value)); setPage(1); }} className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[12.5px]" aria-label="Rows per page">
-                            {[10, 25, 50, 100].filter((n) => n <= (config.data_explorer?.max_page_size ?? 100)).map((n) => <option key={n} value={n}>{n} per page</option>)}
-                          </select>
+                          <div className="w-28">
+                            <Select2
+                              id="data-per-page"
+                              size="xs"
+                              direction="up"
+                              value={perPage}
+                              onChange={(val) => {
+                                setPerPage(Number(val));
+                                setPage(1);
+                              }}
+                              options={[10, 25, 50, 100]
+                                .filter((n) => n <= (config.data_explorer?.max_page_size ?? 100))
+                                .map((n) => ({ value: n, label: `${n} / page` }))}
+                              showSearch={false}
+                              ariaLabel="Rows per page"
+                            />
+                          </div>
                           <button type="button" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1} className="da-icon-btn" aria-label="Previous page"><ChevronLeft className="h-4 w-4" /></button>
                           <span className="tabular-nums">{page}{totalPages ? ` / ${totalPages}` : ""}</span>
                           <button type="button" onClick={() => setPage((p) => p + 1)} disabled={totalPages !== null ? page >= totalPages : data.rows.length < data.per_page} className="da-icon-btn" aria-label="Next page"><ChevronRight className="h-4 w-4" /></button>
@@ -460,7 +556,11 @@ export const DataPage: React.FC = () => {
 
                 {tab === "history" && (
                   <div className="da-card p-5">
-                    {history.length === 0 ? (
+                    {historyLoading && history.length === 0 ? (
+                      <SkeletonGroup label="Loading the changes…">
+                        <SkeletonListRows rows={4} trailing="button" className="divide-y divide-slate-100" rowClassName="py-2.5" />
+                      </SkeletonGroup>
+                    ) : history.length === 0 ? (
                       <p className="text-center text-[13px] text-slate-500">No changes to this table yet.</p>
                     ) : (
                       <ul className="divide-y divide-slate-100">

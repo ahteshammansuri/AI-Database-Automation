@@ -3,6 +3,7 @@
 namespace App\Filament\Widgets;
 
 use App\Filament\Resources\Customers\CustomerResource;
+use App\Filament\Widgets\Concerns\HasSkeletonPlaceholder;
 use App\Filament\Widgets\Concerns\RequiresDashboardPermission;
 use App\Models\User;
 use Filament\Tables\Columns\TextColumn;
@@ -11,6 +12,7 @@ use Filament\Widgets\TableWidget;
 
 class NewestCustomers extends TableWidget
 {
+    use HasSkeletonPlaceholder;
     use RequiresDashboardPermission;
 
     protected static ?int $sort = 4;

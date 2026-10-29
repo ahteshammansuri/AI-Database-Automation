@@ -54,6 +54,11 @@ export interface ActionHandle {
 export interface SurfaceHandle {
   /** For modal/collapsible surfaces: is it open right now? */
   isOpen?(): boolean;
+  /**
+   * True while the surface is still loading what its fields and actions depend on (e.g. the table list after the
+   * connection changed). Orbit waits until it is false before each step, so it never acts on stale options.
+   */
+  busy?(): boolean;
   /** Open it the way a user would (e.g. the "Connect Database" button). */
   open?(): void | Promise<void>;
   openTarget?: string;

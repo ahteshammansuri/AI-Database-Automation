@@ -12,12 +12,29 @@ from typing import Any, Dict, List, Optional
 HEADER = "X-AI-Usage"
 
 _calls: ContextVar[Optional[List[Dict[str, Any]]]] = ContextVar("ai_usage_calls", default=None)
+# Why another model answered than the one chosen (e.g. "gemini-3.5-flash: quota used up"), for this request.
+_notes: ContextVar[Optional[List[str]]] = ContextVar("ai_usage_notes", default=None)
+
+
+def note(text: str) -> None:
+    """Remember a fallback reason for the current request (shown to the user, never a secret)."""
+    notes = _notes.get()
+    if notes is None:
+        notes = []
+        _notes.set(notes)
+    if text and text not in notes:
+        notes.append(text[:200])
+
+
+def notes() -> List[str]:
+    return list(_notes.get() or [])
 
 
 def begin() -> List[Dict[str, Any]]:
     """Start collecting for the current request; returns the list the providers append to."""
     calls: List[Dict[str, Any]] = []
     _calls.set(calls)
+    _notes.set([])
     return calls
 
 

@@ -4,6 +4,7 @@ import { api } from "../../services/api";
 import { FieldError } from "../ui/kit";
 import { DatePicker } from "../ui/DatePicker";
 import { TimePicker } from "../ui/TimePicker";
+import { Select2 } from "../ui/Select2";
 import { todayIn } from "../../lib/schedule";
 import type { DataColumn } from "./types";
 import { isEditable } from "./types";
@@ -127,11 +128,20 @@ export const RowForm: React.FC<Props> = ({ connectionId, table, columns, values,
               </div>
             );
           } else if (c.enum.length && c.family === "enum") {
+            const enumOptions = [
+              ...(c.nullable ? [{ value: "", label: "Empty (NULL)" }] : []),
+              ...c.enum.map((o) => ({ value: o, label: o })),
+            ];
             input = (
-              <select {...common} value={v ?? ""} onChange={(e) => onChange(c.name, e.target.value === "" ? null : e.target.value)} className={`${cls} cursor-pointer`}>
-                <option value="">{c.nullable ? "Empty" : "Choose…"}</option>
-                {c.enum.map((o) => <option key={o} value={o}>{o}</option>)}
-              </select>
+              <Select2
+                id={fieldId(c.name)}
+                value={v ?? ""}
+                onChange={(val) => onChange(c.name, val === "" ? null : val)}
+                options={enumOptions}
+                placeholder={c.nullable ? "Empty" : "Choose…"}
+                invalid={!!err}
+                showSearch={c.enum.length > 5}
+              />
             );
           } else if (c.family === "date") {
             input = <DatePicker value={v ? String(v).slice(0, 10) : null} today={today} onChange={(d) => onChange(c.name, d || null)} ariaLabel={c.name} />;

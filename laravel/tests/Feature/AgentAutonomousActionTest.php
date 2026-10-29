@@ -457,7 +457,8 @@ class AgentAutonomousActionTest extends TestCase
         $this->assertNull(\App\Models\KnowledgeDocument::find($doc->id));
         $obs = $this->decideRequests()[2]['observations'];
         $this->assertStringContainsString('Do not repeat it', $obs[0]['result']['next_step']);
-        $this->assertSame('already_done', $this->decideRequests()[3]['observations'][1]['result']['status']);
+        // The model repeated the removal: it is not run again and the turn ends with the result, without asking again.
+        $this->assertCount(3, $this->decideRequests());
         $this->assertSame('SUCCEEDED', $task->fresh()->status);
         $this->assertSame(1, AgentToolCall::where('task_id', $task->id)->where('status', 'succeeded')->count());
     }
@@ -627,7 +628,7 @@ class AgentAutonomousActionTest extends TestCase
 
         $task = AgentTask::where('conversation_id', $c->id)->first();
         $this->assertSame(1, AgentToolCall::where('task_id', $task->id)->count());
-        $this->assertSame('already_done', $this->decideRequests()[2]['observations'][1]['result']['status']);
+        $this->assertCount(2, $this->decideRequests(), 'a repeated successful call ends the turn without another model call');
         // Only reads happened: the turn is answered truthfully, not reported as a success.
         $this->assertSame('ANSWERED', $task->status);
         $reply = AgentMessage::where('conversation_id', $c->id)->where('role', 'assistant')->first();
@@ -934,5 +935,64 @@ class AgentAutonomousActionTest extends TestCase
         $this->actingAs($this->user2)->postJson("/api/agent/conversations/{$c->id}/messages", ['content' => 'hi'])->assertStatus(404);
         $this->actingAs($this->user2)->postJson("/api/agent/tasks/{$task->id}/interrupt", ['action' => 'STOP'])->assertStatus(404);
         $this->actingAs($this->user2)->postJson("/api/agent/tasks/{$task->id}/confirm")->assertStatus(404);
+    }
+
+    // ------------------------------------------------------------------
+    // The decision is the model's, grounded in retrieved schema
+    // ------------------------------------------------------------------
+
+    public function test_the_server_never_switches_the_database_or_table_before_a_press()
+    {
+        // Real failure: a connection remembered from earlier, and a regex for words like "users", made the server pick
+        // them on screen right before Add row, so the row was added in the wrong database.
+        $browser = $this->fakeBrowser([['ok', ['success' => true, 'message' => 'The add-row form is open for "users" in Blog DB.']]]);
+        $conn = $this->savedDemoConnection($this->user1);
+        $c = $this->conversation();
+        $c->update(['metadata' => ['memory' => ['connection_id' => $conn->id + 99, 'table' => 'orders']]]);
+        $this->fakeModel(
+            $this->toolCall('press', ['surface' => 'data.page', 'action' => 'add_row']),
+            $this->decision(['kind' => 'ANSWER', 'speech_text' => 'The form is open.']),
+        );
+
+        $this->say($c, 'add a dummy user');
+
+        $this->assertSame([['surface.press', 'data.page', 'add_row']],
+            array_map(fn ($r) => [$r[0], $r[1]['surface'] ?? null, $r[1]['action'] ?? null], $browser->requests));
+    }
+
+    public function test_an_answer_that_promises_to_check_is_spoken_as_the_model_decided()
+    {
+        // The server used to turn such answers into a dummy-data scan, whatever the user had asked.
+        $this->fakeModel($this->decision(['kind' => 'ANSWER', 'speech_text' => 'Let me check, thodi der mein batata hu.']));
+        $c = $this->conversation();
+
+        $this->say($c, 'kya tum meri connections check kar sakte ho');
+
+        $task = AgentTask::where('conversation_id', $c->id)->first();
+        $this->assertSame(0, AgentToolCall::where('task_id', $task->id)->count(), 'the server ran no tool of its own');
+        $this->assertSame('Let me check, thodi der mein batata hu.', $task->last_decision['speech_text']);
+    }
+
+    public function test_the_first_decision_gets_every_table_of_every_database_and_later_ones_reuse_the_retrieval()
+    {
+        foreach (['Shop DB', 'Blog DB'] as $name) {
+            $conn = $this->savedDemoConnection($this->user1, $name);
+            \App\Models\SchemaSnapshot::create(['user_id' => $this->user1->id, 'connection_id' => $conn->id, 'version' => 1,
+                'schema_payload' => ['tables' => [['name' => 'users', 'columns' => [['name' => 'id', 'type' => 'int', 'is_primary_key' => true]]]]]]);
+        }
+        $chunk = ['source_id' => 'schema:1:users', 'scope' => 'schema', 'text' => 'Table users in "Shop DB"', 'score' => 0.4];
+        $this->fakeModel(
+            $this->decision(['kind' => 'CALL_TOOL', 'tool_call' => ['name' => 'list_database_connections', 'args' => []]],
+                ['used' => true, 'count' => 1, 'source_ids' => ['schema:1:users'], 'chunks' => [$chunk]]),
+            $this->decision(['kind' => 'ASK_CLARIFICATION', 'speech_text' => 'Shop DB or Blog DB?']),
+        );
+
+        $this->say($this->conversation(), 'add a dummy user');
+
+        $requests = $this->decideRequests();
+        $this->assertSame(['Shop DB', 'Blog DB'], array_column($requests[0]['schema_documents'], 'connection'));
+        $this->assertNotEmpty($requests[0]['system_prompt'], 'the administrators\' role and principles, stored as a setting');
+        $this->assertSame([], $requests[1]['schema_documents']);
+        $this->assertSame('schema:1:users', $requests[1]['retrieved_context'][0]['source_id']);
     }
 }

@@ -13,6 +13,9 @@ class AgentTask extends Model
 
     protected $table = 'agent_tasks';
 
+    /** States of a task that is not finished: a new utterance in its conversation continues it. */
+    public const OPEN_STATUSES = ['QUEUED', 'RUNNING', 'WAITING_FOR_INPUT', 'WAITING_FOR_APPROVAL', 'PAUSE_REQUESTED', 'PAUSED'];
+
     protected $fillable = [
         'user_id',
         'conversation_id',

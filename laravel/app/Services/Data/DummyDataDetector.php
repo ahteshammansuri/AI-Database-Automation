@@ -226,4 +226,186 @@ class DummyDataDetector
             'sample_records' => $maskedSamples,
         ];
     }
+
+    /**
+     * Inspect one, several, or all recommended tables for dummy/test records.
+     *
+     * @param DbConnection $connection
+     * @param array|string|null $tables Specific table, comma-separated list, 'recommended', 'all', or null
+     * @param int $sampleLimit
+     * @return array
+     */
+    public function detectAcrossTables(DbConnection $connection, array|string|null $tables = 'recommended', int $sampleLimit = 150): array
+    {
+        $catalog = $this->schemaService->getCatalog($connection);
+        $allCatalogTables = $catalog['tables'] ?? [];
+
+        // Check if single specific table requested
+        if (is_string($tables)) {
+            $tTrim = trim($tables);
+            if ($tTrim !== '' && !in_array(strtolower($tTrim), ['all', 'recommended', 'content', 'required', 'useful'], true) && !str_contains($tTrim, ',')) {
+                if (isset($allCatalogTables[$tTrim])) {
+                    $single = $this->detect($connection, $tTrim, $sampleLimit);
+                    $dummyCount = $single['dummy_count'] ?? 0;
+                    $msg = $dummyCount > 0
+                        ? "Analyzed table '{$tTrim}': detected {$dummyCount} likely dummy/test records with {$single['confidence']} confidence."
+                        : "Analyzed table '{$tTrim}': no obvious dummy or placeholder records detected in sample.";
+                    return array_merge($single, [
+                        'summary_message' => $msg,
+                        'safe_message' => $msg,
+                        'total_tables_scanned' => 1,
+                        'scanned_tables' => [$tTrim],
+                        'tables_with_dummy_data' => $dummyCount > 0 ? [$single] : [],
+                        'total_dummy_records' => $dummyCount,
+                    ]);
+                }
+            }
+        }
+
+        // Determine list of target tables to scan
+        $targetList = [];
+        if (is_array($tables)) {
+            $targetList = array_values(array_filter($tables, fn($t) => is_string($t) && isset($allCatalogTables[trim($t)])));
+        } elseif (is_string($tables) && str_contains($tables, ',')) {
+            $parts = array_map('trim', explode(',', $tables));
+            $targetList = array_values(array_filter($parts, fn($t) => isset($allCatalogTables[$t])));
+        }
+
+        $mode = is_string($tables) ? strtolower(trim($tables)) : 'recommended';
+        if (empty($targetList)) {
+            if ($mode === 'all') {
+                foreach ($allCatalogTables as $tName => $tMeta) {
+                    if ($this->isReadableTable($connection, $tName) && ($tMeta['rows_estimate'] ?? 0) > 0) {
+                        $targetList[] = $tName;
+                    }
+                    if (count($targetList) >= 25) break;
+                }
+            } else {
+                // 'recommended', 'content', 'required', or default:
+                $candidates = [];
+                $snapshot = \App\Models\SchemaSnapshot::where('connection_id', $connection->id)->latest()->first();
+                $recFromSnap = [];
+                if ($snapshot && !empty($snapshot->schema_metadata['tables'])) {
+                    foreach ($snapshot->schema_metadata['tables'] as $snapT) {
+                        if (is_array($snapT) && in_array(strtoupper($snapT['category'] ?? ''), ['RECOMMENDED', 'PRIMARY', 'EDITORIAL'], true)) {
+                            $recFromSnap[] = $snapT['table_name'] ?? ($snapT['name'] ?? '');
+                        }
+                    }
+                }
+
+                foreach ($allCatalogTables as $tName => $tMeta) {
+                    if (!$this->isReadableTable($connection, $tName)) {
+                        continue;
+                    }
+                    $rowsEst = $tMeta['rows_estimate'] ?? 0;
+                    if ($rowsEst === 0) {
+                        continue;
+                    }
+
+                    $score = 0;
+                    if (in_array($tName, $recFromSnap, true)) {
+                        $score += 10;
+                    }
+                    if (preg_match('/^(users?|customers?|profiles?|accounts?|members?)$/i', $tName)) {
+                        $score += 15;
+                    } elseif (preg_match('/(blog|post|article|comment|review|brand|categor|product|item|service|listing|faq|page)/i', $tName)) {
+                        $score += 8;
+                    }
+
+                    foreach ($catalog['columns'] ?? [] as $col) {
+                        if (($col['table'] ?? '') === $tName) {
+                            $cName = $col['name'] ?? '';
+                            if (preg_match('/email|mail/i', $cName)) $score += 6;
+                            if (preg_match('/^(name|full_name|username|title|slug)$/i', $cName)) $score += 4;
+                            if (preg_match('/body|content|description|bio/i', $cName)) $score += 3;
+                            if (preg_match('/phone|mobile/i', $cName)) $score += 2;
+                        }
+                    }
+
+                    if ($score > 0) {
+                        $candidates[$tName] = $score;
+                    }
+                }
+
+                arsort($candidates);
+                $targetList = array_slice(array_keys($candidates), 0, 15);
+
+                if (empty($targetList)) {
+                    foreach ($allCatalogTables as $tName => $tMeta) {
+                        if ($this->isReadableTable($connection, $tName) && ($tMeta['rows_estimate'] ?? 0) > 0) {
+                            $targetList[] = $tName;
+                        }
+                        if (count($targetList) >= 8) break;
+                    }
+                }
+            }
+        }
+
+        if (empty($targetList)) {
+            $msg = "No suitable tables with data found to scan for dummy records in this database.";
+            return [
+                'success' => true,
+                'total_tables_scanned' => 0,
+                'scanned_tables' => [],
+                'tables_with_dummy_data' => [],
+                'total_dummy_records' => 0,
+                'summary_message' => $msg,
+                'safe_message' => $msg,
+                'details' => [],
+            ];
+        }
+
+        $scanned = [];
+        $tablesWithDummies = [];
+        $totalDummyCount = 0;
+        $perTableReports = [];
+
+        foreach ($targetList as $tName) {
+            try {
+                $report = $this->detect($connection, $tName, $sampleLimit);
+                $scanned[] = $tName;
+                $perTableReports[$tName] = $report;
+                if (!empty($report['dummy_count']) && $report['dummy_count'] > 0) {
+                    $tablesWithDummies[] = $report;
+                    $totalDummyCount += $report['dummy_count'];
+                }
+            } catch (\Throwable $e) {
+                continue;
+            }
+        }
+
+        $scannedCount = count($scanned);
+        if ($totalDummyCount > 0) {
+            $breakdown = [];
+            foreach ($tablesWithDummies as $item) {
+                $breakdown[] = "'{$item['table']}' ({$item['dummy_count']} records)";
+            }
+            $breakdownStr = implode(', ', $breakdown);
+            $msg = "Scanned {$scannedCount} table(s). Detected {$totalDummyCount} likely dummy/test record(s) across " . count($tablesWithDummies) . " table(s): {$breakdownStr}.";
+        } else {
+            $tableNamesStr = implode(', ', array_slice($scanned, 0, 5)) . ($scannedCount > 5 ? " and " . ($scannedCount - 5) . " more" : "");
+            $msg = "Scanned {$scannedCount} table(s) ({$tableNamesStr}). No obvious dummy or placeholder records detected in samples.";
+        }
+
+        return [
+            'success' => true,
+            'total_tables_scanned' => $scannedCount,
+            'scanned_tables' => $scanned,
+            'tables_with_dummy_data' => $tablesWithDummies,
+            'total_dummy_records' => $totalDummyCount,
+            'summary_message' => $msg,
+            'safe_message' => $msg,
+            'details' => $perTableReports,
+        ];
+    }
+
+    protected function isReadableTable(DbConnection $connection, string $tableName): bool
+    {
+        try {
+            $this->policy->assertCanReadTable($connection, $tableName);
+            return true;
+        } catch (\Throwable) {
+            return false;
+        }
+    }
 }

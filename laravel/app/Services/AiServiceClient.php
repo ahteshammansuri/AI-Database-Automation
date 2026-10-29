@@ -247,6 +247,21 @@ class AiServiceClient
     }
 
     /**
+     * Orbit's knowledge and the user's own documents searched with a query Orbit wrote (search_orbit_knowledge).
+     * Only the product partition and this user's partition are read.
+     */
+    public function searchOrbitKnowledge(int $userId, string $query, int $topK = 5): array
+    {
+        $res = $this->client()->post("{$this->baseUrl}/v1/ai/agent/knowledge", [
+            'user_id' => $userId,
+            'query' => $query,
+            'top_k' => max(1, min(10, $topK)),
+        ]);
+
+        return $res->successful() ? (array) ($res->json()['passages'] ?? []) : [];
+    }
+
+    /**
      * Extract raw text from a document (.pdf, .md, .txt) via Python AI microservice.
      */
     public function extractTextFromFile(string $filePath): string

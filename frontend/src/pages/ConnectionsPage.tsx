@@ -8,7 +8,8 @@ import {
 import { api } from "../services/api";
 import { ConnectionProfile } from "../types";
 import { StatusPill } from "../components/common/StatusPill";
-import { Card, EmptyState, FieldError, FormAlert, Loading, ModalShell, PageHeader } from "../components/ui/kit";
+import { EmptyState, FieldError, FormAlert, ModalShell, PageHeader } from "../components/ui/kit";
+import { ConnectionCardsSkeleton } from "../components/ui/PageSkeletons";
 import { SpotlightCard } from "../components/landing/primitives";
 import { SearchableSelect } from "../components/common/SearchableSelect";
 import { useLiveEvents } from "../context/LiveEventsContext";
@@ -31,7 +32,7 @@ interface SupportedEngine {
   description: string;
 }
 
-const SUPPORTED_ENGINES: SupportedEngine[] = [
+const DEFAULT_ENGINES: SupportedEngine[] = [
   {
     id: "mysql",
     name: "MySQL",
@@ -46,23 +47,7 @@ const SUPPORTED_ENGINES: SupportedEngine[] = [
     status: "active",
     port: 5432,
     badge: "Supported",
-    description: "PostgreSQL 14+ through the same adapter; the server needs the PostgreSQL PHP driver.",
-  },
-  {
-    id: "mssql",
-    name: "SQL Server",
-    status: "coming_soon",
-    port: 1433,
-    badge: "Not yet",
-    description: "SQL Server has no adapter yet.",
-  },
-  {
-    id: "mongodb",
-    name: "MongoDB",
-    status: "coming_soon",
-    port: 27017,
-    badge: "Not yet",
-    description: "MongoDB is not a relational SQL database and has no adapter yet.",
+    description: "PostgreSQL 14+ through dialect adapter; server needs the PostgreSQL PHP driver.",
   },
 ];
 
@@ -109,6 +94,7 @@ export const ConnectionsPage: React.FC = () => {
   const [actionMsg, setActionMsg] = useState<{ type: "success" | "error" | "info"; text: string } | null>(null);
 
   // Form State
+  const [supportedEngines, setSupportedEngines] = useState<SupportedEngine[]>(DEFAULT_ENGINES);
   const [selectedEngine, setSelectedEngine] = useState<string>("mysql");
   const [connectionMode, setConnectionMode] = useState<"manual" | "uri">("manual");
   const [showPassword, setShowPassword] = useState(false);
@@ -200,6 +186,19 @@ export const ConnectionsPage: React.FC = () => {
 
   useEffect(() => {
     loadConnections();
+    api.getEngines().then((catalog: any[]) => {
+      if (Array.isArray(catalog) && catalog.length > 0) {
+        const mapped: SupportedEngine[] = catalog.map((d: any) => ({
+          id: d.key,
+          name: d.label,
+          status: d.status === "supported" ? "active" : "coming_soon",
+          port: d.default_port ?? (d.key === "postgresql" ? 5432 : 3306),
+          badge: d.status === "supported" ? "Supported" : (d.status === "driver_missing" ? "Driver missing" : "Not yet"),
+          description: d.reason || (d.key === "mysql" ? "MySQL 8.0+ and MariaDB with full schema discovery and safe transactional writes." : "PostgreSQL 14+ through dialect adapter; server needs the PostgreSQL PHP driver."),
+        }));
+        setSupportedEngines(mapped);
+      }
+    }).catch(() => {});
   }, []);
 
   // Subscribe to live events for real-time updates without manual reload
@@ -366,6 +365,12 @@ export const ConnectionsPage: React.FC = () => {
     database_name: (v) => { const t = String(v ?? "").trim(); return /^[A-Za-z0-9_$\-]{1,64}$/.test(t) ? [null, t] : ["Database name has invalid characters.", null]; },
     username: (v) => { const t = String(v ?? "").trim(); return !t || t.length > 80 ? ["Username must be 1-80 characters.", null] : [null, t]; },
     ssl_mode: (v) => { const t = String(v ?? ""); return ["preferred", "required", "disabled"].includes(t) ? [null, t] : ["Choose preferred, required or disabled.", null]; },
+    access_mode: (v) => {
+      const t = String(v ?? "").toLowerCase();
+      return ["read_only", "read_write", "read_write_delete"].includes(t)
+        ? [null, t]
+        : ["Choose read_only, read_write, or read_write_delete.", null];
+    },
   };
 
   const formPayload = () => ({
@@ -383,7 +388,7 @@ export const ConnectionsPage: React.FC = () => {
     openTarget: "connections.add",
     target: "connections.form",
     fields: {
-      ...Object.fromEntries(["name", "host", "port", "database_name", "username", "ssl_mode"].map((name) => [name, {
+      ...Object.fromEntries(["name", "host", "port", "database_name", "username", "ssl_mode", "access_mode"].map((name) => [name, {
         get: () => (form as any)[name],
         set: (v: any) => {
           const [err, clean] = validators[name](v);
@@ -394,6 +399,11 @@ export const ConnectionsPage: React.FC = () => {
         },
         ...(name === "ssl_mode" ? { options: () => [
           { value: "preferred", label: "Preferred" }, { value: "required", label: "Required" }, { value: "disabled", label: "Disabled" },
+        ] } : {}),
+        ...(name === "access_mode" ? { options: () => [
+          { value: "read_only", label: "Read-only" },
+          { value: "read_write", label: "Read & write" },
+          { value: "read_write_delete", label: "Read, write & delete" },
         ] } : {}),
       }])),
       // The password is typed by the user; Orbit never reads or sets it.
@@ -645,7 +655,7 @@ export const ConnectionsPage: React.FC = () => {
       </AnimatePresence>
 
       {loading && connections.length === 0 ? (
-        <Card><Loading label="Loading connections…" /></Card>
+        <ConnectionCardsSkeleton />
       ) : connections.length === 0 ? (
         <EmptyState
           icon={Database}
@@ -786,7 +796,7 @@ export const ConnectionsPage: React.FC = () => {
           <div>
             <span className="da-label">Database engine</span>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-              {SUPPORTED_ENGINES.map((engine) => {
+              {supportedEngines.map((engine) => {
                 const isSelected = selectedEngine === engine.id;
                 const isAvailable = engine.status === "active";
                 return (

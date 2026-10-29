@@ -2,6 +2,7 @@
 
 namespace App\Filament\Widgets;
 
+use App\Filament\Widgets\Concerns\HasSkeletonPlaceholder;
 use App\Filament\Widgets\Concerns\RequiresDashboardPermission;
 use App\Models\User;
 use Filament\Widgets\ChartWidget;
@@ -9,6 +10,7 @@ use Illuminate\Support\Carbon;
 
 class SignupsChart extends ChartWidget
 {
+    use HasSkeletonPlaceholder;
     use RequiresDashboardPermission;
 
     protected static ?int $sort = 2;

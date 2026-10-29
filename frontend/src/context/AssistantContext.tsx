@@ -6,7 +6,7 @@ import { CharacterState } from "../components/agent/AuraCoreCharacter";
 import { redactSecretsFromUtterance } from "../services/secretRedactor";
 import { ttsAdapter } from "../services/ttsAdapter";
 import { pageStateService } from "../services/pageStateService";
-import { runUiAction } from "../services/orbitRuntime";
+import { abortGuidedTour, runUiAction, setGuidedTourVoice } from "../services/orbitRuntime";
 import { orbitStage } from "../services/orbitStage";
 import soundManager from "../services/soundEffects";
 import { ACTIVE_TASK_STATUSES, TERMINAL_STATUSES, deriveCharacterState } from "../services/orbitBehavior";
@@ -52,6 +52,7 @@ export interface AgentTask {
   target_resource_type?: string;
   target_resource_id?: string;
   error_message?: string;
+  slots?: Record<string, any>;
   timeline_events?: AgentTimelineEvent[];
   created_at: string;
 }
@@ -97,6 +98,15 @@ export interface ToolActivity {
   message?: string;
 }
 
+export interface AgentConversationItem {
+  id: number;
+  title: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  messages?: Array<{ id: number; role: string; content: string; created_at: string }>;
+}
+
 export { ACTIVE_TASK_STATUSES };
 
 interface AssistantContextType {
@@ -113,6 +123,10 @@ interface AssistantContextType {
   setCharacterState: (st: CharacterState) => void;
 
   conversationId: number | null;
+  conversations: AgentConversationItem[];
+  loadConversationsList: () => Promise<void>;
+  switchConversation: (id: number) => Promise<void>;
+  deleteConversation: (id: number) => Promise<void>;
   messages: AgentMessage[];
   activeTask: AgentTask | null;
   timelineEvents: AgentTimelineEvent[];
@@ -121,6 +135,9 @@ interface AssistantContextType {
   toolActivity: ToolActivity | null;
   speech: OrbitSpeech | null;
   narration: string | null;
+  /** Orbit's current thought (what it understood, what it does next), shown in its panel while it works. */
+  thinking: { text: string; next: string[]; model?: string } | null;
+  activeModel: ActiveAgentModel | null;
   isSpeaking: boolean;
   secureInputRequest: { kind: string; taskId: number } | null;
   queueStatus: QueueStatus | null;
@@ -150,6 +167,13 @@ interface AssistantContextType {
   startNewConversation: () => Promise<void>;
 }
 
+export interface ActiveAgentModel {
+  provider: string;
+  model: string;
+  label: string;
+  temperature?: number;
+}
+
 const AssistantContext = createContext<AssistantContextType | undefined>(undefined);
 
 const SECURE_LABEL: Record<string, string> = { database_password: "database password", api_key: "API key" };
@@ -177,6 +201,7 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [localState, setLocalState] = useState<CharacterState>("idle");
   const [conversationId, setConversationId] = useState<number | null>(null);
   const conversationIdRef = useRef<number | null>(null);
+  const [conversations, setConversations] = useState<AgentConversationItem[]>([]);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [activeTask, setActiveTask] = useState<AgentTask | null>(null);
   const activeTaskRef = useRef<AgentTask | null>(null);
@@ -186,6 +211,8 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [toolActivity, setToolActivity] = useState<ToolActivity | null>(null);
   const [speech, setSpeech] = useState<OrbitSpeech | null>(null);
   const [narration, setNarration] = useState<string | null>(null);
+  const [thinking, setThinking] = useState<{ text: string; next: string[]; model?: string } | null>(null);
+  const [activeModel, setActiveModel] = useState<ActiveAgentModel | null>(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [queueStatus, setQueueStatus] = useState<QueueStatus | null>(null);
   const loadingConversation = useRef<Promise<number | null> | null>(null);
@@ -197,6 +224,18 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   voiceEnabledRef.current = voiceResponsesEnabled;
   const spokenMessageIds = useRef<Set<number>>(new Set());
   const seenTimelineIds = useRef<Set<number>>(new Set());
+  const lastNarrationRef = useRef<{ text: string; time: number }>({ text: '', time: 0 });
+  // The last sentence Orbit said aloud: the same words are never spoken twice within a minute (a narration
+  // followed by an identical reply, or the same reply delivered twice).
+  const lastSpokenRef = useRef<{ text: string; time: number }>({ text: "", time: 0 });
+  const speakOnce = useCallback((text: string) => {
+    const now = Date.now();
+    const key = text.trim().toLowerCase();
+    if (key && lastSpokenRef.current.text === key && now - lastSpokenRef.current.time < 60000) return;
+    lastSpokenRef.current = { text: key, time: now };
+    void ttsAdapter.speak(text);
+  }, []);
+  useEffect(() => { setGuidedTourVoice(voiceResponsesEnabled); }, [voiceResponsesEnabled]);
 
   const { addListener, setFastPolling, status: liveStatus } = useLiveEvents();
   const { toast } = useToast();
@@ -251,8 +290,9 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     };
     setSpeech(next);
     setNarration(null);
-    if (voiceEnabledRef.current) void ttsAdapter.speak(text);
-  }, []);
+    // Keep thinking in state so user can inspect Chain of Thought in Orbit HUD
+    if (voiceEnabledRef.current) speakOnce(text);
+  }, [speakOnce]);
 
   // ------------------------------------------------------------------
   // Loading persisted state (initial load, reconnect, after events)
@@ -268,6 +308,7 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       const task: AgentTask | null = res?.active_task || null;
       setTask(task);
       setQueueStatus(res?.queue ?? null);
+      if (res?.active_model) setActiveModel(res.active_model);
       applyTimeline(task?.timeline_events || []);
       setTurnStage(task && ACTIVE_TASK_STATUSES.includes(task.status) ? task.stage || "QUEUED" : null);
       return { msgs, task };
@@ -292,12 +333,14 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     try {
       const listRes: any = await api.listAgentConversations();
       const list = listRes?.conversations || [];
+      setConversations(list);
       let targetId: number;
       if (list.length > 0) {
         targetId = list[0].id;
       } else {
         const created: any = await api.createAgentConversation("Orbit");
         targetId = created.conversation.id;
+        setConversations([created.conversation]);
       }
       setConversationId(targetId);
       conversationIdRef.current = targetId;
@@ -309,6 +352,7 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       const pref = prefRes?.preferences || {};
       if (pref.autonomy_level) setAutonomyLevelState(pref.autonomy_level);
       if (pref.voice_enabled !== undefined) setVoiceResponsesEnabled(Boolean(pref.voice_enabled));
+      if (prefRes?.active_model) setActiveModel(prefRes.active_model);
       return targetId;
     } catch (e) {
       console.warn("Failed to initialize Orbit conversation:", e);
@@ -319,6 +363,20 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   useEffect(() => {
     loadConversation();
   }, [loadConversation]);
+
+  useEffect(() => {
+    const handleModelRoleChanged = (e: any) => {
+      const detail = e.detail;
+      if (detail && detail.role === "planner") {
+        void refreshConversation();
+        void api.getAgentPreferences().then((prefRes: any) => {
+          if (prefRes?.active_model) setActiveModel(prefRes.active_model);
+        });
+      }
+    };
+    window.addEventListener("model-role-changed", handleModelRoleChanged);
+    return () => window.removeEventListener("model-role-changed", handleModelRoleChanged);
+  }, [refreshConversation]);
 
   // Reconcile with persisted server state whenever the live channel reconnects.
   const prevLiveStatus = useRef(liveStatus);
@@ -385,17 +443,61 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       const isCurrentTask = !current || current.id === p.task_id;
 
       switch (name) {
+        case "agent.model_updated":
+          if (p.label || p.model) {
+            const updated: ActiveAgentModel = {
+              provider: p.provider || "gemini",
+              model: p.model || "",
+              label: p.label || `${p.provider}: ${p.model}`,
+              temperature: p.temperature,
+            };
+            setActiveModel(updated);
+            setThinking((prev) => ({
+              text: prev?.text || "Analyzing database schema, permissions and user prompt.",
+              next: prev?.next || [],
+              model: updated.label,
+            }));
+          }
+          break;
         case "agent.ui_action":
           void runUiAction(p);
           break;
         case "agent.turn_stage":
-          if (isCurrentTask) setTurnStage(p.stage);
+          if (isCurrentTask) {
+            setTurnStage(p.stage);
+            if (p.model) {
+              setActiveModel((prev) => prev ? { ...prev, label: p.model } : { provider: "", model: p.model, label: p.model });
+              setThinking((prev) => ({
+                text: prev?.text || "Analyzing database schema, permissions and user prompt.",
+                next: prev?.next || [],
+                model: p.model,
+              }));
+            }
+          }
           if (p.stage === "THINKING") setToolActivity(null);
           break;
         case "agent.narration":
-          if (isCurrentTask) {
+          if (isCurrentTask && p.text) {
+            const now = Date.now();
+            if (lastNarrationRef.current.text === p.text && (now - lastNarrationRef.current.time) < 4000) {
+              break;
+            }
+            lastNarrationRef.current = { text: p.text, time: now };
             setNarration(p.text);
-            if (voiceEnabledRef.current && !ttsAdapter.isSpeaking()) void ttsAdapter.speak(p.text);
+            if (voiceEnabledRef.current && !ttsAdapter.isSpeaking()) speakOnce(p.text);
+          }
+          break;
+        case "agent.thinking":
+          if (isCurrentTask && (p.text || p.next?.length || p.model)) {
+            const modelToUse = p.model || activeModel?.label || undefined;
+            setThinking({
+              text: String(p.text || "Analyzing database schema, permissions and user prompt."),
+              next: Array.isArray(p.next) ? p.next.map(String) : [],
+              model: modelToUse,
+            });
+            if (p.model) {
+              setActiveModel((prev) => prev ? { ...prev, label: p.model } : { provider: "", model: p.model, label: p.model });
+            }
           }
           break;
         case "agent.tool_started":
@@ -419,7 +521,8 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           setActiveTask((prev) => {
             const next = prev && prev.id === p.task_id
               ? { ...prev, status: p.status, stage: p.stage, plan_version: p.plan_version, error_message: p.error_message,
-                  pending_tool_call: p.awaiting_confirmation_for ? { name: p.awaiting_confirmation_for, args: {} } : null }
+                  pending_tool_call: p.awaiting_confirmation_for ? { name: p.awaiting_confirmation_for, args: {} } : null,
+                  slots: p.slots || prev.slots }
               : prev;
             activeTaskRef.current = next;
             return next;
@@ -429,6 +532,16 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           }
           break;
         case "agent.speech":
+          if (p.model) {
+            setActiveModel((prev) => prev ? { ...prev, label: p.model } : { provider: "", model: p.model, label: p.model });
+          }
+          if (p.thought || p.model) {
+            setThinking((prev) => ({
+              text: p.thought || prev?.text || "",
+              next: prev?.next || [],
+              model: p.model || prev?.model || activeModel?.label || undefined,
+            }));
+          }
           // Speak right away from the event (the voice follows the action without a reload in between); the
           // conversation refreshes in the background and the same message is never spoken twice.
           presentSpeech(null, {
@@ -441,7 +554,7 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           break;
       }
     });
-  }, [addListener, presentSpeech, refreshConversation]);
+  }, [addListener, presentSpeech, refreshConversation, speakOnce]);
 
   // ------------------------------------------------------------------
   // Derived character state (never driven by timers for real work)
@@ -492,7 +605,14 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     }
 
     ttsAdapter.stop();
+    abortGuidedTour();
+    lastSpokenRef.current = { text: "", time: 0 }; // a new question may get the same answer again, spoken
     setNarration(null);
+    setThinking({
+      text: "Analyzing database schema, permissions and user prompt.",
+      next: [],
+      model: activeModel?.label || undefined,
+    });
     setMessages((prev) => [...prev, {
       id: -Date.now(), role: "user", content: redactedText, is_voice: isVoice, created_at: new Date().toISOString(),
     }]);
@@ -505,6 +625,7 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         convId, redactedText, isVoice, Object.keys(secure).length ? secure : undefined, pageStateService.getSnapshot()
       );
       if (res?.conversation?.messages) setMessages(res.conversation.messages);
+      if (res?.active_model) setActiveModel(res.active_model);
       if (res?.task) {
         setTask(res.task);
         setQueueStatus(res.queue ?? null);
@@ -516,6 +637,7 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           if (last && last.meta?.task_id === res.task.id) presentSpeech(last);
         }
       }
+      void loadConversationsList();
     } catch (err: any) {
       toast.error("Orbit could not take that request", err?.message || "The server did not accept the message.");
       setSpeech({
@@ -536,6 +658,7 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const interruptTask = async (action: "STOP" | "PAUSE" | "RESUME" = "STOP") => {
     ttsAdapter.stop();
+    if (action !== "RESUME") abortGuidedTour();
     const task = activeTaskRef.current;
     if (!task) return;
     try {
@@ -592,6 +715,45 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     }
   };
 
+  const loadConversationsList = useCallback(async () => {
+    try {
+      const res: any = await api.listAgentConversations();
+      setConversations(res?.conversations || []);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const switchConversation = useCallback(async (id: number) => {
+    if (id === conversationIdRef.current) return;
+    ttsAdapter.stop();
+    setConversationId(id);
+    conversationIdRef.current = id;
+    spokenMessageIds.current.clear();
+    setSpeech(null);
+    setNarration(null);
+    await refreshConversation(id);
+    void loadConversationsList();
+  }, [refreshConversation, loadConversationsList]);
+
+  const deleteConversation = useCallback(async (id: number) => {
+    try {
+      await api.deleteAgentConversation(id);
+      toast.success("Conversation deleted");
+      const updated = conversations.filter((c) => c.id !== id);
+      setConversations(updated);
+      if (conversationIdRef.current === id) {
+        if (updated.length > 0) {
+          await switchConversation(updated[0].id);
+        } else {
+          await startNewConversation();
+        }
+      }
+    } catch (e: any) {
+      toast.error("Error", e?.message || "Could not delete conversation");
+    }
+  }, [conversations, switchConversation, toast]);
+
   const startNewConversation = async () => {
     try {
       ttsAdapter.stop();
@@ -606,6 +768,7 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       setSpeech(null);
       setNarration(null);
       orbitStage.emit({ type: "return" });
+      void loadConversationsList();
     } catch (err: any) {
       toast.error("Error", err?.message || "Failed to start a new conversation.");
     }
@@ -623,6 +786,10 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         characterState,
         setCharacterState: setLocalState,
         conversationId,
+        conversations,
+        loadConversationsList,
+        switchConversation,
+        deleteConversation,
         messages,
         activeTask,
         timelineEvents,
@@ -631,6 +798,8 @@ export const AssistantProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         toolActivity,
         speech,
         narration,
+        thinking,
+        activeModel,
         isSpeaking,
         secureInputRequest,
         queueStatus,

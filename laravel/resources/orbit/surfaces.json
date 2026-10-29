@@ -1100,6 +1100,99 @@
       "openable": false,
       "fields": [],
       "actions": []
+    },
+    {
+      "id": "account.profile",
+      "route": "/account",
+      "title": "Profile settings",
+      "purpose": "Update your display name, email address, or timezone. Name and timezone can be updated directly; changing email requires typing current password.",
+      "openable": false,
+      "fields": [
+        {
+          "name": "name",
+          "label": "Name",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "email",
+          "label": "Email",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "timezone",
+          "label": "Timezone",
+          "type": "text",
+          "required": false
+        }
+      ],
+      "actions": [
+        {
+          "id": "save",
+          "label": "Save profile",
+          "consequential": false,
+          "timeout_s": 30
+        }
+      ]
+    },
+    {
+      "id": "account.password",
+      "route": "/account",
+      "title": "Password settings",
+      "purpose": "Change your account password. The user types current and new passwords in the form.",
+      "openable": false,
+      "fields": [
+        {
+          "name": "current_password",
+          "label": "Current password",
+          "type": "secret",
+          "required": true
+        },
+        {
+          "name": "password",
+          "label": "New password",
+          "type": "secret",
+          "required": true
+        },
+        {
+          "name": "password_confirmation",
+          "label": "Repeat new password",
+          "type": "secret",
+          "required": true
+        }
+      ],
+      "actions": [
+        {
+          "id": "save",
+          "label": "Change password",
+          "consequential": false,
+          "timeout_s": 30
+        }
+      ]
+    },
+    {
+      "id": "account.sessions",
+      "route": "/account",
+      "title": "Signed-in sessions",
+      "purpose": "Active signed-in sessions across browsers. Row action takes the session id.",
+      "openable": false,
+      "fields": [],
+      "actions": [
+        {
+          "id": "sign_out",
+          "label": "Sign out this session",
+          "row": true,
+          "consequential": false,
+          "timeout_s": 15
+        },
+        {
+          "id": "sign_out_all",
+          "label": "Sign out all other sessions",
+          "consequential": true,
+          "timeout_s": 20
+        }
+      ]
     }
   ]
 }

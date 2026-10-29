@@ -31,15 +31,20 @@ export interface RedactionResult {
  * Regex patterns targeting natural language expressions where users state secrets.
  */
 const SECRET_PATTERNS = [
-  // Database / User Passwords
+  // Database / User Passwords. Whole words only: "pass" alone is not one (Hindi "mere pass to …" means "I have …"),
+  // and neither is "compass is" or "bypass to".
   {
     type: "password" as const,
-    regex: /(?:(?:my|the|db|database|mysql|target|root)?\s*(?:password|pass|secret)\s*(?:is|to|:|equals|=)\s*)(["']?[^\s,;'"\)\.]+["']?)/gi,
+    regex: /\b(?:password|passwd|passcode|pwd)\b\s*(?:is|to|:|equals|=)\s*(["']?[^\s,;'").]+["']?)/gi,
+  },
+  {
+    type: "password" as const,
+    regex: /\bsecret\b\s*(?:is|:|equals|=)\s*(["']?[^\s,;'").]+["']?)/gi,
   },
   // API Keys (OpenAI, Anthropic, Gemini, generic)
   {
     type: "apiKey" as const,
-    regex: /(?:(?:api[_\-\s]?key|secret[_\-\s]?key|openai[_\-\s]?key|anthropic[_\-\s]?key|gemini[_\-\s]?key)\s*(?:is|to|:|equals|=)\s*)(["']?[^\s,;'"\)\.]+["']?)/gi,
+    regex: /\b(?:api[_\s-]?key|secret[_\s-]?key|openai[_\s-]?key|anthropic[_\s-]?key|gemini[_\s-]?key)\b\s*(?:is|to|:|equals|=)\s*(["']?[^\s,;'").]+["']?)/gi,
   },
   // Raw API Key tokens (sk-...)
   {
@@ -49,7 +54,7 @@ const SECRET_PATTERNS = [
   // Bearer / Auth Tokens
   {
     type: "token" as const,
-    regex: /(?:(?:bearer\s+token|auth[_\-\s]?token|access[_\-\s]?token)\s*(?:is|to|:|equals|=)\s*)(["']?[^\s,;'"\)\.]+["']?)/gi,
+    regex: /\b(?:bearer\s+token|auth[_\s-]?token|access[_\s-]?token)\b\s*(?:is|to|:|equals|=)\s*(["']?[^\s,;'").]+["']?)/gi,
   },
 ];
 

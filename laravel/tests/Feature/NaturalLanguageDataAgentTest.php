@@ -189,19 +189,33 @@ class NaturalLanguageDataAgentTest extends TestCase
         $this->assertArrayHasKey('label', $res['values'][0]);
     }
 
-    public function test_orbit_gets_a_schema_derived_hint_when_a_question_names_the_users_data(): void
+    public function test_orbit_retrieves_from_every_table_of_every_database_described_from_the_scans(): void
     {
-        // Real failure: "Aisa kaun sa user hai jisne sabse jyada order refund kare ho" was answered with a
-        // question back to the user. The hint comes from the user's own schema, in any language mix.
+        // Real failure: two databases both had a users table and Orbit used the first one. Every table of every
+        // database is described for retrieval, so the model sees each database that has it.
         $user = User::factory()->create();
-        $this->createMysqlConnection($user);
-        $builder = app(\App\Services\Agent\RuntimeContextBuilder::class);
+        $shop = $this->createMysqlConnection($user, 'Shop DB');
+        $blog = $this->createMysqlConnection($user, 'Blog DB');
+        foreach ([$shop, $blog] as $conn) {
+            \App\Models\SchemaSnapshot::create(['user_id' => $user->id, 'connection_id' => $conn->id, 'version' => 1, 'schema_payload' => ['tables' => [
+                ['name' => 'users', 'approx_rows' => 12, 'columns' => [
+                    ['name' => 'id', 'type' => 'int', 'is_primary_key' => true, 'is_nullable' => false],
+                    ['name' => 'email', 'type' => 'varchar(191)', 'is_unique' => true, 'is_nullable' => false],
+                    ['name' => 'status', 'type' => 'enum', 'is_nullable' => true, 'enum_values' => ['active', 'banned']],
+                ]],
+                ['name' => 'orders', 'columns' => [['name' => 'user_id', 'type' => 'int']], 'relationships' => [['foreign_key' => 'user_id', 'referenced_table' => 'users']]],
+            ]]]);
+        }
 
-        $hint = $builder->dataHint($user, 'Aisa kaun sa user hai jisne sabse jyada order refund kare ho');
-        $this->assertEqualsCanonicalizing(['orders', 'users'], $hint['tables']);
-        $this->assertContains("orders.status = 'refunded'", $hint['values']);
-        $this->assertNull($builder->dataHint($user, 'remove my knowledge document Old pricing notes'));
-        $this->assertNull($builder->dataHint($user, 'can you tour me on this project'));
+        $docs = app(\App\Services\Agent\RuntimeContextBuilder::class)->schemaDocuments($user);
+
+        $users = array_values(array_filter($docs, fn ($d) => $d['table'] === 'users'));
+        $this->assertSame([$shop->id, $blog->id], array_column($users, 'connection_id'));
+        $this->assertStringContainsString("Table users in \"Shop DB\" (connection_id {$shop->id}, database shopfx)", $users[0]['text']);
+        $this->assertStringContainsString('email varchar(191) (unique, required)', $users[0]['text']);
+        $this->assertStringContainsString('allowed values: status: active, banned', $users[0]['text']);
+        $orders = array_values(array_filter($docs, fn ($d) => $d['table'] === 'orders'))[0];
+        $this->assertStringContainsString('links: user_id → users', $orders['text']);
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -238,11 +252,11 @@ class NaturalLanguageDataAgentTest extends TestCase
     public function test_orbit_answers_a_hinglish_data_question_through_the_focused_path(): void
     {
         $user = User::factory()->create();
-        $this->createMysqlConnection($user);
+        $conn = $this->createMysqlConnection($user);
         $tied = \Illuminate\Support\Facades\DB::build(['driver' => 'mysql', 'host' => '127.0.0.1', 'port' => 3317, 'database' => 'shopfx', 'username' => 'root', 'password' => 'fxroot'])
             ->select("SELECT u.name FROM orders o JOIN users u ON u.id = o.user_id WHERE o.status = 'refunded' GROUP BY u.id, u.name HAVING COUNT(*) = 2");
         $this->fakeOrbitDataPath(
-            ['success' => true, 'kind' => 'data_question', 'question' => 'Which user has the most refunded orders?'],
+            ['success' => true, 'kind' => 'data_question', 'question' => 'Which user has the most refunded orders?', 'connection_id' => $conn->id],
             ['success' => true, 'speech_text' => 'Sabse zyada refunds ka tie hai: ' . implode(', ', array_column($tied, 'name')) . ', har ek ke 2 refunds.'],
         );
 
@@ -263,8 +277,8 @@ class NaturalLanguageDataAgentTest extends TestCase
     public function test_if_the_reply_call_fails_the_verified_result_is_spoken(): void
     {
         $user = User::factory()->create();
-        $this->createMysqlConnection($user);
-        $this->fakeOrbitDataPath(['success' => true, 'kind' => 'data_question', 'question' => 'Which user has the most refunded orders?']);
+        $conn = $this->createMysqlConnection($user);
+        $this->fakeOrbitDataPath(['success' => true, 'kind' => 'data_question', 'question' => 'Which user has the most refunded orders?', 'connection_id' => $conn->id]);
 
         $c = $this->orbitSay($user, 'which user has the most order refunds');
 
@@ -276,10 +290,10 @@ class NaturalLanguageDataAgentTest extends TestCase
     {
         // Real qwen reply: "Rahul Verma ki bahut hi jyada order kiye ho" (the count was missing).
         $user = User::factory()->create();
-        $this->createMysqlConnection($user);
+        $conn = $this->createMysqlConnection($user);
         $sql = 'SELECT u.id, u.name, COUNT(o.id) AS order_count FROM users u JOIN orders o ON o.user_id = u.id GROUP BY u.id, u.name ORDER BY order_count DESC, u.id';
         Http::fake([
-            '*/v1/ai/agent/route' => Http::response(['success' => true, 'kind' => 'data_question', 'question' => 'Which customer placed the most orders?'], 200),
+            '*/v1/ai/agent/route' => Http::response(['success' => true, 'kind' => 'data_question', 'question' => 'Which customer placed the most orders?', 'connection_id' => $conn->id], 200),
             '*/v1/ai/agent/answer' => Http::response(['success' => true, 'speech_text' => 'Rahul Verma ki bahut hi jyada order kiye ho'], 200),
             '*/v1/ai/data/sql' => Http::response(['success' => true, 'sql' => $sql, 'assumptions' => [], 'clarification' => ''], 200),
             '*/v1/sql/validate-select' => Http::response(['valid' => true, 'sql' => "{$sql} LIMIT 50", 'tables' => ['users', 'orders'], 'errors' => [], 'limit' => 50], 200),
@@ -315,15 +329,21 @@ class NaturalLanguageDataAgentTest extends TestCase
         $this->assertSame('From the full loop.', \App\Models\AgentTask::where('conversation_id', $c->id)->first()->last_decision['speech_text']);
     }
 
-    public function test_messages_that_do_not_name_the_users_data_never_take_the_focused_path(): void
+    public function test_a_route_answer_without_one_of_the_users_databases_goes_to_the_full_loop(): void
     {
+        // Which database a data question is about must be one the retrieved tables are in; anything else (here no
+        // database at all) is left to the full agent loop and no query runs.
         $user = User::factory()->create();
         $this->createMysqlConnection($user);
-        $this->fakeOrbitDataPath(['success' => true, 'kind' => 'data_question', 'question' => 'x']);
+        $this->fakeOrbitDataPath(['success' => true, 'kind' => 'data_question', 'question' => 'How many users are there?']);
 
-        $this->orbitSay($user, 'can you tour me on this project');
+        $this->orbitSay($user, 'how many users are there');
 
-        $this->assertSame(0, $this->urlsCalled('/v1/ai/agent/route'));
+        $route = Http::recorded(fn ($r) => str_contains($r->url(), '/v1/ai/agent/route'))->first()[0]->data();
+        $this->assertArrayHasKey('schema_documents', $route);
+        $this->assertNotSame('', trim((string) $route['instructions']), 'the administrators\' routing instructions are sent');
+        $this->assertContains('/account', array_column($route['pages'], 'route'));
+        $this->assertSame(0, $this->urlsCalled('/v1/ai/data/sql'));
         $this->assertGreaterThanOrEqual(1, $this->urlsCalled('/v1/ai/agent/decide'));
     }
 

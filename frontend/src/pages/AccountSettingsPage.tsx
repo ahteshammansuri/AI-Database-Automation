@@ -4,10 +4,15 @@ import { Cpu, KeyRound, Laptop, Loader2, LogOut, Save, UserRound } from "lucide-
 import { api } from "../services/api";
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "../context/ToastContext";
-import { Card, FieldError, FormAlert, Loading, PageHeader } from "../components/ui/kit";
+import { FieldError, FormAlert, PageHeader } from "../components/ui/kit";
+import { AccountSettingsSkeleton, UsageSkeleton } from "../components/ui/PageSkeletons";
 import { TimezoneSelect } from "../components/ui/TimezoneSelect";
 import { browserTimeZone, defaultTimeZone, formatInstant, relativeFromNow } from "../lib/schedule";
 import { serverFieldErrors, type FieldErrors } from "../lib/validation";
+import { useOrbitSurface } from "../hooks/useOrbitSurface";
+import { useOrbitTarget } from "../hooks/useOrbitTarget";
+import { actionTarget, fieldTarget } from "../services/orbitSurfaces";
+import { pageStateService } from "../services/pageStateService";
 
 interface Session { id: number; name: string; created_at: string | null; last_used_at: string | null; expires_at: string | null; current: boolean }
 interface ProfileData {
@@ -65,7 +70,10 @@ export const AccountSettingsPage: React.FC = () => {
     }
   };
 
-  useEffect(() => { void load(); }, []);
+  useEffect(() => {
+    pageStateService.setRoute("/account", "Account settings");
+    void load();
+  }, []);
   useEffect(() => {
     let cancelled = false;
     api.profileUsage(days).then((u) => { if (!cancelled) { setUsage(u); setUsageError(null); } })
@@ -73,11 +81,176 @@ export const AccountSettingsPage: React.FC = () => {
     return () => { cancelled = true; };
   }, [days]);
 
+  const profileFormRef = useOrbitTarget<HTMLFormElement>("account.profile");
+  const nameRef = useOrbitTarget<HTMLInputElement>(fieldTarget("account.profile", "name"));
+  const emailRef = useOrbitTarget<HTMLInputElement>(fieldTarget("account.profile", "email"));
+  const timezoneRef = useOrbitTarget<HTMLDivElement>(fieldTarget("account.profile", "timezone"));
+  const saveProfileBtnRef = useOrbitTarget<HTMLButtonElement>(actionTarget("account.profile", "save"));
+
+  const passwordFormRef = useOrbitTarget<HTMLFormElement>("account.password");
+  const currentPwRef = useOrbitTarget<HTMLInputElement>(fieldTarget("account.password", "current_password"));
+  const newPwRef = useOrbitTarget<HTMLInputElement>(fieldTarget("account.password", "password"));
+  const confirmPwRef = useOrbitTarget<HTMLInputElement>(fieldTarget("account.password", "password_confirmation"));
+  const savePwBtnRef = useOrbitTarget<HTMLButtonElement>(actionTarget("account.password", "save"));
+
+  const sessionsRef = useOrbitTarget<HTMLDivElement>("account.sessions");
+
+  useOrbitSurface("account.profile", () => ({
+    target: "account.profile",
+    fields: {
+      name: {
+        get: () => name,
+        set: (v) => {
+          setName(String(v ?? ""));
+          setProfileErrors((x) => ({ ...x, name: "" }));
+        },
+        target: () => fieldTarget("account.profile", "name"),
+      },
+      email: {
+        get: () => email,
+        set: (v) => {
+          setEmail(String(v ?? ""));
+          setProfileErrors((x) => ({ ...x, email: "" }));
+        },
+        target: () => fieldTarget("account.profile", "email"),
+      },
+      timezone: {
+        get: () => (followBrowser ? browserTimeZone() : timezone),
+        set: (v) => {
+          const val = String(v ?? "").trim();
+          if (!val || val === "browser" || val === "auto") {
+            setFollowBrowser(true);
+            setTimezone(browserTimeZone());
+          } else {
+            setFollowBrowser(false);
+            setTimezone(val);
+          }
+          setProfileErrors((x) => ({ ...x, timezone: "" }));
+        },
+        target: () => fieldTarget("account.profile", "timezone"),
+      },
+    },
+    actions: {
+      save: {
+        target: () => actionTarget("account.profile", "save"),
+        run: async () => {
+          const errs: FieldErrors = {};
+          if (!name.trim()) errs.name = "Enter your name.";
+          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) errs.email = "Enter a valid email address.";
+          const emailChanged = data ? email.trim().toLowerCase() !== data.profile.email.toLowerCase() : false;
+          if (emailChanged && !currentForEmail) errs.current_password = "Enter your current password to change your email address.";
+          setProfileErrors(errs);
+          if (Object.keys(errs).length) {
+            return { success: false, message: Object.values(errs)[0] };
+          }
+          setSavingProfile(true);
+          try {
+            await api.updateProfile({
+              name: name.trim(),
+              email: email.trim(),
+              timezone: followBrowser ? null : timezone,
+              current_password: emailChanged ? currentForEmail : undefined,
+            });
+            setCurrentForEmail("");
+            await Promise.all([refreshUser(), load()]);
+            toast.success("Profile saved", followBrowser ? "Times follow this browser's timezone." : `Times and new schedules use ${timezone}.`);
+            return { success: true, message: `Profile saved: Name updated to '${name.trim()}'.` };
+          } catch (err: any) {
+            const f = serverFieldErrors(err);
+            if (Object.keys(f).length) setProfileErrors(f);
+            return { success: false, message: err.message || "Profile not saved." };
+          } finally {
+            setSavingProfile(false);
+          }
+        },
+      },
+    },
+    describe: () => ({
+      name,
+      email,
+      timezone: followBrowser ? `Browser (${browserTimeZone()})` : timezone,
+    }),
+  }));
+
+  useOrbitSurface("account.password", () => ({
+    target: "account.password",
+    fields: {
+      current_password: {
+        get: () => "",
+        set: (v) => { setPw((p) => ({ ...p, current: String(v ?? "") })); setPwErrors((x) => ({ ...x, current_password: "" })); },
+        target: () => fieldTarget("account.password", "current_password"),
+      },
+      password: {
+        get: () => "",
+        set: (v) => { setPw((p) => ({ ...p, next: String(v ?? "") })); setPwErrors((x) => ({ ...x, password: "" })); },
+        target: () => fieldTarget("account.password", "password"),
+      },
+      password_confirmation: {
+        get: () => "",
+        set: (v) => { setPw((p) => ({ ...p, confirm: String(v ?? "") })); setPwErrors((x) => ({ ...x, password_confirmation: "" })); },
+        target: () => fieldTarget("account.password", "password_confirmation"),
+      },
+    },
+    actions: {
+      save: {
+        target: () => actionTarget("account.password", "save"),
+        run: async () => {
+          const min = data?.password_min_length || 6;
+          const errs: FieldErrors = {};
+          if (!pw.current) errs.current_password = "Enter your current password.";
+          if (pw.next.length < min) errs.password = `Use at least ${min} characters.`;
+          else if (pw.next === pw.current) errs.password = "Choose a password different from the current one.";
+          if (pw.confirm !== pw.next) errs.password_confirmation = "The two new passwords do not match.";
+          setPwErrors(errs);
+          if (Object.keys(errs).length) return { success: false, message: Object.values(errs)[0] };
+          setSavingPw(true);
+          try {
+            const res = await api.changePassword({ current_password: pw.current, password: pw.next, password_confirmation: pw.confirm, sign_out_others: signOutOthers });
+            setPw({ current: "", next: "", confirm: "" });
+            toast.success("Password changed", res?.message);
+            void load();
+            return { success: true, message: res?.message || "Password changed successfully." };
+          } catch (err: any) {
+            const f = serverFieldErrors(err);
+            if (Object.keys(f).length) setPwErrors(f);
+            return { success: false, message: err.message || "Password not changed." };
+          } finally {
+            setSavingPw(false);
+          }
+        },
+      },
+    },
+  }));
+
+  useOrbitSurface("account.sessions", () => ({
+    target: "account.sessions",
+    actions: {
+      sign_out: {
+        target: (row) => actionTarget("account.sessions", "sign_out", row),
+        run: async (row) => {
+          const id = row ? parseInt(row, 10) : undefined;
+          await signOut(id);
+          return { success: true, message: `Signed out session #${row}.` };
+        },
+      },
+      sign_out_all: {
+        target: () => actionTarget("account.sessions", "sign_out_all"),
+        run: async () => {
+          await signOut();
+          return { success: true, message: "Signed out all other sessions." };
+        },
+      },
+    },
+    describe: () => ({
+      sessions: (data?.sessions || []).map((s) => ({ id: s.id, current: s.current, name: s.name, last_used: s.last_used_at })),
+    }),
+  }));
+
   if (!data) {
     return (
       <div className="mx-auto max-w-4xl space-y-6">
         <PageHeader eyebrow="Account" title="Account settings" />
-        {loadError ? <FormAlert message={loadError} /> : <Card><Loading label="Loading your account…" /></Card>}
+        {loadError ? <FormAlert message={loadError} /> : <AccountSettingsSkeleton />}
       </div>
     );
   }
@@ -157,18 +330,18 @@ export const AccountSettingsPage: React.FC = () => {
         description={`Your profile, password and signed-in devices. Member since ${data.profile.created_at ? formatInstant(data.profile.created_at, tz) : "—"} · ${data.workspace.connections} connection${data.workspace.connections === 1 ? "" : "s"}, ${data.workspace.automations} scheduled automation${data.workspace.automations === 1 ? "" : "s"}, ${data.workspace.runs_this_month} run${data.workspace.runs_this_month === 1 ? "" : "s"} this month.`}
       />
 
-      <form onSubmit={saveProfile} noValidate className="da-card space-y-5 p-6">
+      <form ref={profileFormRef} onSubmit={saveProfile} noValidate className="da-card space-y-5 p-6">
         <h2 className="flex items-center gap-2 text-[16px] font-bold text-slate-900"><UserRound className="h-4 w-4 text-indigo-600" /> Profile</h2>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div>
             <label className="da-label" htmlFor="acct-name">Name</label>
-            <input {...ida("acct-name", profileErrors.name)} value={name} maxLength={255} autoComplete="name"
+            <input ref={nameRef} {...ida("acct-name", profileErrors.name)} value={name} maxLength={255} autoComplete="name"
               onChange={(e) => { setName(e.target.value); setProfileErrors((x) => ({ ...x, name: "" })); }} className={`da-input${profileErrors.name ? " da-input-invalid" : ""}`} />
             <FieldError id="acct-name" message={profileErrors.name} />
           </div>
           <div>
             <label className="da-label" htmlFor="acct-email">Email</label>
-            <input {...ida("acct-email", profileErrors.email)} type="email" value={email} maxLength={255} autoComplete="email"
+            <input ref={emailRef} {...ida("acct-email", profileErrors.email)} type="email" value={email} maxLength={255} autoComplete="email"
               onChange={(e) => { setEmail(e.target.value); setProfileErrors((x) => ({ ...x, email: "" })); }} className={`da-input${profileErrors.email ? " da-input-invalid" : ""}`} />
             <FieldError id="acct-email" message={profileErrors.email} />
           </div>
@@ -181,7 +354,7 @@ export const AccountSettingsPage: React.FC = () => {
               <p className="da-help">Approval emails go to your new address from now on.</p>
             </div>
           )}
-          <div className="sm:col-span-2">
+          <div ref={timezoneRef} className="sm:col-span-2">
             <span className="da-label">Timezone</span>
             <label className="mb-2 flex items-center gap-2 text-[13px] text-slate-700">
               <input type="checkbox" checked={followBrowser} onChange={(e) => setFollowBrowser(e.target.checked)} className="rounded border-slate-300 text-indigo-600" />
@@ -193,28 +366,36 @@ export const AccountSettingsPage: React.FC = () => {
           </div>
         </div>
         <div className="flex justify-end">
-          <button type="submit" disabled={savingProfile} className="da-btn da-btn-primary">
+          <button ref={saveProfileBtnRef} type="submit" disabled={savingProfile} className="da-btn da-btn-primary">
             {savingProfile ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Save profile
           </button>
         </div>
       </form>
 
-      <form onSubmit={savePassword} noValidate className="da-card space-y-5 p-6">
+      <form ref={passwordFormRef} onSubmit={savePassword} noValidate className="da-card space-y-5 p-6">
         <h2 className="flex items-center gap-2 text-[16px] font-bold text-slate-900"><KeyRound className="h-4 w-4 text-indigo-600" /> Password</h2>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-          {([
-            ["current_password", "Current password", "current", "current-password"],
-            ["password", "New password", "next", "new-password"],
-            ["password_confirmation", "Repeat the new password", "confirm", "new-password"],
-          ] as const).map(([key, label, field, ac]) => (
-            <div key={key}>
-              <label className="da-label" htmlFor={`acct-${key}`}>{label}</label>
-              <input {...ida(`acct-${key}`, pwErrors[key])} type="password" value={pw[field]} autoComplete={ac} maxLength={255}
-                onChange={(e) => { setPw((p) => ({ ...p, [field]: e.target.value })); setPwErrors((x) => ({ ...x, [key]: "" })); }}
-                className={`da-input${pwErrors[key] ? " da-input-invalid" : ""}`} />
-              <FieldError id={`acct-${key}`} message={pwErrors[key]} />
-            </div>
-          ))}
+          <div>
+            <label className="da-label" htmlFor="acct-current_password">Current password</label>
+            <input ref={currentPwRef} {...ida("acct-current_password", pwErrors.current_password)} type="password" value={pw.current} autoComplete="current-password" maxLength={255}
+              onChange={(e) => { setPw((p) => ({ ...p, current: e.target.value })); setPwErrors((x) => ({ ...x, current_password: "" })); }}
+              className={`da-input${pwErrors.current_password ? " da-input-invalid" : ""}`} />
+            <FieldError id="acct-current_password" message={pwErrors.current_password} />
+          </div>
+          <div>
+            <label className="da-label" htmlFor="acct-password">New password</label>
+            <input ref={newPwRef} {...ida("acct-password", pwErrors.password)} type="password" value={pw.next} autoComplete="new-password" maxLength={255}
+              onChange={(e) => { setPw((p) => ({ ...p, next: e.target.value })); setPwErrors((x) => ({ ...x, password: "" })); }}
+              className={`da-input${pwErrors.password ? " da-input-invalid" : ""}`} />
+            <FieldError id="acct-password" message={pwErrors.password} />
+          </div>
+          <div>
+            <label className="da-label" htmlFor="acct-password_confirmation">Repeat the new password</label>
+            <input ref={confirmPwRef} {...ida("acct-password_confirmation", pwErrors.password_confirmation)} type="password" value={pw.confirm} autoComplete="new-password" maxLength={255}
+              onChange={(e) => { setPw((p) => ({ ...p, confirm: e.target.value })); setPwErrors((x) => ({ ...x, password_confirmation: "" })); }}
+              className={`da-input${pwErrors.password_confirmation ? " da-input-invalid" : ""}`} />
+            <FieldError id="acct-password_confirmation" message={pwErrors.password_confirmation} />
+          </div>
         </div>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <label className="flex items-center gap-2 text-[13px] text-slate-700">
@@ -223,14 +404,14 @@ export const AccountSettingsPage: React.FC = () => {
           </label>
           <span className="flex items-center gap-3">
             <span className="text-[12px] text-slate-500">At least {min} characters.</span>
-            <button type="submit" disabled={savingPw} className="da-btn da-btn-primary">
+            <button ref={savePwBtnRef} type="submit" disabled={savingPw} className="da-btn da-btn-primary">
               {savingPw ? <Loader2 className="h-4 w-4 animate-spin" /> : <KeyRound className="h-4 w-4" />} Change password
             </button>
           </span>
         </div>
       </form>
 
-      <section className="da-card p-6">
+      <section ref={sessionsRef} className="da-card p-6">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
           <h2 className="flex items-center gap-2 text-[16px] font-bold text-slate-900"><Laptop className="h-4 w-4 text-indigo-600" /> Signed-in sessions · {data.sessions.length}</h2>
           {others.length > 0 && (
@@ -271,7 +452,7 @@ export const AccountSettingsPage: React.FC = () => {
           </div>
         </div>
         <FormAlert message={usageError} />
-        {!usage ? <Loading label="Adding up your AI usage…" className="py-8" /> : usage.totals.calls === 0 ? (
+        {!usage ? (usageError ? null : <UsageSkeleton />) : usage.totals.calls === 0 ? (
           <p className="text-[13px] text-slate-500">No AI calls in the last {usage.days} days.</p>
         ) : (
           <div className="space-y-4">

@@ -1,16 +1,15 @@
 import React from "react";
-import { Navigate } from "react-router-dom";
+import { Navigate, useLocation } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
+import { PortalShellSkeleton } from "../ui/ShellSkeletons";
 
 export const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { isAuthenticated, isLoading } = useAuth();
+  const { pathname } = useLocation();
 
   if (isLoading) {
-    return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center text-slate-500">
-        <div className="w-8 h-8 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin" />
-      </div>
-    );
+    // Same frame as the boot placeholder, so it does not blink when it takes over.
+    return <PortalShellSkeleton path={pathname} fade={false} />;
   }
 
   if (!isAuthenticated) {

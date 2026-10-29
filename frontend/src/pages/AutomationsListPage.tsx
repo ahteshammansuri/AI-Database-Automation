@@ -3,7 +3,8 @@ import { Link, useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { CheckCircle, Clock, Cpu, Database, FileText, History, Mail, Pause, Play, Plus, RefreshCw, Settings, Trash2, Workflow, X } from "lucide-react";
 import { api } from "../services/api";
-import { Card, EmptyState, FieldError, FormAlert, Loading, ModalShell, PageHeader } from "../components/ui/kit";
+import { EmptyState, FieldError, FormAlert, ModalShell, PageHeader } from "../components/ui/kit";
+import { AutomationListSkeleton } from "../components/ui/PageSkeletons";
 import { ariaFor, clearError, focusFirstError, invalid, rules, serverFieldErrors, validate, type FieldErrors } from "../lib/validation";
 import { SpotlightCard } from "../components/landing/primitives";
 import { SearchableSelect } from "../components/common/SearchableSelect";
@@ -281,7 +282,7 @@ export const AutomationsListPage: React.FC = () => {
       </AnimatePresence>
 
       {loading && automations.length === 0 ? (
-        <Card><Loading label="Loading automations…" /></Card>
+        <AutomationListSkeleton />
       ) : automations.length === 0 ? (
         <EmptyState
           icon={Workflow}

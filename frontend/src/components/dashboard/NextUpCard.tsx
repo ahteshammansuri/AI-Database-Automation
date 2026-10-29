@@ -4,6 +4,8 @@ import { AnimatePresence, motion } from "framer-motion";
 import { AlertTriangle, ArrowRight, CheckCircle2, Clock, Eye, Loader2, PenLine, Send, Sparkles } from "lucide-react";
 import { api } from "../../services/api";
 import { useLiveEvents } from "../../context/LiveEventsContext";
+import { Skeleton } from "../ui/Skeleton";
+import { NextUpBodySkeleton } from "../ui/PageSkeletons";
 
 interface RunCard {
   execution_id: number;
@@ -168,9 +170,13 @@ export const NextUpCard: React.FC = () => {
       <span className="flex items-center gap-2 text-[12px] font-semibold uppercase tracking-[0.14em] text-slate-400">
         <Clock className="h-3.5 w-3.5 text-cyan-300" /> {data?.current && data.current.stage !== "published" && data.current.stage !== "failed" ? "Running now" : "Next up"}
       </span>
-      <span className="rounded-full bg-white/10 px-2.5 py-0.5 text-[11.5px] font-semibold text-slate-200">
-        {data?.active_schedules ?? 0} active schedule{data?.active_schedules === 1 ? "" : "s"}
-      </span>
+      {data ? (
+        <span className="rounded-full bg-white/10 px-2.5 py-0.5 text-[11.5px] font-semibold text-slate-200">
+          {data.active_schedules ?? 0} active schedule{data.active_schedules === 1 ? "" : "s"}
+        </span>
+      ) : (
+        !failed && <Skeleton className="h-5 w-28 rounded-full" />
+      )}
     </div>
   );
 
@@ -188,7 +194,7 @@ export const NextUpCard: React.FC = () => {
     body = failed ? (
       <p className="py-8 text-center text-[13px] text-slate-400">Could not load the schedule. It refreshes on its own.</p>
     ) : (
-      <div className="py-10 text-center"><Loader2 className="mx-auto h-6 w-6 animate-spin text-slate-500" /></div>
+      <NextUpBodySkeleton />
     );
   } else if (c && c.stage === "published") {
     body = (

@@ -41,7 +41,10 @@ The platform organizes user operations across a streamlined sidebar navigation:
   - Fast, purposeful Framer Motion transitions (duration 180ms–250ms).
   - Subtle hover lift on interactive cards (`whileHover={{ y: -2 }}`).
   - Full support for `prefers-reduced-motion`.
-  - Realistic loading skeletons matching exact content dimensions.
+  - Realistic loading skeletons matching exact content dimensions:
+    - Portal: building blocks in `frontend/src/components/ui/Skeleton.tsx`, one placeholder per page or section in `PageSkeletons.tsx`, and the first-load screens (portal shell, landing, sign-in, emailed review link) in `ShellSkeletons.tsx`. Colours are tokens in `index.css` (`--skel-*`): they turn dark on ink surfaces (`bg-ink`, `da-ink`, `.dark`) and back to light inside white cards and modals.
+    - Admin panel: lazy dashboard widgets render a skeleton of their own kind (stats, chart with its real heading, table) through `App\Filament\Widgets\Concerns\HasSkeletonPlaceholder`; styles and light/dark tokens are in `resources/views/filament/admin/theme.blade.php`.
+    - Skeletons stand in for data on its way. Buttons keep their inline spinner while an action runs, and long server work keeps `WorkProgress`, which shows the steps the server reports.
 
 ---
 

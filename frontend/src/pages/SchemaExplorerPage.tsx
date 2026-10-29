@@ -4,7 +4,8 @@ import { motion } from "framer-motion";
 import { TableProperties, Database, ShieldAlert, Workflow, Cpu, Search, CheckCircle2, FileEdit, Layers, RefreshCw, Bookmark, Check, AlertTriangle, Table2, Columns3, Rows3 } from "lucide-react";
 import { api } from "../services/api";
 import { ConnectionProfile, SchemaResponse, SchemaTable } from "../types";
-import { Card, EmptyState, FieldError, Loading, PageHeader } from "../components/ui/kit";
+import { EmptyState, FieldError, PageHeader } from "../components/ui/kit";
+import { SchemaExplorerSkeleton } from "../components/ui/PageSkeletons";
 import { ariaFor, invalid, rules, serverFieldErrors, validateField } from "../lib/validation";
 import { humanStatus } from "../components/common/statusText";
 import { SearchableSelect } from "../components/common/SearchableSelect";
@@ -394,9 +395,7 @@ export const SchemaExplorerPage: React.FC = () => {
       {error && <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-[13px] text-rose-800">{error}</div>}
 
       {isInitializing || loadingSchema ? (
-        <Card>
-          <Loading label={isInitializing ? "Opening your workspace…" : "Reading tables, columns, keys and relationships…"} />
-        </Card>
+        <SchemaExplorerSkeleton label={isInitializing ? "Opening your workspace…" : "Reading tables, columns, keys and relationships…"} />
       ) : connections.length === 0 ? (
         <EmptyState
           icon={Database}

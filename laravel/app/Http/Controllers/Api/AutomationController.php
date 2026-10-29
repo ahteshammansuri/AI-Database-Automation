@@ -55,7 +55,7 @@ class AutomationController extends Controller
         $rules = [
             'name' => ($existing ? 'sometimes|' : 'required|') . 'string|max:255',
             'connection_id' => ($existing ? 'sometimes|integer' : 'required|integer'),
-            'target_table' => ($existing ? 'sometimes|string|max:64' : 'required|string|max:64|regex:/^[A-Za-z0-9_]+$/'),
+            'target_table' => ($existing ? 'sometimes|string|max:64' : 'required|string|max:64|regex:/^[A-Za-z0-9_$\\-]+$/'),
             'operation_mode' => ($existing ? 'sometimes|' : 'required|') . 'string|in:AI_CREATE,AI_ENRICH,MANUAL_SCHEDULE',
             'field_mappings' => ($existing ? 'sometimes|' : 'required|') . 'array|min:1|max:200',
             'field_mappings.*.field_name' => 'required_with:field_mappings|string|max:64',
@@ -336,7 +336,7 @@ class AutomationController extends Controller
     {
         $validated = $request->validate([
             'connection_id' => 'required|integer',
-            'target_table' => 'required|string|max:64|regex:/^[A-Za-z0-9_]+$/',
+            'target_table' => 'required|string|max:64|regex:/^[A-Za-z0-9_$\\-]+$/',
         ]);
         $connection = DbConnection::where('user_id', $request->user()->id)->where('id', $validated['connection_id'])->firstOrFail();
         if ($msg = $this->assertTableAutomatable($connection, $validated['target_table'])) {
@@ -550,7 +550,7 @@ class AutomationController extends Controller
     {
         $validated = $request->validate([
             'connection_id' => 'required|integer',
-            'target_table' => 'required|string|max:64|regex:/^[A-Za-z0-9_]+$/',
+            'target_table' => 'required|string|max:64|regex:/^[A-Za-z0-9_$\\-]+$/',
             'payload' => 'required|array|max:200',
             'publish_now' => 'nullable|boolean',
             'dry_run' => 'nullable|boolean',

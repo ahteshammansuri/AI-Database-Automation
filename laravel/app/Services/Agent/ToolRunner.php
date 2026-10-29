@@ -41,6 +41,22 @@ class ToolRunner
         $check = SurfaceCatalog::check($tool, $args);
         $payload = $args;
         $timeout = $check['timeout'];
+        // Tours: what to show and say comes from the page explanations stored in the database.
+        if ($tool === 'give_tour') {
+            $payload = ['pages' => PageTours::tourPages()];
+            if ($payload['pages'] === []) {
+                return $this->result(false, 'NOTHING_TO_SHOW', 'No page explanations are set up yet (admin panel › Orbit › Page tours).');
+            }
+        } elseif ($tool === 'explain_page') {
+            $route = PageTours::routeFor($args, $task);
+            $page = $route ? PageTours::page($route, (string) ($args['depth'] ?? 'overview')) : null;
+            if ($page === null) {
+                return $this->result(false, 'NOTHING_TO_SHOW', $route
+                    ? "There is no explanation for {$route} yet."
+                    : 'Which page should I explain? Name it, or open it first.');
+            }
+            $payload = $page;
+        }
         if ($tool === 'press' && !empty($check['consequential'])) {
             // Reaching here means ToolPolicyGate saw the user's explicit confirmation, so the browser may
             // click the page's own confirmation popup (visibly). Without this flag it never does.
@@ -135,13 +151,24 @@ class ToolRunner
         $secrets = $this->vault->allValues($task);
         try {
             $raw = AgentToolRegistry::executeTool($user, $tool, $execArgs);
+        } catch (\App\Services\Data\DataException $e) {
+            $cat = $this->classify($e->errorCode . ' ' . $e->getMessage());
+            return $this->result(false, $cat, SecretVault::scrub($e->getMessage(), $secrets), data: $e->toArray());
+        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $e) {
+            return $this->result(false, 'NOT_FOUND', "The requested resource was not found in your workspace.");
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            return $this->result(false, 'INVALID_ARGS', SecretVault::scrub($e->getMessage(), $secrets));
         } catch (\Throwable $e) {
             report($e);
-            return $this->result(false, 'TOOL_ERROR', SecretVault::scrub("The {$tool} tool failed unexpectedly.", $secrets));
+            $msg = $e->getMessage() ?: "The {$tool} tool failed.";
+            return $this->result(false, $this->classify($msg), SecretVault::scrub($msg, $secrets));
         }
 
         $success = (bool) ($raw['success'] ?? false);
-        $message = (string) ($raw['message'] ?? $raw['error'] ?? ($success ? 'Done.' : 'Failed.'));
+        $message = (string) ($raw['safe_message'] ?? $raw['message'] ?? $raw['error'] ?? '');
+        if ($message === '' || $message === 'Done.' || $message === 'Done') {
+            $message = $success ? "Completed {$tool}." : "The {$tool} tool failed.";
+        }
         $message = SecretVault::scrub(mb_substr($message, 0, 500), $secrets);
         $category = $success ? null : ($raw['error_category'] ?? $this->classify((string) ($raw['error'] ?? '')));
 
@@ -202,6 +229,13 @@ class ToolRunner
             unset($data['eligible_tables']);
         }
 
+        $nextStep = $result['next_step'] ?? null;
+        if (!$nextStep && !empty($data['requires_typed_confirmation']) && !empty($data['confirmation_phrase'])) {
+            $nextStep = "Preview created. Do NOT call preview again. Return REQUEST_CONFIRMATION asking the user to confirm by typing: \"{$data['confirmation_phrase']}\".";
+        } elseif (!$nextStep && !empty($data['requires_confirmation'])) {
+            $nextStep = "Preview created. Do NOT call preview again. Return REQUEST_CONFIRMATION asking the user to confirm.";
+        }
+
         return array_filter([
             'success' => $result['success'],
             'status' => $result['status'],
@@ -213,7 +247,7 @@ class ToolRunner
             'resource_refs' => $result['resource_refs'] ?: null,
             'data' => $this->trim($data, 3, 15, 200) ?: null,
             'secure_input_type' => $result['secure_input_type'] ?? null,
-            'next_step' => $result['next_step'] ?? null,
+            'next_step' => $nextStep,
         ], fn ($v) => $v !== null);
     }
 
@@ -287,7 +321,7 @@ class ToolRunner
         return match (true) {
             str_contains($e, 'access denied') || str_contains($e, 'authentication') => 'AUTH_FAILED',
             str_contains($e, 'unknown database') || str_contains($e, 'not found') => 'NOT_FOUND',
-            (bool) preg_match('/ssrf|not allowed|blocked|prohibit|restricted|sensitive|violates/', $e) => 'POLICY_BLOCKED',
+            (bool) preg_match('/ssrf|not allowed|blocked|prohibit|restricted|sensitive|violates|disabled|refuse/', $e) => 'POLICY_BLOCKED',
             str_contains($e, 'timed out') || str_contains($e, 'timeout') => 'TIMEOUT',
             (bool) preg_match('/refused|getaddrinfo|unknown mysql server host|no route|network is unreachable|name or service/', $e) => 'UNREACHABLE',
             (bool) preg_match('/missing|required|must|invalid/', $e) => 'INVALID_ARGS',

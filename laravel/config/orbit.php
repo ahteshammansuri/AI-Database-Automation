@@ -17,6 +17,8 @@ return [
     // One model decision may take minutes on a busy CPU-only machine: wait rather than fail (turn budget is 1500 s).
     'decide_timeout_seconds' => (int) env('ORBIT_DECIDE_TIMEOUT', 480),
     'max_repairs' => (int) env('ORBIT_MAX_REPAIRS', 1),
+    // A task waiting for the user longer than this no longer captures new messages; they start a new task.
+    'open_task_ttl_minutes' => (int) env('ORBIT_OPEN_TASK_TTL_MINUTES', 120),
     // Time budget for the four real checks of the model readiness test (AI providers page).
     'readiness_budget_seconds' => (int) env('ORBIT_READINESS_BUDGET_SECONDS', 240),
 

@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { AlertTriangle, Check, Copy, Hand, Laptop, Loader2, Lock, MonitorSmartphone, QrCode as QrIcon, RefreshCw, ScanLine, Smartphone, Unplug, Wifi } from "lucide-react";
+import { AlertTriangle, Check, Copy, Hand, Laptop, Lock, MonitorSmartphone, QrCode as QrIcon, RefreshCw, ScanLine, Smartphone, Unplug, Wifi } from "lucide-react";
 import { FormAlert, ModalShell } from "../ui/kit";
+import { Select2 } from "../ui/Select2";
+import { PairingCodeSkeleton } from "../ui/PageSkeletons";
 import { QrCode } from "./QrCode";
 import { PhoneOrbitMock } from "./PhoneOrbitMock";
 import { useOrbitRemote } from "../../context/OrbitRemoteContext";
@@ -110,9 +112,7 @@ export const OrbitRemoteModal: React.FC = () => {
         <FormAlert message={r.error} />
 
         {(r.phase === "starting" || r.phase === "idle" || (r.phase === "pending" && (!r.link || remaining === 0))) && (
-          <div className="grid place-items-center gap-3 py-16 text-[13px] text-slate-500">
-            <Loader2 className="h-6 w-6 animate-spin text-indigo-600" /> Making a one-time code…
-          </div>
+          <PairingCodeSkeleton />
         )}
 
         {r.phase === "pending" && r.link && remaining > 0 && (
@@ -156,17 +156,20 @@ export const OrbitRemoteModal: React.FC = () => {
                   </p>
                 )}
                 {r.link.reach === "lan" && r.lanAddresses.length > 1 && (
-                  <label className="mt-2 flex items-center gap-2 text-[12px] text-slate-500">
-                    Network
-                    <select
-                      value={r.preferredHost ?? r.lanAddresses[0]}
-                      onChange={(e) => r.setPreferredHost(e.target.value)}
-                      className="da-input w-auto py-1 font-mono text-[12px]"
-                      aria-label="Network address for your phone"
-                    >
-                      {r.lanAddresses.map((ip) => <option key={ip} value={ip}>{ip}</option>)}
-                    </select>
-                  </label>
+                  <div className="mt-2 flex items-center gap-2 text-[12px] text-slate-500">
+                    <span className="shrink-0 font-medium">Network</span>
+                    <div className="flex-1 max-w-[200px]">
+                      <Select2
+                        size="xs"
+                        value={r.preferredHost ?? r.lanAddresses[0]}
+                        onChange={(val) => r.setPreferredHost(String(val))}
+                        options={r.lanAddresses.map((ip) => ({ value: ip, label: ip }))}
+                        showSearch={false}
+                        ariaLabel="Network address for your phone"
+                        className="font-mono"
+                      />
+                    </div>
+                  </div>
                 )}
                 {r.link.reach === "local" && (
                   <p className="mt-2 flex items-start gap-1.5 text-[12px] leading-relaxed text-amber-700">

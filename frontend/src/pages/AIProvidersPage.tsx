@@ -5,6 +5,8 @@ import { api } from "../services/api";
 import { AIProviderInfo } from "../types";
 import { ModelRolesSection } from "../components/agent/ModelRolesSection";
 import { FieldError, FormAlert, ModalShell, PageHeader } from "../components/ui/kit";
+import { Select2 } from "../components/ui/Select2";
+import { ProviderCardsSkeleton } from "../components/ui/PageSkeletons";
 import { ariaFor, clearError, focusFirstError, invalid, rules, serverFieldErrors, validate, type FieldErrors } from "../lib/validation";
 import { SpotlightCard } from "../components/landing/primitives";
 import { useOrbitSurface } from "../hooks/useOrbitSurface";
@@ -244,6 +246,7 @@ export const AIProvidersPage: React.FC = () => {
       </section>
 
       {/* Providers */}
+      {loading && providers.length === 0 ? <ProviderCardsSkeleton /> : (
       <div className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3">
         {providers.map((p, idx) => {
           const testRes = testResults[p.provider_id];
@@ -306,6 +309,7 @@ export const AIProvidersPage: React.FC = () => {
           );
         })}
       </div>
+      )}
 
       {/* Model roles */}
       <ModelRolesSection />
@@ -357,13 +361,28 @@ export const AIProvidersPage: React.FC = () => {
                 </div>
                 {editingProvider.models && editingProvider.models.length > 0 ? (
                   <div className="space-y-2">
-                    <select id="provider-model" ref={modelRef as any} value={modelName} onChange={(e) => { setModelName(e.target.value); setFieldErrors((x) => clearError(x, "model_name")); }}
-                      className={`da-input cursor-pointer font-mono${invalid(fieldErrors.model_name)}`} {...ariaFor("provider-model", fieldErrors.model_name)}>
-                      {!editingProvider.models.includes(modelName) && modelName && <option value={modelName}>{modelName} (current)</option>}
-                      {editingProvider.models.map((mod) => (
-                        <option key={mod} value={mod}>{mod} {mod === "gemini-3.5-flash-lite" ? "⭐ (Recommended & High Availability)" : ""}</option>
-                      ))}
-                    </select>
+                    <Select2
+                      id="provider-model"
+                      value={modelName}
+                      onChange={(val) => {
+                        setModelName(String(val));
+                        setFieldErrors((x) => clearError(x, "model_name"));
+                      }}
+                      options={[
+                        ...(!editingProvider.models.includes(modelName) && modelName
+                          ? [{ value: modelName, label: `${modelName} (current)` }]
+                          : []),
+                        ...editingProvider.models.map((mod) => ({
+                          value: mod,
+                          label: mod,
+                          badge: mod === "gemini-3.5-flash-lite" ? "⭐ Recommended" : undefined,
+                        })),
+                      ]}
+                      invalid={!!fieldErrors.model_name}
+                      showSearch={editingProvider.models.length > 5}
+                      className="font-mono"
+                      ariaLabel="Model"
+                    />
                     <div className="flex flex-wrap gap-1.5">
                       {editingProvider.models.map((mod) => (
                         <button key={mod} type="button" onClick={() => { setModelName(mod); setFieldErrors((x) => clearError(x, "model_name")); }}

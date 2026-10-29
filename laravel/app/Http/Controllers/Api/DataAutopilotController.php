@@ -50,7 +50,7 @@ class DataAutopilotController extends Controller
     {
         return $request->validate([
             'connection_id' => 'required|integer',
-            'table_name' => 'required|string|max:64|regex:/^[A-Za-z0-9_]+$/',
+            'table_name' => 'required|string|max:64|regex:/^[A-Za-z0-9_$\\-]+$/',
             'name' => 'required|string|max:120',
             'rows_per_run' => 'required|integer|min:1|max:' . SampleDataService::maxRows(),
             'instructions' => 'nullable|string|max:1000',

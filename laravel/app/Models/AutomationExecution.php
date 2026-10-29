@@ -16,6 +16,9 @@ class AutomationExecution extends Model
     /** States after which an execution will never change again on its own. */
     public const TERMINAL_STATUSES = ['PUBLISHED', 'FAILED', 'SKIPPED', 'CANCELLED', 'REJECTED', 'MISSED'];
 
+    /** States in which a worker is writing or publishing the run right now (it must not be started again). */
+    public const IN_FLIGHT_STATUSES = ['QUEUED', 'GENERATING', 'REGENERATING', 'PUBLISHING', 'PENDING_GENERATION', 'RUNNING'];
+
     protected $fillable = [
         'user_id',
         'automation_id',

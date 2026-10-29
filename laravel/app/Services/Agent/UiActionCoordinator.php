@@ -29,6 +29,8 @@ class UiActionCoordinator
         'surface.press',
         'surface.ask_secret_in_form',
         'surface.show_me',
+        'surface.give_tour',
+        'surface.explain_page',
     ];
 
     /** Connection form fields the UI may set (never the password). */

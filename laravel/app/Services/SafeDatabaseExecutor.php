@@ -218,7 +218,7 @@ class SafeDatabaseExecutor
         if (!in_array(strtolower((string) ($connection->db_type ?: 'mysql')), ['mysql', 'mariadb'], true)) {
             throw new Exception("Automations can currently write to MySQL connections only; '{$connection->name}' is " . ($connection->db_type ?? 'unknown') . '.');
         }
-        if (!preg_match('/^[A-Za-z0-9_]+$/', $tableName)) {
+        if (!preg_match('/^[A-Za-z0-9_$\\-]+$/', $tableName)) {
             throw new Exception("Invalid table name '{$tableName}'.");
         }
         if ($this->safetyService->isTableSensitive($tableName)) {
@@ -458,7 +458,7 @@ class SafeDatabaseExecutor
         $policy = strtoupper((string) ($opts['creation_policy'] ?? $opts['policy'] ?? 'REUSE_EXISTING_ONLY'));
         $base = ['column' => $column, 'table' => $refTable, 'lookup' => $val, 'resolved_id' => null];
 
-        if (!preg_match('/^[A-Za-z0-9_]+$/', (string) $refTable) || !preg_match('/^[A-Za-z0-9_]+$/', (string) $refCol)) {
+        if (!preg_match('/^[A-Za-z0-9_$\\-]+$/', (string) $refTable) || !preg_match('/^[A-Za-z0-9_$\\-]+$/', (string) $refCol)) {
             return $base + ['status' => 'error', 'action' => 'FAILED', 'details' => "Invalid relation target for `{$column}`."];
         }
 

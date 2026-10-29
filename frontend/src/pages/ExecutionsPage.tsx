@@ -3,7 +3,9 @@ import { motion, AnimatePresence } from "framer-motion";
 import { History, Eye, Clock, CheckCircle, AlertCircle, RotateCcw, XCircle, PauseCircle, PlayCircle, Zap, Layers, FileText, FileEdit, Save, Database, Cpu, BookOpen, Tag, Copy, Check } from "lucide-react";
 import { api } from "../services/api";
 import { StatusPill } from "../components/common/StatusPill";
-import { Card, EmptyState, FieldError, Loading, PageHeader } from "../components/ui/kit";
+import { EmptyState, FieldError, PageHeader } from "../components/ui/kit";
+import { Skeleton } from "../components/ui/Skeleton";
+import { ExecutionDetailSkeleton, ExecutionsTableSkeleton } from "../components/ui/PageSkeletons";
 import { draftPayloadErrors, focusFirstError, invalid, serverFieldErrors, type FieldErrors } from "../lib/validation";
 
 const recordFieldId = (key: string) => `record-field-${key}`;
@@ -431,7 +433,7 @@ export const ExecutionsPage: React.FC = () => {
       )}
 
       {loading && executions.length === 0 ? (
-        <Card><Loading label="Loading runs…" /></Card>
+        <ExecutionsTableSkeleton />
       ) : executions.length === 0 ? (
         <EmptyState icon={History} title="No runs yet" description="Run an automation or publish something manually and it shows up here, step by step." />
       ) : (
@@ -631,12 +633,9 @@ export const ExecutionsPage: React.FC = () => {
                         Run #{selectedExecution.id}
                       </h3>
                       <StatusPill status={selectedExecution.status} size="sm" />
-                      {loadingDetail && (
-                        <div className="w-3.5 h-3.5 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin" />
-                      )}
                     </div>
                     <p className="text-xs text-slate-500 mt-0.5">
-                      <span className="font-semibold text-slate-800">{selectedExecution.automation?.name || (selectedExecution.automation_id ? `Automation #${selectedExecution.automation_id}` : "Loading…")}</span>
+                      <span className="font-semibold text-slate-800">{selectedExecution.automation?.name || (selectedExecution.automation_id ? `Automation #${selectedExecution.automation_id}` : <Skeleton className="inline-block h-3 w-28 align-middle" />)}</span>
                       {selectedExecution.automation?.target_table && <> · writes to <span className="font-mono font-semibold text-indigo-600">{selectedExecution.automation.target_table}</span></>}
                       {selectedExecution.automation?.connection?.name && <> in {selectedExecution.automation.connection.name}</>}
                     </p>
@@ -784,7 +783,7 @@ export const ExecutionsPage: React.FC = () => {
                   </div>
                 )}
 
-                {(() => {
+                {loadingDetail ? <ExecutionDetailSkeleton /> : (() => {
                   const payload =
                     selectedExecution.payload ||
                     selectedExecution.result_details?.payload ||

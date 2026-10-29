@@ -12,6 +12,7 @@ import { api } from "../services/api";
 import { ConnectionProfile, SchemaResponse, KnowledgeDocument, AIProviderInfo } from "../types";
 import { SearchableSelect } from "../components/common/SearchableSelect";
 import { FieldError, ModalShell, PageHeader } from "../components/ui/kit";
+import { BuilderStartSkeleton } from "../components/ui/PageSkeletons";
 import { usePlatform } from "../context/PlatformContext";
 import { ariaFor, clearError, focusFirstError, invalid, knowledgeFileRules, rules, serverFieldErrors, validate, type FieldErrors } from "../lib/validation";
 import { InlineAiFieldAssist } from "../components/common/InlineAiFieldAssist";
@@ -220,20 +221,51 @@ export const AutomationBuilderPage: React.FC = () => {
   // The draft lives on the server (every step, the connection, the table and each column choice), so it survives
   // closing the tab or opening the builder on another device. A draft from the old per-tab storage is moved over once.
   const applyDraft = (d: any) => {
-    if (d.name) setName(d.name);
-    if (d.targetTable) setTargetTable(d.targetTable);
+    if (d.name !== undefined && d.name !== null) setName(d.name);
+    if (d.targetTable !== undefined && d.targetTable !== null) setTargetTable(d.targetTable);
     if (d.mode) setMode(d.mode);
-    if (d.aiConfig) setAiConfig((p) => ({ ...p, ...d.aiConfig }));
-    if (d.genOptions) setGenOptions((p) => ({ ...p, ...d.genOptions }));
-    if (d.schedule) setSchedule({ ...defaultSchedule(tz0), ...d.schedule });
-    if (d.approval) setApproval((p) => ({ ...p, ...d.approval }));
+    if (d.aiConfig) {
+      setAiConfig((p) => ({
+        ...p,
+        ...d.aiConfig,
+        provider: d.aiConfig.provider ?? p.provider,
+        model: d.aiConfig.model ?? "",
+        topic: d.aiConfig.topic ?? "",
+        document_ids: Array.isArray(d.aiConfig.document_ids) ? d.aiConfig.document_ids : [],
+      }));
+    }
+    if (d.genOptions) {
+      setGenOptions((p) => ({
+        ...p,
+        ...d.genOptions,
+        tone: d.genOptions.tone ?? p.tone,
+        length: d.genOptions.length ?? p.length,
+        content_format: d.genOptions.content_format ?? p.content_format,
+        image_provider: d.genOptions.image_provider ?? p.image_provider,
+        image_style: d.genOptions.image_style ?? "",
+      }));
+    }
+    if (d.schedule) {
+      setSchedule({
+        ...defaultSchedule(tz0),
+        ...d.schedule,
+        weekly_days: Array.isArray(d.schedule.weekly_days) ? d.schedule.weekly_days : [],
+      });
+    }
+    if (d.approval) {
+      setApproval((p) => ({
+        ...p,
+        ...d.approval,
+        reviewer_email: d.approval.reviewer_email ?? "",
+      }));
+    }
     if (d.mappings && d.targetTable) {
       setMappings(d.mappings);
       mappingsTableRef.current = `${d.connectionId}:${d.targetTable}`;
     }
     if (d.connectionId) setSelectedConnId(d.connectionId);
     if (d.selectedTemplateId) setSelectedTemplateId(d.selectedTemplateId);
-    if (d.naturalPrompt) setNaturalPrompt(d.naturalPrompt);
+    if (d.naturalPrompt !== undefined && d.naturalPrompt !== null) setNaturalPrompt(d.naturalPrompt);
     if (d.docsTouched) setDocsTouched(true);
     if (d.step) setStep(Math.min(d.step, 5));
   };
@@ -270,7 +302,7 @@ export const AutomationBuilderPage: React.FC = () => {
   useEffect(() => {
     if (!hydrated) return;
     // Nothing started yet (only automatic defaults): no draft to keep.
-    if (!name.trim() && !selectedTemplateId && !naturalPrompt.trim() && step === 1) {
+    if (!(name || "").trim() && !selectedTemplateId && !(naturalPrompt || "").trim() && step === 1) {
       setDraftState("idle");
       return;
     }
@@ -420,20 +452,20 @@ export const AutomationBuilderPage: React.FC = () => {
 
   // ---------------------------------------------------------------- payload
   const buildAutomationPayload = () => ({
-    name: name.trim(),
+    name: (name || "").trim(),
     connection_id: selectedConnId,
     target_table: targetTable,
     operation_mode: manual ? "MANUAL_SCHEDULE" : "AI_CREATE",
     field_mappings: serializeMappings(fieldPlan, mappings),
     ai_provider: manual ? undefined : aiConfig.provider,
-    ai_model: manual ? undefined : aiConfig.model || undefined,
-    prompt_context: manual ? undefined : aiConfig.topic.trim() || undefined,
+    ai_model: manual ? undefined : (aiConfig.model || "").trim() || undefined,
+    prompt_context: manual ? undefined : (aiConfig.topic || "").trim() || undefined,
     generation_options: manual ? undefined : {
       tone: genOptions.tone,
       length: genOptions.length,
       content_format: genOptions.content_format,
       image_provider: genOptions.image_provider,
-      image_style: genOptions.image_style.trim() || undefined,
+      image_style: (genOptions.image_style || "").trim() || undefined,
     },
     knowledge_document_ids: manual ? [] : aiConfig.document_ids,
     schedule_type: schedule.frequency,
@@ -444,7 +476,7 @@ export const AutomationBuilderPage: React.FC = () => {
     publication_time: schedule.publication_time,
     timezone: schedule.timezone,
     requires_approval: approval.require_approval,
-    reviewer_email: approval.reviewer_email.trim() || undefined,
+    reviewer_email: (approval.reviewer_email || "").trim() || undefined,
     timeout_policy: approval.timeout_policy,
     is_active: true,
   });
@@ -452,7 +484,7 @@ export const AutomationBuilderPage: React.FC = () => {
   // ---------------------------------------------------------------- actions
   const handleProposeAutomation = async () => {
     if (!selectedConnId) return setError("Select a database connection first.");
-    if (!naturalPrompt.trim()) return setError("Describe what you want to automate first.");
+    if (!(naturalPrompt || "").trim()) return setError("Describe what you want to automate first.");
     try {
       setIsProposing(true);
       setError(null);
@@ -509,7 +541,7 @@ export const AutomationBuilderPage: React.FC = () => {
   const [suggestedDocs, setSuggestedDocs] = useState<{ id: number; title: string; score: number }[]>([]);
   const [suggesting, setSuggesting] = useState(false);
   useEffect(() => {
-    const topic = aiConfig.topic.trim();
+    const topic = (aiConfig.topic || "").trim();
     if (step !== 3 || manual || knowledgeDocs.length === 0 || topic.length < 8) return;
     let cancelled = false;
     const t = setTimeout(async () => {
@@ -543,7 +575,7 @@ export const AutomationBuilderPage: React.FC = () => {
       setPreview(null);
       setPreviewEvents([]);
       const res = await api.previewAutomationStream(
-        { ...buildAutomationPayload(), name: name.trim() || "Preview", include_images: true },
+        { ...buildAutomationPayload(), name: (name || "").trim() || "Preview", include_images: true },
         (e) => setPreviewEvents((prev) => [...prev, e]),
       );
       setPreview(res);
@@ -727,7 +759,7 @@ export const AutomationBuilderPage: React.FC = () => {
   const [nameDraft, setNameDraft] = useState("");
   const [nameDraftError, setNameDraftError] = useState<string | null>(null);
   const saveInlineName = () => {
-    const t = nameDraft.trim();
+    const t = (nameDraft || "").trim();
     if (!t) return setNameDraftError("Give the automation a name.");
     if (t.length > 255) return setNameDraftError("Name must be 255 characters or fewer.");
     setName(t);
@@ -764,7 +796,7 @@ export const AutomationBuilderPage: React.FC = () => {
       plan_prompt: { get: () => naturalPrompt, set: (v) => { setNaturalPrompt(String(v ?? "")); return null; }, target: () => stepTarget(1) },
     },
     actions: {
-      propose_plan: { enabled: () => !!selectedConnId && !!naturalPrompt.trim(), run: async () => { await handleProposeAutomation(); return { success: true, message: "Plan applied; review each step.", data: { name, targetTable, mode } }; } },
+      propose_plan: { enabled: () => !!selectedConnId && !!(naturalPrompt || "").trim(), run: async () => { await handleProposeAutomation(); return { success: true, message: "Plan applied; review each step.", data: { name, targetTable, mode } }; } },
       next: { run: () => goNext(1) },
     },
   }), step === 1);
@@ -979,7 +1011,7 @@ export const AutomationBuilderPage: React.FC = () => {
       preview: { run: async () => { await handlePreview(); return { success: true, message: "Preview generated (shown on screen)." }; } },
       back: { run: () => goBack(4) },
       create: {
-        enabled: () => !!selectedConnId && !!name.trim() && !isSubmitting,
+        enabled: () => !!selectedConnId && !!(name || "").trim() && !isSubmitting,
         run: async () => {
           try {
             setIsSubmitting(true);
@@ -1107,10 +1139,7 @@ export const AutomationBuilderPage: React.FC = () => {
             </div>
 
             {loadingConnections ? (
-              <div className="space-y-3 py-12 text-center text-[13px] text-slate-500">
-                <Loader2 className="mx-auto h-7 w-7 animate-spin text-indigo-600" />
-                <p>Loading your database connections…</p>
-              </div>
+              <BuilderStartSkeleton />
             ) : connections.length === 0 ? (
               <div className="space-y-3 rounded-2xl border border-amber-200 bg-amber-50 p-6 text-[13px] text-amber-800">
                 <p className="text-[15px] font-bold">Connect a database first</p>
@@ -1142,7 +1171,7 @@ export const AutomationBuilderPage: React.FC = () => {
                   <label htmlFor="nl-plan" className="flex items-center gap-2 text-[14px] font-bold text-slate-900"><span className="grid h-7 w-7 place-items-center rounded-lg bg-white text-indigo-600 shadow-xs"><Sparkles className="h-4 w-4" /></span> Or describe it in plain words</label>
                   <textarea id="nl-plan" rows={2} value={naturalPrompt} onChange={(e) => setNaturalPrompt(e.target.value)} placeholder="e.g. One practical article about cloud databases every weekday for two weeks, in the right category, with a banner image. Email me to approve; publish at 9 AM." className="da-input resize-none" />
                   <div className="flex justify-end">
-                    <button type="button" disabled={isProposing || !selectedConnId || !naturalPrompt.trim()} onClick={handleProposeAutomation} className="da-btn da-btn-accent">
+                    <button type="button" disabled={isProposing || !selectedConnId || !(naturalPrompt || "").trim()} onClick={handleProposeAutomation} className="da-btn da-btn-accent">
                       {isProposing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
                       {isProposing ? "Reading your schema…" : "Fill in the steps for me"}
                     </button>
@@ -1268,9 +1297,9 @@ export const AutomationBuilderPage: React.FC = () => {
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <label htmlFor="topic" className="text-[12.5px] font-semibold text-slate-700">Topic and direction</label>
-                    <InlineAiFieldAssist fieldName="topic" currentValue={aiConfig.topic} topic={name} targetTable={targetTable} onApply={(v) => setAiConfig((p) => ({ ...p, topic: v }))} />
+                    <InlineAiFieldAssist fieldName="topic" currentValue={aiConfig.topic || ""} topic={name} targetTable={targetTable} onApply={(v) => setAiConfig((p) => ({ ...p, topic: v }))} />
                   </div>
-                  <textarea id="topic" rows={3} value={aiConfig.topic} onChange={(e) => setAiConfig((p) => ({ ...p, topic: e.target.value }))} placeholder="e.g. Practical guides on running MySQL in production for small teams: indexing, backups, migrations and monitoring."
+                  <textarea id="topic" rows={3} value={aiConfig.topic || ""} onChange={(e) => setAiConfig((p) => ({ ...p, topic: e.target.value }))} placeholder="e.g. Practical guides on running MySQL in production for small teams: indexing, backups, migrations and monitoring."
                     className={`da-input${invalid(fieldErrors.topic)}`} {...ariaFor("topic", fieldErrors.topic)} />
                   <FieldError id="topic" message={fieldErrors.topic} />
                 </div>
@@ -1323,7 +1352,7 @@ export const AutomationBuilderPage: React.FC = () => {
                         ]}
                       />
                       {fieldPlan?.image_provider && genOptions.image_provider === "auto" && <p className="mt-1 text-[11px] text-slate-500">{fieldPlan.image_provider.reason}</p>}
-                      <input id="automation-image-style" value={genOptions.image_style} onChange={(e) => setGenOptions((p) => ({ ...p, image_style: e.target.value }))} placeholder="Optional style, e.g. flat illustration, warm colors"
+                      <input id="automation-image-style" value={genOptions.image_style || ""} onChange={(e) => setGenOptions((p) => ({ ...p, image_style: e.target.value }))} placeholder="Optional style, e.g. flat illustration, warm colors"
                         className={`da-input mt-2${invalid(fieldErrors.image_style)}`} {...ariaFor("automation-image-style", fieldErrors.image_style)} />
                       <FieldError id="automation-image-style" message={fieldErrors.image_style} />
                     </div>
@@ -1365,7 +1394,7 @@ export const AutomationBuilderPage: React.FC = () => {
                           {models.length > 0 ? (
                             <SearchableSelect id="automation-model" invalid={!!fieldErrors.model} value={aiConfig.model} onChange={(v) => setAiConfig((p) => ({ ...p, model: String(v) }))} options={models.map((m) => ({ value: m, label: m }))} placeholder="Choose a model" />
                           ) : (
-                            <input id="automation-model" value={aiConfig.model} onChange={(e) => setAiConfig((p) => ({ ...p, model: e.target.value }))} placeholder="Model name (leave empty for the default)"
+                            <input id="automation-model" value={aiConfig.model || ""} onChange={(e) => setAiConfig((p) => ({ ...p, model: e.target.value }))} placeholder="Model name (leave empty for the default)"
                               className={`da-input${invalid(fieldErrors.model)}`} {...ariaFor("automation-model", fieldErrors.model)} />
                           )}
                           <FieldError id="automation-model" message={fieldErrors.model} />
@@ -1383,7 +1412,7 @@ export const AutomationBuilderPage: React.FC = () => {
                     <span className="flex items-center gap-1.5 text-[12.5px] font-semibold text-slate-700"><BookOpen className="h-3.5 w-3.5 text-indigo-600" /> Ground it in your documents (optional)</span>
                     <span className="text-[12px] text-slate-400">{aiConfig.document_ids.length} of {knowledgeDocs.length} selected</span>
                   </div>
-                  {knowledgeDocs.length > 0 && aiConfig.topic.trim().length >= 8 && (
+                  {knowledgeDocs.length > 0 && (aiConfig.topic || "").trim().length >= 8 && (
                     <p className="mb-2 flex items-start gap-1.5 text-[12px] text-slate-500" aria-live="polite">
                       {suggesting ? <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-indigo-500" /> : <Sparkles className="mt-0.5 h-3.5 w-3.5 shrink-0 text-indigo-500" />}
                       <span>

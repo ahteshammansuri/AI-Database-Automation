@@ -92,12 +92,24 @@ class ToolArgumentValidator
                 }
                 break;
             case 'array':
+                if (is_string($value) && str_starts_with(trim($value), '[') && str_ends_with(trim($value), ']')) {
+                    $decoded = json_decode(trim($value), true);
+                    if (is_array($decoded)) {
+                        $value = $decoded;
+                    }
+                }
                 if (!is_array($value) || !array_is_list($value)) {
                     return [false, null, "argument '{$key}' must be a list"];
                 }
                 break;
             case 'object':
-                if (!is_array($value) || (array_is_list($value) && $value !== [])) {
+                if (is_string($value) && (str_starts_with(trim($value), '{') || str_starts_with(trim($value), '['))) {
+                    $decoded = json_decode(trim($value), true);
+                    if (is_array($decoded)) {
+                        $value = $decoded;
+                    }
+                }
+                if (!is_array($value)) {
                     return [false, null, "argument '{$key}' must be an object"];
                 }
                 break;

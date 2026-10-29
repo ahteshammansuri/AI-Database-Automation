@@ -25,1279 +25,98 @@ class AgentToolRegistry
      * Complete definitions of registered tools with rich capability metadata.
      */
     /** Names of the generic on-screen tools (executed by the browser, checked against SurfaceCatalog). */
-    public const UI_TOOLS = ['go_to_page', 'open_form', 'read_screen', 'fill_fields', 'choose_option', 'press', 'ask_secret_in_form', 'show_me'];
+    public const UI_TOOLS = ['go_to_page', 'open_form', 'read_screen', 'fill_fields', 'choose_option', 'press', 'ask_secret_in_form', 'show_me', 'give_tour', 'explain_page'];
 
-    /**
-     * Generic tools that let Orbit operate any catalogued page like a person, visibly:
-     * navigate, open forms, type into fields, pick options, press buttons.
-     */
-    public static function uiToolDefinitions(): array
+    protected static ?array $cachedToolDefs = null;
+    protected static array $customHandlers = [];
+
+    public static function flushCache(): void
     {
-        $routes = SurfaceCatalog::routes();
-        $surfaces = SurfaceCatalog::surfaceIds();
-        $ui = fn (string $name, string $label, string $description, array $properties, array $required = []) => [
-            'name' => $name, 'label' => $label, 'description' => $description, 'outcome' => 'Visible action in the portal, acknowledged by the browser.',
-            'scope' => 'tenant_user', 'read_only' => $name === 'read_screen', 'side_effects' => 'Operates the portal UI on screen.',
-            'risk_level' => 'LOW', 'requires_confirmation' => false, 'idempotent' => false, 'retryable' => true, 'audit_required' => false,
-            'parameters' => array_filter(['type' => 'object', 'properties' => $properties, 'required' => $required ?: null]),
-            'output_schema' => ['type' => 'object'],
-        ];
-
-        return [
-            $ui('go_to_page', 'Go to a page', 'Visibly navigate the portal to a page (Orbit taps the sidebar item). Returns which surfaces are now on screen.',
-                ['page' => ['type' => 'string', 'enum' => $routes]], ['page']),
-            $ui('open_form', 'Open a form', 'Bring a form or section on screen: navigates if needed and, for pop-up forms, taps its opener (e.g. "Connect Database"). Returns its fields, current values and which required fields are still missing.',
-                ['surface' => ['type' => 'string', 'enum' => $surfaces]], ['surface']),
-            $ui('read_screen', 'Read the screen', 'Read what is on screen now: surfaces with their non-secret field values, errors, list rows (with their ids) and available actions.', []),
-            $ui('fill_fields', 'Fill form fields', 'Type values into fields of an on-screen surface (Orbit types them visibly). values is an object of field name to value. Never for secret or file fields. Returns per-field acceptance or validation errors and fields still missing.',
-                ['surface' => ['type' => 'string', 'enum' => $surfaces], 'values' => ['type' => 'object'], 'row' => ['type' => 'string']], ['surface', 'values']),
-            $ui('choose_option', 'Choose a dropdown option', 'Pick an option in a select field using the real loaded options, by option id or visible label. Returns the chosen option, or the candidates if ambiguous.',
-                ['surface' => ['type' => 'string', 'enum' => $surfaces], 'field' => ['type' => 'string'], 'choice' => ['type' => 'string'], 'row' => ['type' => 'string']], ['surface', 'field', 'choice']),
-            $ui('press', 'Press a button', 'Press a button on an on-screen surface; the page does exactly what a user click does and the real result is returned. Row actions need row (the item id). Actions marked consequential need the user to confirm first.',
-                ['surface' => ['type' => 'string', 'enum' => $surfaces], 'action' => ['type' => 'string'], 'row' => ['type' => 'string']], ['surface', 'action']),
-            $ui('ask_secret_in_form', 'Ask for a secret in the form', 'Point at a password or API-key box in the form and let the user type it there themselves. Then WAIT_FOR_USER; you will be told when they have entered it. You never see the value.',
-                ['surface' => ['type' => 'string', 'enum' => $surfaces], 'field' => ['type' => 'string']], ['surface', 'field']),
-            $ui('show_me', 'Show the user something', 'Point at and highlight a field, button or the surface itself with a short caption, to guide the user.',
-                ['surface' => ['type' => 'string', 'enum' => $surfaces], 'element' => ['type' => 'string'], 'caption' => ['type' => 'string', 'maxLength' => 160]], ['surface', 'caption']),
-        ];
+        self::$cachedToolDefs = null;
     }
 
+    /**
+     * Register a dynamic execution handler for any tool (new actions, plugins, custom extensions).
+     */
+    public static function registerHandler(string $toolName, callable $handler): void
+    {
+        self::$customHandlers[$toolName] = $handler;
+    }
+
+    /**
+     * Complete definitions of registered tools loaded dynamically from the platform database (orbit_tools),
+     * enriched with live surface and route enums.
+     */
     public static function getToolDefinitions(): array
     {
-        return array_merge(self::uiToolDefinitions(), self::backendToolDefinitions());
-    }
+        if (self::$cachedToolDefs !== null) {
+            return self::$cachedToolDefs;
+        }
 
-    public static function backendToolDefinitions(): array
-    {
-        return [
-            // =================================================================
-            // 1. Database Connection Management
-            // =================================================================
-            [
-                'name' => 'list_database_connections',
-                'label' => 'List Database Connections',
-                'description' => 'List all connected databases for the authenticated user.',
-                'outcome' => 'Retrieves database profiles, server versions, latency, and status.',
-                'scope' => 'tenant_user',
-                'read_only' => true,
-                'side_effects' => 'None',
-                'risk_level' => 'LOW',
-                'requires_confirmation' => false,
-                'idempotent' => true,
-                'retryable' => true,
-                'audit_required' => false,
-                'parameters' => [
-                    'type' => 'object',
-                    'properties' => [],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'connections' => ['type' => 'array'],
-                        'total' => ['type' => 'integer'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'test_database_connection',
-                'label' => 'Test Database Connection',
-                'description' => 'Test connection parameters or test an existing saved connection profile.',
-                'outcome' => 'Verifies network reachability, SSRF policy, and MySQL handshake.',
-                'scope' => 'tenant_user',
-                'read_only' => true,
-                'side_effects' => 'Network handshake only; zero data mutation.',
-                'risk_level' => 'LOW',
-                'requires_confirmation' => false,
-                'idempotent' => true,
-                'retryable' => true,
-                'audit_required' => false,
-                'parameters' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'connection_id' => ['type' => 'integer', 'description' => 'Optional ID of existing connection to retest.'],
-                        'host' => ['type' => 'string', 'description' => 'Database host.'],
-                        'port' => ['type' => 'integer', 'description' => 'Database port (default 3306).'],
-                        'database' => ['type' => 'string', 'description' => 'Database name.'],
-                        'username' => ['type' => 'string', 'description' => 'Database username.'],
-                        'password' => ['type' => 'string', 'description' => 'Database password.'],
-                    ],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'server_version' => ['type' => 'string'],
-                        'latency_ms' => ['type' => 'number'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'save_database_connection',
-                'label' => 'Save Database Connection',
-                'description' => 'Save a new validated database connection profile with encrypted credentials.',
-                'outcome' => 'Persists database connection record with AES-256 encrypted password.',
-                'scope' => 'tenant_user',
-                'read_only' => false,
-                'side_effects' => 'Creates platform DbConnection record.',
-                'risk_level' => 'HIGH',
-                'requires_confirmation' => true,
-                'idempotent' => false,
-                'retryable' => false,
-                'audit_required' => true,
-                'parameters' => [
-                    'type' => 'object',
-                    'required' => ['name', 'host', 'database', 'username', 'password'],
-                    'properties' => [
-                        'name' => ['type' => 'string', 'description' => 'Friendly connection label.'],
-                        'host' => ['type' => 'string', 'description' => 'Database host.'],
-                        'port' => ['type' => 'integer', 'description' => 'Database port (default 3306).'],
-                        'database' => ['type' => 'string', 'description' => 'Database name.'],
-                        'username' => ['type' => 'string', 'description' => 'Database username.'],
-                        'password' => ['type' => 'string', 'description' => 'Database password (encrypted at rest).'],
-                        'ssl_mode' => ['type' => 'string', 'description' => 'prefer, require, or disable.'],
-                    ],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'connection_id' => ['type' => 'integer'],
-                        'name' => ['type' => 'string'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'update_database_connection',
-                'label' => 'Update Database Connection',
-                'description' => 'Update connection metadata or credentials for an existing database profile.',
-                'outcome' => 'Modifies platform database connection settings.',
-                'scope' => 'tenant_user',
-                'read_only' => false,
-                'side_effects' => 'Updates platform DbConnection record.',
-                'risk_level' => 'HIGH',
-                'requires_confirmation' => true,
-                'idempotent' => true,
-                'retryable' => false,
-                'audit_required' => true,
-                'parameters' => [
-                    'type' => 'object',
-                    'required' => ['connection_id'],
-                    'properties' => [
-                        'connection_id' => ['type' => 'integer'],
-                        'name' => ['type' => 'string'],
-                        'host' => ['type' => 'string'],
-                        'port' => ['type' => 'integer'],
-                        'ssl_mode' => ['type' => 'string'],
-                    ],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'connection_id' => ['type' => 'integer'],
-                        'message' => ['type' => 'string'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'disconnect_database_connection',
-                'label' => 'Disconnect Database Profile',
-                'description' => 'Remove a saved platform database connection profile. Target customer database is completely untouched.',
-                'outcome' => 'Removes platform connection record.',
-                'scope' => 'tenant_user',
-                'read_only' => false,
-                'side_effects' => 'Deletes DbConnection record in platform database.',
-                'risk_level' => 'HIGH',
-                'requires_confirmation' => true,
-                'idempotent' => true,
-                'retryable' => false,
-                'audit_required' => true,
-                'parameters' => [
-                    'type' => 'object',
-                    'required' => ['connection_id'],
-                    'properties' => [
-                        'connection_id' => ['type' => 'integer'],
-                        'force' => ['type' => 'boolean', 'description' => 'Force deletion even if automations depend on it.'],
-                    ],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'connection_id' => ['type' => 'integer'],
-                        'message' => ['type' => 'string'],
-                    ],
-                ],
-            ],
+        try {
+            if (\Illuminate\Support\Facades\Schema::hasTable('orbit_tools')) {
+                $dbTools = \App\Models\OrbitTool::where('is_active', true)->orderBy('sort')->orderBy('name')->get();
+                if ($dbTools->isNotEmpty()) {
+                    $routes = SurfaceCatalog::routes();
+                    $surfaces = SurfaceCatalog::surfaceIds();
 
-            // =================================================================
-            // 2. Schema Discovery & Introspection
-            // =================================================================
-            [
-                'name' => 'scan_database_schema',
-                'label' => 'Scan Database Schema',
-                'description' => 'Introspect database schema and discover eligible tables for content automation.',
-                'outcome' => 'Scans tables, columns, data types, and primary/foreign keys.',
-                'scope' => 'tenant_user',
-                'read_only' => true,
-                'side_effects' => 'Updates SchemaSnapshot in platform database.',
-                'risk_level' => 'MEDIUM',
-                'requires_confirmation' => false,
-                'idempotent' => true,
-                'retryable' => true,
-                'audit_required' => true,
-                'parameters' => [
-                    'type' => 'object',
-                    'required' => ['connection_id'],
-                    'properties' => [
-                        'connection_id' => ['type' => 'integer', 'description' => 'ID of saved connection.'],
-                    ],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'total_tables' => ['type' => 'integer'],
-                        'eligible_tables' => ['type' => 'array'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'get_schema_scan_status',
-                'label' => 'Get Schema Details',
-                'description' => 'Retrieve table eligibility classifications and foreign key relationships.',
-                'outcome' => 'Returns latest cached schema snapshot.',
-                'scope' => 'tenant_user',
-                'read_only' => true,
-                'side_effects' => 'None',
-                'risk_level' => 'LOW',
-                'requires_confirmation' => false,
-                'idempotent' => true,
-                'retryable' => true,
-                'audit_required' => false,
-                'parameters' => [
-                    'type' => 'object',
-                    'required' => ['connection_id'],
-                    'properties' => [
-                        'connection_id' => ['type' => 'integer', 'description' => 'ID of saved connection.'],
-                    ],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'tables' => ['type' => 'array'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'lookup_table_values',
-                'label' => 'Lookup Table Values',
-                'description' => 'Query allowable sample values or lookup references in an eligible target table (e.g. categories, tags, authors).',
-                'outcome' => 'Returns read-only sample rows for reference resolution.',
-                'scope' => 'tenant_user',
-                'read_only' => true,
-                'side_effects' => 'None',
-                'risk_level' => 'LOW',
-                'requires_confirmation' => false,
-                'idempotent' => true,
-                'retryable' => true,
-                'audit_required' => false,
-                'parameters' => [
-                    'type' => 'object',
-                    'required' => ['connection_id', 'table'],
-                    'properties' => [
-                        'connection_id' => ['type' => 'integer'],
-                        'table' => ['type' => 'string'],
-                        'column' => ['type' => 'string'],
-                    ],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'values' => ['type' => 'array'],
-                    ],
-                ],
-            ],
+                    self::$cachedToolDefs = $dbTools->map(function (\App\Models\OrbitTool $t) use ($routes, $surfaces) {
+                        $params = $t->parameters ?? ['type' => 'object'];
+                        // Inject dynamic live routes and surfaces if UI tool
+                        if ($t->name === 'go_to_page' && isset($params['properties']['page'])) {
+                            $params['properties']['page']['enum'] = $routes;
+                        }
+                        if (in_array($t->name, ['open_form', 'fill_fields', 'choose_option', 'press', 'ask_secret_in_form', 'show_me'], true) && isset($params['properties']['surface'])) {
+                            $params['properties']['surface']['enum'] = $surfaces;
+                        }
+                        if ($t->name === 'explain_page' && isset($params['properties']['page'])) {
+                            $params['properties']['page']['enum'] = $routes;
+                        }
 
-            // =================================================================
-            // 3. Automation Workflows
-            // =================================================================
-            [
-                'name' => 'list_automations',
-                'label' => 'List Automations',
-                'description' => 'List all configured content generation and publishing workflows for the user.',
-                'outcome' => 'Returns list of automations with schedules, status, and target tables.',
-                'scope' => 'tenant_user',
-                'read_only' => true,
-                'side_effects' => 'None',
-                'risk_level' => 'LOW',
-                'requires_confirmation' => false,
-                'idempotent' => true,
-                'retryable' => true,
-                'audit_required' => false,
-                'parameters' => [
-                    'type' => 'object',
-                    'properties' => [],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'automations' => ['type' => 'array'],
-                        'total' => ['type' => 'integer'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'get_automation_details',
-                'label' => 'Get Automation Details',
-                'description' => 'Retrieve complete configuration, prompts, schedule, and field mappings of an automation.',
-                'outcome' => 'Returns full automation specification.',
-                'scope' => 'tenant_user',
-                'read_only' => true,
-                'side_effects' => 'None',
-                'risk_level' => 'LOW',
-                'requires_confirmation' => false,
-                'idempotent' => true,
-                'retryable' => true,
-                'audit_required' => false,
-                'parameters' => [
-                    'type' => 'object',
-                    'required' => ['automation_id'],
-                    'properties' => [
-                        'automation_id' => ['type' => 'integer'],
-                    ],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'automation' => ['type' => 'object'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'create_automation_draft',
-                'label' => 'Create Automation Draft',
-                'description' => 'Create a scheduled automation that writes new rows into a table (blog posts, articles, news, products, FAQs...). Columns you do not specify get the same safe defaults as the builder (AI text, AI-chosen category created if new, generated images, slug from title, publication-time dates). Publication must be at least 15 minutes after generation. Prefer doing it on screen in the builder when the browser is present.',
-                'outcome' => 'Persists Automation record with field mappings, topic prompt, and schedule.',
-                'scope' => 'tenant_user',
-                'read_only' => false,
-                'side_effects' => 'Creates platform Automation record.',
-                'risk_level' => 'HIGH',
-                'requires_confirmation' => true,
-                'idempotent' => false,
-                'retryable' => false,
-                'audit_required' => true,
-                'parameters' => [
-                    'type' => 'object',
-                    'required' => ['connection_id', 'target_table', 'name'],
-                    'properties' => [
-                        'connection_id' => ['type' => 'integer'],
-                        'target_table' => ['type' => 'string'],
-                        'name' => ['type' => 'string'],
-                        'operation_mode' => ['type' => 'string', 'description' => 'AI_CREATE, AI_ENRICH, or MANUAL_SCHEDULE'],
-                        'topic_prompt' => ['type' => 'string', 'description' => 'What the content should be about.'],
-                        'category_name' => ['type' => 'string', 'description' => 'Optional category the AI should use (matched or created at run time).'],
-                        'field_mappings' => ['type' => 'array', 'description' => 'Optional per-column overrides; omit to use the safe defaults.'],
-                        'schedule_type' => ['type' => 'string', 'enum' => ['ONE_TIME', 'DAILY', 'WEEKLY']],
-                        'start_date' => ['type' => 'string', 'description' => 'YYYY-MM-DD; the run date for ONE_TIME.'],
-                        'end_date' => ['type' => 'string', 'description' => 'YYYY-MM-DD, last day for DAILY/WEEKLY (optional).'],
-                        'weekly_days' => ['type' => 'array', 'items' => ['type' => 'integer'], 'description' => 'ISO weekdays for WEEKLY: 1=Mon ... 7=Sun.'],
-                        'tone' => ['type' => 'string'],
-                        'length' => ['type' => 'string', 'enum' => ['short', 'medium', 'long']],
-                        'content_format' => ['type' => 'string', 'enum' => ['markdown', 'html']],
-                        'image_provider' => ['type' => 'string', 'enum' => ['auto', 'openai', 'gemini', 'local']],
-                        'reviewer_email' => ['type' => 'string'],
-                        'timeout_policy' => ['type' => 'string', 'enum' => ['KEEP_DRAFT', 'AUTO_PUBLISH_LATEST', 'CANCEL'], 'description' => 'What happens if nobody approves before publication time.'],
-                        'generation_time' => ['type' => 'string', 'description' => 'HH:MM format'],
-                        'publication_time' => ['type' => 'string', 'description' => 'HH:MM format (>= 15m after generation_time)'],
-                        'timezone' => ['type' => 'string', 'description' => 'IANA timezone, e.g. Asia/Kolkata'],
-                        'requires_approval' => ['type' => 'boolean'],
-                        'is_active' => ['type' => 'boolean'],
-                    ],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'automation_id' => ['type' => 'integer'],
-                        'name' => ['type' => 'string'],
-                        'target_table' => ['type' => 'string'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'update_automation',
-                'label' => 'Update Automation Configuration',
-                'description' => 'Update schedule, prompt context, active status, or settings of an existing automation.',
-                'outcome' => 'Modifies platform Automation record.',
-                'scope' => 'tenant_user',
-                'read_only' => false,
-                'side_effects' => 'Updates platform Automation record.',
-                'risk_level' => 'HIGH',
-                'requires_confirmation' => true,
-                'idempotent' => true,
-                'retryable' => false,
-                'audit_required' => true,
-                'parameters' => [
-                    'type' => 'object',
-                    'required' => ['automation_id'],
-                    'properties' => [
-                        'automation_id' => ['type' => 'integer'],
-                        'name' => ['type' => 'string'],
-                        'topic_prompt' => ['type' => 'string'],
-                        'schedule_type' => ['type' => 'string', 'enum' => ['ONE_TIME', 'DAILY', 'WEEKLY']],
-                        'start_date' => ['type' => 'string'],
-                        'end_date' => ['type' => 'string'],
-                        'weekly_days' => ['type' => 'array', 'items' => ['type' => 'integer']],
-                        'generation_time' => ['type' => 'string'],
-                        'publication_time' => ['type' => 'string'],
-                        'timezone' => ['type' => 'string'],
-                        'tone' => ['type' => 'string'],
-                        'length' => ['type' => 'string', 'enum' => ['short', 'medium', 'long']],
-                        'content_format' => ['type' => 'string', 'enum' => ['markdown', 'html']],
-                        'image_provider' => ['type' => 'string', 'enum' => ['auto', 'openai', 'gemini', 'local']],
-                        'requires_approval' => ['type' => 'boolean'],
-                        'reviewer_email' => ['type' => 'string'],
-                        'timeout_policy' => ['type' => 'string', 'enum' => ['KEEP_DRAFT', 'AUTO_PUBLISH_LATEST', 'CANCEL']],
-                        'is_active' => ['type' => 'boolean', 'description' => 'false pauses, true resumes'],
-                    ],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'automation_id' => ['type' => 'integer'],
-                        'message' => ['type' => 'string'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'remove_automation',
-                'label' => 'Remove Automation',
-                'description' => 'Delete an automation configuration record from the platform database.',
-                'outcome' => 'Removes platform Automation record.',
-                'scope' => 'tenant_user',
-                'read_only' => false,
-                'side_effects' => 'Deletes Automation record.',
-                'risk_level' => 'HIGH',
-                'requires_confirmation' => true,
-                'idempotent' => true,
-                'retryable' => false,
-                'audit_required' => true,
-                'parameters' => [
-                    'type' => 'object',
-                    'required' => ['automation_id'],
-                    'properties' => [
-                        'automation_id' => ['type' => 'integer'],
-                    ],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'automation_id' => ['type' => 'integer'],
-                        'message' => ['type' => 'string'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'run_automation_now',
-                'label' => 'Trigger Immediate Execution',
-                'description' => 'Immediately trigger a scheduled automation execution through the background queue.',
-                'outcome' => 'Creates a run that generates now in the background and publishes after the automation\'s usual gap (approval rules apply).',
-                'scope' => 'tenant_user',
-                'read_only' => false,
-                'side_effects' => 'Creates AutomationExecution, enqueues background worker job.',
-                'risk_level' => 'HIGH',
-                'requires_confirmation' => true,
-                'idempotent' => false,
-                'retryable' => false,
-                'audit_required' => true,
-                'parameters' => [
-                    'type' => 'object',
-                    'required' => ['automation_id'],
-                    'properties' => [
-                        'automation_id' => ['type' => 'integer'],
-                    ],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'execution_id' => ['type' => 'integer'],
-                        'status' => ['type' => 'string'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'preview_automation_content',
-                'label' => 'Preview AI Content Draft',
-                'description' => 'Run a saved automation once as a dry run: real AI content, the parent records it would use or create, and the exact database write plan. Writes nothing.',
-                'outcome' => 'Returns generated preview JSON object.',
-                'scope' => 'tenant_user',
-                'read_only' => true,
-                'side_effects' => 'None; zero database write.',
-                'risk_level' => 'LOW',
-                'requires_confirmation' => false,
-                'idempotent' => true,
-                'retryable' => true,
-                'audit_required' => false,
-                'parameters' => [
-                    'type' => 'object',
-                    'required' => ['automation_id'],
-                    'properties' => [
-                        'automation_id' => ['type' => 'integer'],
-                        'include_images' => ['type' => 'boolean'],
-                    ],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'preview' => ['type' => 'object'],
-                    ],
-                ],
-            ],
+                        return [
+                            'name' => $t->name,
+                            'label' => $t->label,
+                            'category' => $t->category,
+                            'description' => $t->description,
+                            'outcome' => $t->outcome,
+                            'scope' => $t->scope,
+                            'read_only' => (bool) $t->read_only,
+                            'side_effects' => $t->side_effects,
+                            'risk_level' => $t->risk_level,
+                            'requires_confirmation' => (bool) $t->requires_confirmation,
+                            'idempotent' => (bool) $t->idempotent,
+                            'retryable' => (bool) $t->retryable,
+                            'audit_required' => (bool) $t->audit_required,
+                            'is_ui' => (bool) $t->is_ui,
+                            'parameters' => $params,
+                            'output_schema' => $t->output_schema ?? ['type' => 'object'],
+                            // Agent-loop policy, from the same catalog row (see definition()).
+                            'version' => (int) ($t->version ?? 1),
+                            'side_effect_class' => $t->side_effect_class,
+                            'secret_params' => (array) ($t->secret_params ?? []),
+                            'always_confirm' => (bool) ($t->always_confirm ?? false),
+                            'confirm_by_button' => (bool) ($t->confirm_by_button ?? false),
+                            'postcondition' => $t->postcondition,
+                        ];
+                    })->all();
 
-            // =================================================================
-            // 4. Executions & Content Versions
-            // =================================================================
-            [
-                'name' => 'list_executions',
-                'label' => 'List Executions',
-                'description' => 'List recent automation executions with status, date, and target table.',
-                'outcome' => 'Returns execution run history.',
-                'scope' => 'tenant_user',
-                'read_only' => true,
-                'side_effects' => 'None',
-                'risk_level' => 'LOW',
-                'requires_confirmation' => false,
-                'idempotent' => true,
-                'retryable' => true,
-                'audit_required' => false,
-                'parameters' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'status' => ['type' => 'string', 'description' => 'e.g. PUBLISHED, FAILED, PENDING_APPROVAL, MISSED'],
-                        'automation_id' => ['type' => 'integer'],
-                        'automation_name' => ['type' => 'string', 'description' => 'Part of the automation name'],
-                        'limit' => ['type' => 'integer'],
-                    ],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'executions' => ['type' => 'array'],
-                        'total' => ['type' => 'integer'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'get_execution_status',
-                'label' => 'Get Execution Status',
-                'description' => 'Check detailed status, timeline events, and output of an automation run.',
-                'outcome' => 'Returns execution progress, target record ID, and error messages.',
-                'scope' => 'tenant_user',
-                'read_only' => true,
-                'side_effects' => 'None',
-                'risk_level' => 'LOW',
-                'requires_confirmation' => false,
-                'idempotent' => true,
-                'retryable' => true,
-                'audit_required' => false,
-                'parameters' => [
-                    'type' => 'object',
-                    'required' => ['execution_id'],
-                    'properties' => [
-                        'execution_id' => ['type' => 'integer'],
-                    ],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'id' => ['type' => 'integer'],
-                        'status' => ['type' => 'string'],
-                        'timeline_events' => ['type' => 'array'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'retry_execution',
-                'label' => 'Retry Failed Execution',
-                'description' => 'Re-dispatch a failed execution job to background workers.',
-                'outcome' => 'Resets execution state to PENDING_GENERATION and re-enqueues job.',
-                'scope' => 'tenant_user',
-                'read_only' => false,
-                'side_effects' => 'Updates AutomationExecution status, dispatches job.',
-                'risk_level' => 'MEDIUM',
-                'requires_confirmation' => false,
-                'idempotent' => true,
-                'retryable' => false,
-                'audit_required' => true,
-                'parameters' => [
-                    'type' => 'object',
-                    'required' => ['execution_id'],
-                    'properties' => [
-                        'execution_id' => ['type' => 'integer'],
-                    ],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'execution_id' => ['type' => 'integer'],
-                        'status' => ['type' => 'string'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'request_execution_interrupt',
-                'label' => 'Request Execution Interrupt',
-                'description' => 'Request immediate pause or cancellation of a queued or running execution.',
-                'outcome' => 'Updates execution status to CANCELLED or PAUSED at safe boundary.',
-                'scope' => 'tenant_user',
-                'read_only' => false,
-                'side_effects' => 'Updates execution status.',
-                'risk_level' => 'MEDIUM',
-                'requires_confirmation' => false,
-                'idempotent' => true,
-                'retryable' => false,
-                'audit_required' => true,
-                'parameters' => [
-                    'type' => 'object',
-                    'required' => ['execution_id'],
-                    'properties' => [
-                        'execution_id' => ['type' => 'integer'],
-                        'action' => ['type' => 'string', 'description' => 'cancel or pause'],
-                    ],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'execution_id' => ['type' => 'integer'],
-                        'status' => ['type' => 'string'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'explain_execution_failure',
-                'label' => 'Explain Execution Failure',
-                'description' => 'Analyze the latest failed execution and explain the root cause and safe fix.',
-                'outcome' => 'Returns actionable diagnosis and recovery instructions.',
-                'scope' => 'tenant_user',
-                'read_only' => true,
-                'side_effects' => 'None',
-                'risk_level' => 'LOW',
-                'requires_confirmation' => false,
-                'idempotent' => true,
-                'retryable' => true,
-                'audit_required' => false,
-                'parameters' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'execution_id' => ['type' => 'integer', 'description' => 'Optional specific execution ID.'],
-                    ],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'explanation' => ['type' => 'string'],
-                        'can_retry' => ['type' => 'boolean'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'update_published_record',
-                'label' => 'Update Published Customer Record',
-                'description' => 'Perform an audited, scoped UPDATE to a single target customer record (WHERE id = :id).',
-                'outcome' => 'Executes safe parameterized UPDATE on target customer database record.',
-                'scope' => 'tenant_user',
-                'read_only' => false,
-                'side_effects' => 'Modifies allowable columns on specific single target record.',
-                'risk_level' => 'HIGH',
-                'requires_confirmation' => true,
-                'idempotent' => true,
-                'retryable' => false,
-                'audit_required' => true,
-                'parameters' => [
-                    'type' => 'object',
-                    'required' => ['execution_id', 'fields'],
-                    'properties' => [
-                        'execution_id' => ['type' => 'integer'],
-                        'fields' => ['type' => 'object', 'description' => 'Key-value map of allowable columns to update.'],
-                    ],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'target_record_id' => ['type' => 'integer'],
-                        'message' => ['type' => 'string'],
-                    ],
-                ],
-            ],
+                    return self::$cachedToolDefs;
+                }
+            }
+        } catch (\Throwable $e) {
+            // Graceful fallback during database migration
+        }
 
-            // =================================================================
-            // 5. Approvals
-            // =================================================================
-            [
-                'name' => 'get_pending_approvals',
-                'label' => 'Get Pending Approvals',
-                'description' => 'List content drafts waiting for user approval before publishing.',
-                'outcome' => 'Returns drafts in PENDING_APPROVAL status with payload previews.',
-                'scope' => 'tenant_user',
-                'read_only' => true,
-                'side_effects' => 'None',
-                'risk_level' => 'LOW',
-                'requires_confirmation' => false,
-                'idempotent' => true,
-                'retryable' => true,
-                'audit_required' => false,
-                'parameters' => [
-                    'type' => 'object',
-                    'properties' => [],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'pending_approvals' => ['type' => 'array'],
-                        'count' => ['type' => 'integer'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'approve_content_version',
-                'label' => 'Approve Content Draft',
-                'description' => 'Approve a pending content version draft to proceed to scheduled or immediate publication.',
-                'outcome' => 'Approves the draft; it publishes at its scheduled time (immediately if that time has passed).',
-                'scope' => 'tenant_user',
-                'read_only' => false,
-                'side_effects' => 'Updates ContentVersion, triggers background publisher.',
-                'risk_level' => 'HIGH',
-                'requires_confirmation' => true,
-                'idempotent' => true,
-                'retryable' => false,
-                'audit_required' => true,
-                'parameters' => [
-                    'type' => 'object',
-                    'required' => ['version_id'],
-                    'properties' => [
-                        'version_id' => ['type' => 'integer'],
-                    ],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'version_id' => ['type' => 'integer'],
-                        'execution_id' => ['type' => 'integer'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'reject_content_version',
-                'label' => 'Reject Content Draft',
-                'description' => 'Reject a pending content draft and trigger regeneration with corrective feedback.',
-                'outcome' => 'Rejects the draft with feedback and writes a new version (stops after three rejections).',
-                'scope' => 'tenant_user',
-                'read_only' => false,
-                'side_effects' => 'Updates version to rejected, dispatches regeneration job.',
-                'risk_level' => 'MEDIUM',
-                'requires_confirmation' => false,
-                'idempotent' => false,
-                'retryable' => false,
-                'audit_required' => true,
-                'parameters' => [
-                    'type' => 'object',
-                    'required' => ['version_id', 'feedback'],
-                    'properties' => [
-                        'version_id' => ['type' => 'integer'],
-                        'feedback' => ['type' => 'string', 'description' => 'Specific feedback explaining why to revise.'],
-                    ],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'version_id' => ['type' => 'integer'],
-                        'message' => ['type' => 'string'],
-                    ],
-                ],
-            ],
-
-            // =================================================================
-            // 6. AI Providers
-            // =================================================================
-            [
-                'name' => 'list_ai_providers',
-                'label' => 'List AI Providers',
-                'description' => 'List configured AI providers with masked API keys and model preferences.',
-                'outcome' => 'Returns configured providers.',
-                'scope' => 'tenant_user',
-                'read_only' => true,
-                'side_effects' => 'None',
-                'risk_level' => 'LOW',
-                'requires_confirmation' => false,
-                'idempotent' => true,
-                'retryable' => true,
-                'audit_required' => false,
-                'parameters' => [
-                    'type' => 'object',
-                    'properties' => [],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'providers' => ['type' => 'array'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'test_ai_provider',
-                'label' => 'Test AI Provider Credentials',
-                'description' => 'Test connectivity and model availability for a specific AI provider.',
-                'outcome' => 'Verifies API key and returns model availability.',
-                'scope' => 'tenant_user',
-                'read_only' => true,
-                'side_effects' => 'None',
-                'risk_level' => 'LOW',
-                'requires_confirmation' => false,
-                'idempotent' => true,
-                'retryable' => true,
-                'audit_required' => false,
-                'parameters' => [
-                    'type' => 'object',
-                    'required' => ['provider'],
-                    'properties' => [
-                        'provider' => ['type' => 'string', 'description' => 'ollama, openai, gemini, or claude'],
-                        'model' => ['type' => 'string'],
-                        'api_key' => ['type' => 'string'],
-                    ],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'available' => ['type' => 'boolean'],
-                        'latency_ms' => ['type' => 'number'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'save_ai_provider',
-                'label' => 'Save AI Provider Configuration',
-                'description' => 'Save or update user-specific AI provider credentials (encrypted at rest).',
-                'outcome' => 'Persists AiProvider configuration.',
-                'scope' => 'tenant_user',
-                'read_only' => false,
-                'side_effects' => 'Updates AiProvider record.',
-                'risk_level' => 'HIGH',
-                'requires_confirmation' => true,
-                'idempotent' => true,
-                'retryable' => false,
-                'audit_required' => true,
-                'parameters' => [
-                    'type' => 'object',
-                    'required' => ['provider_type'],
-                    'properties' => [
-                        'provider_type' => ['type' => 'string'],
-                        'model_name' => ['type' => 'string'],
-                        'api_key' => ['type' => 'string'],
-                        'is_active' => ['type' => 'boolean'],
-                    ],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'provider_id' => ['type' => 'integer'],
-                        'message' => ['type' => 'string'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'get_provider_health',
-                'label' => 'Get Provider Health',
-                'description' => 'Check connectivity to local Ollama or active AI providers.',
-                'outcome' => 'Returns provider status, active model, and latency.',
-                'scope' => 'tenant_user',
-                'read_only' => true,
-                'side_effects' => 'None',
-                'risk_level' => 'LOW',
-                'requires_confirmation' => false,
-                'idempotent' => true,
-                'retryable' => true,
-                'audit_required' => false,
-                'parameters' => [
-                    'type' => 'object',
-                    'properties' => [],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'provider' => ['type' => 'string'],
-                        'status' => ['type' => 'string'],
-                    ],
-                ],
-            ],
-
-            // =================================================================
-            // 7. Knowledge Base & RAG
-            // =================================================================
-            [
-                'name' => 'list_knowledge_documents',
-                'label' => 'List Knowledge Documents',
-                'description' => 'List indexed knowledge documents (.pdf, .txt, .md) for the tenant workspace.',
-                'outcome' => 'Returns document list with chunk counts and index status.',
-                'scope' => 'tenant_user',
-                'read_only' => true,
-                'side_effects' => 'None',
-                'risk_level' => 'LOW',
-                'requires_confirmation' => false,
-                'idempotent' => true,
-                'retryable' => true,
-                'audit_required' => false,
-                'parameters' => [
-                    'type' => 'object',
-                    'properties' => [],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'documents' => ['type' => 'array'],
-                        'total' => ['type' => 'integer'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'query_knowledge_base',
-                'label' => 'Search Knowledge Base',
-                'description' => 'Perform semantic search across workspace knowledge documents using vector embeddings.',
-                'outcome' => 'Returns relevant passages and relevance scores.',
-                'scope' => 'tenant_user',
-                'read_only' => true,
-                'side_effects' => 'None',
-                'risk_level' => 'LOW',
-                'requires_confirmation' => false,
-                'idempotent' => true,
-                'retryable' => true,
-                'audit_required' => false,
-                'parameters' => [
-                    'type' => 'object',
-                    'required' => ['query'],
-                    'properties' => [
-                        'query' => ['type' => 'string'],
-                        'top_k' => ['type' => 'integer'],
-                    ],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'results' => ['type' => 'array'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'remove_knowledge_document',
-                'label' => 'Remove Knowledge Document',
-                'description' => 'Remove a knowledge document and purge its vector embeddings from the index.',
-                'outcome' => 'Deletes KnowledgeDocument and purges embeddings.',
-                'scope' => 'tenant_user',
-                'read_only' => false,
-                'side_effects' => 'Deletes platform document and vectors.',
-                'risk_level' => 'MEDIUM',
-                'requires_confirmation' => false,
-                'idempotent' => true,
-                'retryable' => false,
-                'audit_required' => true,
-                'parameters' => [
-                    'type' => 'object',
-                    'required' => ['document_id'],
-                    'properties' => [
-                        'document_id' => ['type' => 'integer'],
-                    ],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'document_id' => ['type' => 'integer'],
-                        'message' => ['type' => 'string'],
-                    ],
-                ],
-            ],
-
-            // =================================================================
-            // 8. Overview & Audit Logs
-            // =================================================================
-            [
-                'name' => 'get_dashboard_summary',
-                'label' => 'Get Workspace Dashboard Summary',
-                'description' => 'Get overview statistics of connections, automations, executions, and worker health.',
-                'outcome' => 'Returns workspace metrics counts and operational summary.',
-                'scope' => 'tenant_user',
-                'read_only' => true,
-                'side_effects' => 'None',
-                'risk_level' => 'LOW',
-                'requires_confirmation' => false,
-                'idempotent' => true,
-                'retryable' => true,
-                'audit_required' => false,
-                'parameters' => [
-                    'type' => 'object',
-                    'properties' => [],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'connections_count' => ['type' => 'integer'],
-                        'automations_count' => ['type' => 'integer'],
-                        'executions_count' => ['type' => 'integer'],
-                        'pending_approvals_count' => ['type' => 'integer'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'list_audit_logs',
-                'label' => 'Search the audit log',
-                'description' => 'Search the user\'s audit trail (what was created, changed, deleted, approved, published, logged in...). Filter by free text, action, resource type and date range. Returns real counts, the first and last matching time, counts per action and the latest matching entries. Use it to answer questions like "did I ever add a connection?" or "what did I change yesterday?". If nothing matches it lists the action names that exist.',
-                'outcome' => 'Returns matching audit entries with totals.',
-                'scope' => 'tenant_user',
-                'read_only' => true,
-                'side_effects' => 'None',
-                'risk_level' => 'LOW',
-                'requires_confirmation' => false,
-                'idempotent' => true,
-                'retryable' => true,
-                'audit_required' => false,
-                'parameters' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'query' => ['type' => 'string', 'description' => 'Words to look for, e.g. "connection", "deleted", a table or automation name.'],
-                        'action' => ['type' => 'string', 'description' => 'Part of an action name, e.g. CONNECTION_CREATED, DELETED, APPROVED.'],
-                        'resource_type' => ['type' => 'string', 'description' => 'e.g. DbConnection, Automation, AutomationExecution, ContentVersion.'],
-                        'since' => ['type' => 'string', 'description' => 'YYYY-MM-DD or ISO date-time (inclusive).'],
-                        'until' => ['type' => 'string', 'description' => 'YYYY-MM-DD (whole day) or ISO date-time.'],
-                        'limit' => ['type' => 'integer'],
-                    ],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'total_matching' => ['type' => 'integer'],
-                        'entries' => ['type' => 'array'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'get_audit_log_entry',
-                'label' => 'Inspect an audit entry',
-                'description' => 'Read one audit entry in full (its details/metadata), by its id from list_audit_logs.',
-                'outcome' => 'Returns the full audit entry.',
-                'scope' => 'tenant_user',
-                'read_only' => true,
-                'side_effects' => 'None',
-                'risk_level' => 'LOW',
-                'requires_confirmation' => false,
-                'idempotent' => true,
-                'retryable' => true,
-                'audit_required' => false,
-                'parameters' => [
-                    'type' => 'object',
-                    'required' => ['log_id'],
-                    'properties' => [
-                        'log_id' => ['type' => 'integer'],
-                    ],
-                ],
-                'output_schema' => ['type' => 'object'],
-            ],
-            // Natural-Language Data Agent tools (ADR-010)
-            [
-                'name' => 'ask_database',
-                'label' => 'Ask Database Question',
-                'description' => 'Answer any read-only question about the data in a connected database: counts, totals, rankings ("which customer has the most orders/refunds"), lists, lookups by email or id, date ranges. Pass the question in English with the details the user gave. The server writes one SELECT, checks it against the live schema and runs it read-only; results show emails/phones masked.',
-                'outcome' => 'Executes one validated read-only query and returns masked rows, the SQL used and its assumptions.',
-                'scope' => 'tenant_user',
-                'read_only' => true,
-                'side_effects' => 'None',
-                'risk_level' => 'LOW',
-                'requires_confirmation' => false,
-                'idempotent' => true,
-                'retryable' => true,
-                'audit_required' => true,
-                'parameters' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'question' => ['type' => 'string'],
-                        'connection_id' => ['type' => 'integer'],
-                    ],
-                    'required' => ['question'],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'headline' => ['type' => 'string'],
-                        'row_count' => ['type' => 'integer'],
-                        'rows' => ['type' => 'array'],
-                        'columns' => ['type' => 'array'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'find_dummy_data',
-                'label' => 'Find Dummy / Test Data',
-                'description' => 'Analyze table sample for seeded dummy or placeholder accounts, test emails, filler text, or burst timestamps.',
-                'outcome' => 'Returns dummy data report with evidence, confidence, and sample masked records.',
-                'scope' => 'tenant_user',
-                'read_only' => true,
-                'side_effects' => 'None',
-                'risk_level' => 'LOW',
-                'requires_confirmation' => false,
-                'idempotent' => true,
-                'retryable' => true,
-                'audit_required' => false,
-                'parameters' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'table' => ['type' => 'string'],
-                        'connection_id' => ['type' => 'integer'],
-                    ],
-                    'required' => ['table'],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'report' => ['type' => 'object'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'preview_data_change',
-                'label' => 'Preview Database Change',
-                'description' => 'Prepare a before/after diff preview for an UPDATE or an impact analysis for a guarded DELETE before execution.',
-                'outcome' => 'Creates a pending DataChangeRequest with pinned primary keys and masked preview rows.',
-                'scope' => 'tenant_user',
-                'read_only' => false,
-                'side_effects' => 'Creates a pending change record.',
-                'risk_level' => 'MEDIUM',
-                'requires_confirmation' => true,
-                'idempotent' => false,
-                'retryable' => false,
-                'audit_required' => true,
-                'parameters' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'connection_id' => ['type' => 'integer'],
-                        'action' => ['type' => 'string', 'enum' => ['update', 'delete']],
-                        'table' => ['type' => 'string'],
-                        'filter' => ['type' => 'object'],
-                        'patch_values' => ['type' => 'object'],
-                    ],
-                    'required' => ['connection_id', 'action', 'table', 'filter'],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'change_request_id' => ['type' => 'integer'],
-                        'affected_count' => ['type' => 'integer'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'confirm_data_change',
-                'label' => 'Confirm and Execute Data Change',
-                'description' => 'Atomically execute a previewed UPDATE (pinned to previewed PKs) or guarded DELETE (requiring typed confirmation phrase).',
-                'outcome' => 'Executes the pinned change in a transaction with TOCTOU row count verification and encrypted before-image.',
-                'scope' => 'tenant_user',
-                'read_only' => false,
-                'side_effects' => 'Mutates target database rows.',
-                'risk_level' => 'HIGH',
-                'requires_confirmation' => true,
-                'idempotent' => false,
-                'retryable' => false,
-                'audit_required' => true,
-                'parameters' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'change_request_id' => ['type' => 'integer'],
-                        'typed_phrase' => ['type' => 'string'],
-                    ],
-                    'required' => ['change_request_id'],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'success' => ['type' => 'boolean'],
-                        'affected_count' => ['type' => 'integer'],
-                    ],
-                ],
-            ],
-            [
-                'name' => 'undo_data_change',
-                'label' => 'Undo Executed Data Change',
-                'description' => 'Revert an executed UPDATE or DELETE using the stored encrypted before-image.',
-                'outcome' => 'Restores the original row values in a transaction.',
-                'scope' => 'tenant_user',
-                'read_only' => false,
-                'side_effects' => 'Restores rows to target database.',
-                'risk_level' => 'HIGH',
-                'requires_confirmation' => true,
-                'idempotent' => false,
-                'retryable' => false,
-                'audit_required' => true,
-                'parameters' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'change_request_id' => ['type' => 'integer'],
-                    ],
-                    'required' => ['change_request_id'],
-                ],
-                'output_schema' => [
-                    'type' => 'object',
-                    'properties' => [
-                        'success' => ['type' => 'boolean'],
-                        'restored_count' => ['type' => 'integer'],
-                    ],
-                ],
-            ],
-        ];
+        return self::$cachedToolDefs ?? [];
     }
 
     /**
-     * Agent-loop metadata layered over the definitions above. Anything not listed
-     * gets defaults derived from the definition (read_only => side_effect_class "read").
-     *
+     * Full definition for one tool, policy included, from its catalog row (orbit_tools, managed in the admin panel):
      * - secret_params: arguments filled from SecretVault at execution time; hidden from the model.
      * - always_confirm: needs explicit user confirmation regardless of autonomy level.
      * - confirm_by_button: destructive; only the Confirm button in Orbit's panel confirms it (not a typed "yes").
      * - postcondition: authoritative check run after a successful call.
-     */
-    public const TOOL_META = [
-        'test_database_connection' => [
-            'version' => 2,
-            'side_effect_class' => 'platform_metadata',
-            'secret_params' => ['password' => 'database_password'],
-            'requires_confirmation' => false,
-            'description' => 'Check whether a database is reachable. Pass connection_id to check the live status of a SAVED connection (updates its stored status). Or pass host, port, database and username to test NEW details before saving; the password is supplied securely by the app, never by you.',
-        ],
-        'save_database_connection' => [
-            'version' => 2,
-            'side_effect_class' => 'write',
-            'secret_params' => ['password' => 'database_password'],
-            // The user explicitly asked to connect; the handler re-tests before saving and the
-            // profile is platform-only and removable, so no extra confirmation by default.
-            'requires_confirmation' => false,
-            'postcondition' => 'connection_persisted',
-            'description' => 'Save a new MySQL connection profile for the user. Re-tests connectivity first and refuses to save if the test fails. Requires name, host, database, username (port defaults to 3306). The password is supplied securely by the app.',
-        ],
-        'update_database_connection' => ['side_effect_class' => 'write', 'secret_params' => ['password' => 'database_password']],
-        'disconnect_database_connection' => ['side_effect_class' => 'write', 'always_confirm' => true, 'confirm_by_button' => true],
-        'scan_database_schema' => ['side_effect_class' => 'platform_metadata', 'postcondition' => 'schema_snapshot_exists'],
-        'get_schema_scan_status' => ['side_effect_class' => 'platform_metadata'],
-        'create_automation_draft' => ['side_effect_class' => 'write', 'postcondition' => 'automation_persisted'],
-        'update_automation' => ['side_effect_class' => 'write'],
-        'remove_automation' => ['side_effect_class' => 'write', 'always_confirm' => true, 'confirm_by_button' => true],
-        'run_automation_now' => ['side_effect_class' => 'external'],
-        'update_published_record' => ['side_effect_class' => 'external', 'always_confirm' => true],
-        'approve_content_version' => ['side_effect_class' => 'external', 'postcondition' => 'version_approved'],
-        'reject_content_version' => ['side_effect_class' => 'write'],
-        'retry_execution' => ['side_effect_class' => 'write'],
-        'request_execution_interrupt' => ['side_effect_class' => 'write'],
-        'test_ai_provider' => ['secret_params' => ['api_key' => 'api_key']],
-        'save_ai_provider' => ['side_effect_class' => 'write', 'secret_params' => ['api_key' => 'api_key']],
-        'remove_knowledge_document' => ['side_effect_class' => 'write', 'always_confirm' => true, 'confirm_by_button' => true],
-        'ask_database' => ['side_effect_class' => 'read'],
-        'find_dummy_data' => ['side_effect_class' => 'read'],
-        'preview_data_change' => ['side_effect_class' => 'platform_metadata'],
-        'confirm_data_change' => ['side_effect_class' => 'external', 'always_confirm' => true],
-        'undo_data_change' => ['side_effect_class' => 'external', 'always_confirm' => true],
-    ];
-
-    /**
-     * Full definition for one tool, merged with agent-loop metadata. Null for unknown tools.
+     * Null for unknown tools.
      */
     public static function definition(string $name): ?array
     {
@@ -1305,19 +124,40 @@ class AgentToolRegistry
         if (!$def) {
             return null;
         }
-        $meta = self::TOOL_META[$name] ?? [];
-
-        $isUi = in_array($name, self::UI_TOOLS, true);
+        $isUi = in_array($name, self::UI_TOOLS, true) || !empty($def['is_ui']);
 
         return array_merge($def, [
-            'version' => $meta['version'] ?? 1,
-            'side_effect_class' => $isUi ? 'ui' : ($meta['side_effect_class'] ?? (($def['read_only'] ?? false) ? 'read' : 'write')),
-            'secret_params' => $meta['secret_params'] ?? [],
-            'always_confirm' => $meta['always_confirm'] ?? false,
-            'requires_confirmation' => $meta['requires_confirmation'] ?? ($def['requires_confirmation'] ?? false),
-            'postcondition' => $meta['postcondition'] ?? null,
-            'description' => $meta['description'] ?? $def['description'],
+            'version' => (int) ($def['version'] ?? 1),
+            'side_effect_class' => $isUi ? 'ui' : (($def['side_effect_class'] ?? null) ?: (($def['read_only'] ?? false) ? 'read' : 'write')),
+            'secret_params' => self::secretParams($def),
+            'always_confirm' => (bool) ($def['always_confirm'] ?? false),
+            'confirm_by_button' => (bool) ($def['confirm_by_button'] ?? false),
+            'requires_confirmation' => (bool) ($def['requires_confirmation'] ?? false),
+            'postcondition' => $def['postcondition'] ?? null,
         ]);
+    }
+
+    /**
+     * Arguments filled from the secure vault, never by the model: those the catalog lists, and any argument named like
+     * a secret whatever the catalog says, so an edited tool can never ask the model for a password or key.
+     *
+     * @return array<string, string> argument => secret kind
+     */
+    public static function secretParams(array $def): array
+    {
+        $params = [];
+        foreach ((array) ($def['secret_params'] ?? []) as $param => $kind) {
+            if (is_string($param) && is_string($kind) && $kind !== '') {
+                $params[$param] = $kind;
+            }
+        }
+        foreach (array_keys((array) ($def['parameters']['properties'] ?? [])) as $param) {
+            if (is_string($param) && !isset($params[$param]) && SecretVault::looksSecretKey($param)) {
+                $params[$param] = SecretVault::kindForParam($param);
+            }
+        }
+
+        return $params;
     }
 
     /**
@@ -1471,6 +311,27 @@ class AgentToolRegistry
                 ];
             }
         }
+        // Dynamic custom handlers
+        if (isset(self::$customHandlers[$toolName])) {
+            return (self::$customHandlers[$toolName])($user, $args);
+        }
+
+        // Check if tool is disabled in the admin panel
+        try {
+            if (\Illuminate\Support\Facades\Schema::hasTable('orbit_tools')) {
+                $dbTool = \App\Models\OrbitTool::find($toolName);
+                if ($dbTool && !$dbTool->is_active) {
+                    return [
+                        'success' => false,
+                        'error_category' => 'TOOL_DISABLED',
+                        'error' => "Tool '{$toolName}' has been disabled by the administrator.",
+                        'safe_message' => "This capability is currently disabled in system settings.",
+                    ];
+                }
+            }
+        } catch (\Throwable $e) {
+            // Proceed if database is unavailable
+        }
 
         switch ($toolName) {
             case 'list_database_connections':
@@ -1563,6 +424,25 @@ class AgentToolRegistry
             case 'query_knowledge_base':
                 return self::queryKnowledgeBase($user, $args);
 
+            case 'search_orbit_knowledge':
+                $query = trim((string) ($args['query'] ?? ''));
+                if (mb_strlen($query) < 2) {
+                    return ['success' => false, 'error_category' => 'INVALID_ARGS', 'error' => 'query is required.'];
+                }
+                $passages = array_map(fn ($c) => [
+                    'source_id' => $c['source_id'] ?? null,
+                    'scope' => $c['scope'] ?? null,
+                    'heading' => $c['heading'] ?? null,
+                    'text' => mb_substr((string) ($c['text'] ?? ''), 0, 1200),
+                ], (new AiServiceClient())->searchOrbitKnowledge($user->id, mb_substr($query, 0, 500), (int) ($args['top_k'] ?? 5)));
+
+                return [
+                    'success' => true,
+                    'query' => $query,
+                    'passages' => $passages,
+                    'message' => count($passages) . ' passage(s) found.',
+                ];
+
             case 'remove_knowledge_document':
                 return self::deleteKnowledgeDocument($user, $args);
 
@@ -1576,43 +456,147 @@ class AgentToolRegistry
                 return Tools\AuditTools::inspect($user, $args);
 
             case 'ask_database':
+                $resolved = ConnectionResolver::resolve($user, $args['connection_id'] ?? null);
+                if (!isset($resolved['connection'])) {
+                    return $resolved;
+                }
                 // PII stays masked for Orbit: revealing it is the user's own audited action in the data assistant.
                 return app(\App\Services\Data\DataAgentService::class)->ask(
                     $user,
                     $args['question'],
-                    $args['connection_id'] ?? null,
+                    $resolved['connection']->id,
                     ['reveal_pii' => false]
                 );
 
             case 'find_dummy_data':
-                $connId = $args['connection_id'] ?? null;
-                $conn = $connId 
-                    ? DbConnection::where('id', $connId)->where('user_id', $user->id)->firstOrFail()
-                    : DbConnection::where('user_id', $user->id)->where('is_active', true)->firstOrFail();
-                $res = app(\App\Services\Data\DummyDataDetector::class)->detect($conn, $args['table']);
-                return ['success' => true, 'report' => $res];
+                $targetTable = $args['table'] ?? $args['tables'] ?? 'recommended';
+                $resolved = ConnectionResolver::resolve($user, $args['connection_id'] ?? null,
+                    is_string($targetTable) && !in_array($targetTable, ['recommended', 'all'], true) ? $targetTable : null);
+                if (!isset($resolved['connection'])) {
+                    return $resolved;
+                }
+                $conn = $resolved['connection'];
+                $detector = app(\App\Services\Data\DummyDataDetector::class);
+                $res = $detector->detectAcrossTables($conn, $targetTable);
+                $msg = $res['summary_message'] ?? 'Dummy data analysis completed.';
+                return [
+                    'success' => true,
+                    'message' => $msg,
+                    'report' => $res,
+                    'data' => $res,
+                    'safe_message' => $msg,
+                ];
 
             case 'preview_data_change':
-                $conn = DbConnection::where('id', $args['connection_id'])->where('user_id', $user->id)->firstOrFail();
-                if ($args['action'] === 'update') {
-                    return app(\App\Services\Data\DataChangeService::class)->previewUpdate(
-                        $conn, $user, $args['table'], $args['filter'], $args['patch_values'] ?? []
-                    );
-                } else {
-                    return app(\App\Services\Data\DataChangeService::class)->previewDelete(
-                        $conn, $user, $args['table'], $args['filter']
-                    );
+                $resolved = ConnectionResolver::resolve($user, $args['connection_id'] ?? null, is_string($args['table'] ?? null) ? $args['table'] : null);
+                if (!isset($resolved['connection'])) {
+                    return $resolved;
+                }
+                $conn = $resolved['connection'];
+                $where = ['connection_id' => $conn->id, 'connection' => $conn->name];
+
+                // The action is never assumed: a missing one is an error, not a delete.
+                $action = strtolower((string) ($args['action'] ?? $args['operation'] ?? ''));
+                if (!in_array($action, ['update', 'delete', 'insert'], true)) {
+                    return ['success' => false, 'error_category' => 'INVALID_ARGS',
+                        'error' => 'action must be insert, update or delete.'] + $where;
                 }
 
+                if ($action === 'insert') {
+                    // New rows: the same checks, preview and confirmation as the Data page's add-row form.
+                    $rows = $args['rows'] ?? [];
+                    if (!is_array($rows) || $rows === [] || !array_is_list($rows) || !is_array($rows[0])) {
+                        return ['success' => false, 'error_category' => 'INVALID_ARGS',
+                            'error' => 'For insert pass rows: a list of objects, one per new row, keyed by column name.'] + $where;
+                    }
+                    $res = app(\App\Services\Data\DataChangeService::class)->previewInsert($conn, $user, (string) $args['table'], $rows, 'orbit');
+
+                    return $res + $where;
+                }
+
+                $filter = $args['filter'] ?? $args['filters'] ?? [];
+                if (empty($filter)) {
+                    if (!empty($args['rows'])) {
+                        $rows = (array) $args['rows'];
+                        if (array_is_list($rows) && isset($rows[0]) && is_scalar($rows[0])) {
+                            $filter = ['id' => $rows];
+                        } elseif (array_is_list($rows) && isset($rows[0]['id'])) {
+                            $filter = ['id' => array_column($rows, 'id')];
+                        } else {
+                            $filter = $rows;
+                        }
+                    } elseif (!empty($args['ids'])) {
+                        $filter = ['id' => (array) $args['ids']];
+                    } elseif (!empty($args['id'])) {
+                        $filter = ['id' => $args['id']];
+                    }
+                }
+
+                if ($action === 'update') {
+                    return app(\App\Services\Data\DataChangeService::class)->previewUpdate(
+                        $conn, $user, $args['table'], (array) $filter, $args['patch_values'] ?? []
+                    ) + $where;
+                }
+
+                return app(\App\Services\Data\DataChangeService::class)->previewDelete(
+                    $conn, $user, $args['table'], (array) $filter
+                ) + $where;
+
             case 'confirm_data_change':
+                $changeId = $args['change_request_id'] ?? null;
+                if (!$changeId) {
+                    $q = \App\Models\DataChangeRequest::where('user_id', $user->id)
+                        ->where('status', 'pending_confirmation')
+                        ->where('expires_at', '>', now());
+                    if (!empty($args['connection_id'])) {
+                        $q->where('connection_id', $args['connection_id']);
+                    }
+                    if (!empty($args['table'])) {
+                        $q->where('target_table', $args['table']);
+                    }
+                    if (!empty($args['action'])) {
+                        $q->where('action', $args['action']);
+                    }
+                    $pending = $q->latest()->first();
+                    if ($pending) {
+                        $changeId = $pending->id;
+                    } else {
+                        $executed = \App\Models\DataChangeRequest::where('user_id', $user->id)->latest()->first();
+                        if ($executed && $executed->status === 'executed') {
+                            return ['success' => true, 'message' => "Change has already been confirmed and executed."];
+                        }
+                        return ['success' => false, 'error' => 'No pending change request found to confirm. Please preview the change first.'];
+                    }
+                }
+
+                // A delete's typed phrase counts only when the user typed it: it is read from their own latest
+                // message, never from tool arguments (the model saw the phrase in the preview and could pass it on).
+                $phrase = null;
+                $pendingReq = \App\Models\DataChangeRequest::where('user_id', $user->id)->find($changeId);
+                if ($pendingReq && $pendingReq->confirmation_phrase) {
+                    $lastUserMsg = \App\Models\AgentMessage::where('conversation_id', function ($query) use ($user) {
+                        $query->select('id')->from('agent_conversations')->where('user_id', $user->id)->latest('id')->limit(1);
+                    })->where('role', 'user')->latest('id')->first();
+
+                    if ($lastUserMsg && stripos($lastUserMsg->content, $pendingReq->confirmation_phrase) !== false) {
+                        $phrase = $pendingReq->confirmation_phrase;
+                    }
+                }
+
                 return app(\App\Services\Data\DataChangeService::class)->executeChange(
-                    $user, $args['change_request_id'], $args['typed_phrase'] ?? null
+                    $user, (int) $changeId, $phrase
                 );
 
             case 'undo_data_change':
                 return app(\App\Services\Data\DataChangeService::class)->undo(
                     $user, $args['change_request_id']
                 );
+
+            case 'get_account_profile':
+                return Tools\AccountTools::get($user);
+
+            case 'update_account_profile':
+                return Tools\AccountTools::update($user, $args);
 
             default:
                 return [
@@ -1686,16 +670,25 @@ class AgentToolRegistry
             return ['success' => false, 'error' => $e->getMessage()];
         }
 
-        // Perform PDO handshake
+        // Perform dialect-dynamic handshake via TargetConnector and DialectRegistry
         $start = microtime(true);
         try {
-            $dsn = "mysql:host={$host};port={$port};dbname={$dbName};charset=utf8mb4";
-            $options = [
-                \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
-                \PDO::ATTR_TIMEOUT => 4,
-            ];
-            $pdo = new \PDO($dsn, $username, $password, $options);
-            $serverVersion = $pdo->getAttribute(\PDO::ATTR_SERVER_VERSION);
+            $dbType = \App\Services\Data\Dialects\DialectRegistry::normalise(isset($conn) ? $conn->db_type : ($args['db_type'] ?? 'mysql'));
+            $dialect = \App\Services\Data\Dialects\DialectRegistry::for($dbType);
+            $targetConnector = app(\App\Services\Data\TargetConnector::class);
+            $tempConn = new DbConnection([
+                'host' => $host,
+                'port' => $port,
+                'database_name' => $dbName,
+                'username' => $username,
+                'encrypted_password' => $password,
+                'ssl_mode' => $sslMode,
+                'db_type' => $dialect->key(),
+            ]);
+            $pdo = $targetConnector->open($tempConn, true, 4000);
+            $serverInfo = $dialect->serverInfo($pdo);
+            $serverVersion = $serverInfo['version'] ?? 'Unknown';
+            $engineLabel = $serverInfo['engine'] ?? $dialect->label();
             $latency = round((microtime(true) - $start) * 1000, 2);
             unset($pdo);
 
@@ -1706,8 +699,8 @@ class AgentToolRegistry
             return [
                 'success' => true,
                 'message' => isset($conn)
-                    ? "Saved connection '{$conn->name}' is reachable (MySQL {$serverVersion}, {$latency}ms)."
-                    : "Connection successful (Server: {$serverVersion}, Latency: {$latency}ms).",
+                    ? "Saved connection '{$conn->name}' is reachable ({$engineLabel} {$serverVersion}, {$latency}ms)."
+                    : "Connection successful ({$engineLabel} {$serverVersion}, Latency: {$latency}ms).",
                 'connection_id' => isset($conn) ? $conn->id : null,
                 'connection_name' => isset($conn) ? $conn->name : null,
                 'status' => 'connected',
@@ -1846,6 +839,9 @@ class AgentToolRegistry
         if (!empty($args['host'])) $dataToUpdate['host'] = trim($args['host']);
         if (!empty($args['port'])) $dataToUpdate['port'] = (int) $args['port'];
         if (!empty($args['ssl_mode'])) $dataToUpdate['ssl_mode'] = $args['ssl_mode'];
+        if (!empty($args['access_mode']) && in_array($args['access_mode'], ['read_only', 'read_write', 'read_write_delete'], true)) {
+            $dataToUpdate['access_mode'] = $args['access_mode'];
+        }
 
         if (!empty($dataToUpdate)) {
             $conn->update($dataToUpdate);

@@ -251,4 +251,41 @@ class SafeDataWritesAndGuardedDeleteTest extends TestCase
         $this->assertStringContainsString('***@', $row['email']);
         $this->assertStringContainsString('*', $row['phone']);
     }
+
+    public function test_preview_delete_and_update_with_array_filters(): void
+    {
+        $user = $this->createUser();
+        $conn = $this->createWritableConnection($user, 'read_write_delete');
+        $service = app(DataChangeService::class);
+
+        // Preview delete with array list of IDs (e.g. ['id' => [2, 3]])
+        $delPreview = $service->previewDelete($conn, $user, 'posts', ['id' => [2, 3]]);
+        $this->assertTrue($delPreview['success']);
+        $this->assertEquals(2, $delPreview['affected_count']);
+        $this->assertEquals('DELETE 2 posts', $delPreview['confirmation_phrase']);
+
+        // Preview update with array list of IDs
+        $upPreview = $service->previewUpdate($conn, $user, 'posts', ['id' => [2, 3]], ['title' => 'Bulk Updated']);
+        $this->assertTrue($upPreview['success']);
+        $this->assertEquals(2, $upPreview['affected_count']);
+    }
+
+    public function test_delete_confirmation_phrase_accepts_quotes_and_case_insensitive(): void
+    {
+        $user = $this->createUser();
+        $conn = $this->createWritableConnection($user, 'read_write_delete');
+        $service = app(DataChangeService::class);
+
+        $preview = $service->previewDelete($conn, $user, 'posts', ['id' => 2]);
+        $this->assertTrue($preview['success']);
+
+        // Execute with single quotes and lower case: 'delete 1 posts'
+        $execRes = $service->executeChange($user, $preview['change_request_id'], "'delete 1 posts'");
+        $this->assertTrue($execRes['success']);
+        $this->assertEquals(1, $execRes['affected_count']);
+
+        // Restore the deleted post so fixtures remain intact
+        $undoRes = $service->undo($user, $preview['change_request_id']);
+        $this->assertTrue($undoRes['success']);
+    }
 }

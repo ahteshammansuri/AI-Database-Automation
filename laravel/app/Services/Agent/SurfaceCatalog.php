@@ -11,12 +11,49 @@ class SurfaceCatalog
 {
     protected static ?array $data = null;
 
+    public static function flushCache(): void
+    {
+        self::$data = null;
+    }
+
     public static function data(): array
     {
-        if (self::$data === null) {
-            $raw = file_get_contents(resource_path('orbit/surfaces.json'));
-            self::$data = json_decode($raw, true, 512, JSON_THROW_ON_ERROR);
+        if (self::$data !== null) {
+            return self::$data;
         }
+
+        try {
+            if (\Illuminate\Support\Facades\Schema::hasTable('orbit_pages') && \Illuminate\Support\Facades\Schema::hasTable('orbit_surfaces')) {
+                $dbPages = \App\Models\OrbitPage::where('is_active', true)->orderBy('sort')->get();
+                $dbSurfaces = \App\Models\OrbitSurface::where('is_active', true)->orderBy('sort')->get();
+
+                if ($dbPages->isNotEmpty() && $dbSurfaces->isNotEmpty()) {
+                    self::$data = [
+                        'version' => 1,
+                        'pages' => $dbPages->map(fn ($p) => [
+                            'route' => $p->route,
+                            'title' => $p->title,
+                        ])->all(),
+                        'surfaces' => $dbSurfaces->map(fn ($s) => [
+                            'id' => $s->id,
+                            'route' => $s->route,
+                            'title' => $s->title,
+                            'purpose' => $s->purpose,
+                            'openable' => (bool) $s->openable,
+                            'fields' => $s->fields ?? [],
+                            'actions' => $s->actions ?? [],
+                        ])->all(),
+                    ];
+
+                    return self::$data;
+                }
+            }
+        } catch (\Throwable $e) {
+            // Fall back to catalog file if database is unavailable or migrating
+        }
+
+        $raw = file_get_contents(resource_path('orbit/surfaces.json'));
+        self::$data = json_decode($raw, true, 512, JSON_THROW_ON_ERROR);
 
         return self::$data;
     }
@@ -61,7 +98,7 @@ class SurfaceCatalog
             if (!empty($f['dynamic']) && str_ends_with($f['name'], '.*')) {
                 $prefix = substr($f['name'], 0, -1);
                 $rest = substr($name, strlen($prefix));
-                if (str_starts_with($name, $prefix) && preg_match('/^[A-Za-z0-9_]{1,64}$/', $rest)) {
+                if (str_starts_with($name, $prefix) && preg_match('/^[A-Za-z0-9_$\\-]{1,64}$/', $rest)) {
                     return array_merge($f, ['name' => $name]);
                 }
             }
@@ -82,6 +119,28 @@ class SurfaceCatalog
     }
 
     /** Compact page/surface map the model sees (what exists where). */
+    /**
+     * Each portal page with what it is for (its own description, else what its surfaces are for), so the AI service
+     * can retrieve the page a message is about by meaning.
+     *
+     * @return list<array{route: string, title: string, description: string}>
+     */
+    public static function pageSummaries(): array
+    {
+        $data = self::data();
+        $out = [];
+        foreach ($data['pages'] ?? [] as $page) {
+            $about = trim((string) ($page['description'] ?? ''));
+            if ($about === '') {
+                $about = implode(' ', array_map(fn ($s) => trim((string) ($s['purpose'] ?? $s['title'] ?? '')),
+                    array_filter($data['surfaces'] ?? [], fn ($s) => ($s['route'] ?? null) === $page['route'])));
+            }
+            $out[] = ['route' => $page['route'], 'title' => (string) $page['title'], 'description' => mb_substr($about, 0, 400)];
+        }
+
+        return $out;
+    }
+
     public static function modelSummary(): array
     {
         $out = [];
@@ -90,6 +149,8 @@ class SurfaceCatalog
                 'surface' => $s['id'],
                 'page' => $s['route'],
                 'title' => $s['title'],
+                // What the surface is for: retrieval picks the surfaces a request is about by it.
+                'purpose' => mb_substr((string) ($s['purpose'] ?? ''), 0, 400),
                 'fields' => array_map(fn ($f) => $f['name'] . ($f['type'] === 'secret' ? '(secret: user types it)' : '') . (!empty($f['required']) ? '*' : ''), $s['fields'] ?? []),
                 'actions' => array_map(fn ($a) => $a['id'] . (!empty($a['row']) ? '(row)' : '') . (!empty($a['destructive']) ? '!!' : (!empty($a['consequential']) ? '!' : '')), $s['actions'] ?? []),
             ];
@@ -113,6 +174,16 @@ class SurfaceCatalog
         }
         if ($tool === 'read_screen') {
             return $ok(false, 15);
+        }
+        // Guided tours run in the browser and wait for the voice: a whole tour takes a few minutes.
+        if ($tool === 'give_tour') {
+            return $ok(false, 600);
+        }
+        if ($tool === 'explain_page') {
+            if (!empty($args['page']) && !in_array($args['page'], self::routes(), true)) {
+                return $fail('Unknown page. Pages: ' . implode(', ', self::routes()));
+            }
+            return $ok(false, ($args['depth'] ?? 'overview') === 'detailed' ? 420 : 120);
         }
 
         $surface = self::surface((string) ($args['surface'] ?? ''));

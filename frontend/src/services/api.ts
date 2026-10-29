@@ -572,6 +572,7 @@ export const api = {
       body: JSON.stringify({ title: title || "New Consultation" }),
     }),
   getAgentConversation: (id: number) => request<any>(`/agent/conversations/${id}`),
+  deleteAgentConversation: (id: number) => request<any>(`/agent/conversations/${id}`, { method: "DELETE" }),
   postAgentMessage: (id: number, content: string, isVoice = false, secureInputData?: any, pageContext?: any) => {
     const { redactedText, hasRedaction, extractedSecrets } = redactSecretsFromUtterance(content);
     const mergedSecure = {

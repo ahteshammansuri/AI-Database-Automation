@@ -17,8 +17,8 @@ class Settings(BaseModel):
     # Upper bound when the prompt needs a larger window (long multi-step turns).
     AGENT_NUM_CTX_MAX: int = int(os.getenv("AGENT_NUM_CTX_MAX", "12288"))
     # Room for one decision: speech, slot updates for a long request, and a plan.
-    AGENT_NUM_PREDICT: int = int(os.getenv("AGENT_NUM_PREDICT", "512"))
-    AGENT_MAX_TOOLS: int = int(os.getenv("AGENT_MAX_TOOLS", "18"))
+    AGENT_NUM_PREDICT: int = int(os.getenv("AGENT_NUM_PREDICT", "256"))
+    AGENT_MAX_TOOLS: int = int(os.getenv("AGENT_MAX_TOOLS", "26"))
     # The placeholder "mock" provider writes fake text; it is only for automated tests (tests/conftest.py).
     ALLOW_MOCK_PROVIDER: bool = os.getenv("AI_ALLOW_MOCK_PROVIDER", "").lower() in ("1", "true", "yes")
 

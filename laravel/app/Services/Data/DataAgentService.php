@@ -82,7 +82,7 @@ class DataAgentService
         }
 
         // 4. Fast-path: "How are X and Y related" / Relationships
-        if (preg_match('/how are (\w+) and (\w+) related|relationship between (\w+) and (\w+)|fk graph/i', $uLower, $m)) {
+        if (preg_match('/how are ([\w$\\-]+) and ([\w$\\-]+) related|relationship between ([\w$\\-]+) and ([\w$\\-]+)|fk graph/i', $uLower, $m)) {
             return $this->answerRelationships($connection, $uLower, $catalog);
         }
 

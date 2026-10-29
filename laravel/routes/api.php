@@ -95,13 +95,13 @@ Route::middleware(['auth:sanctum', \App\Http\Middleware\EnsureCustomerActive::cl
     // Data Explorer (browse) and Data Manager (changes: preview -> confirm -> undo)
     Route::prefix('data')->controller(\App\Http\Controllers\Api\DataExplorerController::class)->group(function () {
         Route::get('/connections/{id}/tables', 'tables')->whereNumber('id');
-        Route::get('/connections/{id}/tables/{table}/rows', 'rows')->whereNumber('id')->where('table', '[A-Za-z0-9_]+')->middleware('throttle:120,1');
-        Route::get('/connections/{id}/tables/{table}/links/{column}', 'linkOptions')->whereNumber('id')->where(['table' => '[A-Za-z0-9_]+', 'column' => '[A-Za-z0-9_]+']);
-        Route::get('/connections/{id}/tables/{table}/history', 'history')->whereNumber('id')->where('table', '[A-Za-z0-9_]+');
-        Route::post('/connections/{id}/tables/{table}/preview-insert', 'previewInsert')->whereNumber('id')->where('table', '[A-Za-z0-9_]+')->middleware('throttle:60,1');
-        Route::post('/connections/{id}/tables/{table}/preview-update', 'previewUpdate')->whereNumber('id')->where('table', '[A-Za-z0-9_]+')->middleware('throttle:60,1');
-        Route::post('/connections/{id}/tables/{table}/preview-delete', 'previewDelete')->whereNumber('id')->where('table', '[A-Za-z0-9_]+')->middleware('throttle:30,1');
-        Route::post('/connections/{id}/tables/{table}/sample-rows', 'sampleRows')->whereNumber('id')->where('table', '[A-Za-z0-9_]+')->middleware('throttle:20,1');
+        Route::get('/connections/{id}/tables/{table}/rows', 'rows')->whereNumber('id')->where('table', '[A-Za-z0-9_$\\-]+')->middleware('throttle:120,1');
+        Route::get('/connections/{id}/tables/{table}/links/{column}', 'linkOptions')->whereNumber('id')->where(['table' => '[A-Za-z0-9_$\\-]+', 'column' => '[A-Za-z0-9_$\\-]+']);
+        Route::get('/connections/{id}/tables/{table}/history', 'history')->whereNumber('id')->where('table', '[A-Za-z0-9_$\\-]+');
+        Route::post('/connections/{id}/tables/{table}/preview-insert', 'previewInsert')->whereNumber('id')->where('table', '[A-Za-z0-9_$\\-]+')->middleware('throttle:60,1');
+        Route::post('/connections/{id}/tables/{table}/preview-update', 'previewUpdate')->whereNumber('id')->where('table', '[A-Za-z0-9_$\\-]+')->middleware('throttle:60,1');
+        Route::post('/connections/{id}/tables/{table}/preview-delete', 'previewDelete')->whereNumber('id')->where('table', '[A-Za-z0-9_$\\-]+')->middleware('throttle:30,1');
+        Route::post('/connections/{id}/tables/{table}/sample-rows', 'sampleRows')->whereNumber('id')->where('table', '[A-Za-z0-9_$\\-]+')->middleware('throttle:20,1');
         Route::post('/changes/{changeId}/confirm', 'confirm')->whereNumber('changeId')->middleware('throttle:60,1');
         Route::post('/changes/{changeId}/cancel', 'cancel')->whereNumber('changeId');
         Route::post('/changes/{changeId}/undo', 'undo')->whereNumber('changeId')->middleware('throttle:30,1');
@@ -113,8 +113,8 @@ Route::middleware(['auth:sanctum', \App\Http\Middleware\EnsureCustomerActive::cl
         Route::delete('/{id}', 'destroy')->whereNumber('id');
         Route::post('/{id}/run', 'runNow')->whereNumber('id')->middleware('throttle:10,1');
     });
-    Route::post('/connections/{id}/tables/{table}/annotate', [SchemaController::class, 'annotateTable']);
-    Route::put('/connections/{id}/tables/{table}/access', [SchemaController::class, 'setTableAccess']);
+    Route::post('/connections/{id}/tables/{table}/annotate', [SchemaController::class, 'annotateTable'])->whereNumber('id')->where('table', '[A-Za-z0-9_$\\-]+');
+    Route::put('/connections/{id}/tables/{table}/access', [SchemaController::class, 'setTableAccess'])->whereNumber('id')->where('table', '[A-Za-z0-9_$\\-]+');
 
     // AI Providers
     Route::get('/ai-providers', [AiProviderController::class, 'index']);
@@ -183,7 +183,8 @@ Route::middleware(['auth:sanctum', \App\Http\Middleware\EnsureCustomerActive::cl
     // Autonomous AI Agent Assistant
     Route::get('/agent/conversations', [AgentController::class, 'index']);
     Route::post('/agent/conversations', [AgentController::class, 'store']);
-    Route::get('/agent/conversations/{id}', [AgentController::class, 'show']);
+    Route::get('/agent/conversations/{id}', [AgentController::class, 'show'])->whereNumber('id');
+    Route::delete('/agent/conversations/{id}', [AgentController::class, 'destroy'])->whereNumber('id');
     Route::post('/agent/conversations/{id}/messages', [AgentController::class, 'postMessage'])->middleware(\App\Http\Middleware\EnsureOrbitEnabled::class);
     Route::get('/agent/tasks/{id}', [AgentController::class, 'getTask']);
     Route::post('/agent/tasks/{id}/interrupt', [AgentController::class, 'interrupt']);

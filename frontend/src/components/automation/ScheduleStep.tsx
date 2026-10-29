@@ -400,7 +400,7 @@ export const ScheduleStep: React.FC<Props> = ({
               <input
                 id="reviewer-email"
                 type="email"
-                value={approval.reviewer_email}
+                value={approval.reviewer_email || ""}
                 placeholder={userEmail || "editor@example.com"}
                 onChange={(e) => { onFieldEdited?.("reviewer_email"); onApprovalChange({ ...approval, reviewer_email: e.target.value }); }}
                 className={`da-input${invalid(errors.reviewer_email)}`}

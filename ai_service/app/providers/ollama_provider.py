@@ -346,15 +346,18 @@ class OllamaProvider(BaseAIProvider):
     @staticmethod
     def _agent_ctx(messages: List[Dict[str, str]], json_schema: Dict[str, Any]) -> int:
         """
-        One fixed context window for every agent decision. Changing num_ctx between requests makes
+        Fixed context window for agent decisions. Changing num_ctx between requests makes
         Ollama reload the model and drop its cached prompt prefix, which costs minutes on a CPU.
         """
-        chars = sum(len(m.get("content", "")) for m in messages) + len(json.dumps(json_schema))
-        needed = chars // 3 + settings.AGENT_NUM_PREDICT + 256
+        chars = sum(len(m.get("content", "")) for m in messages)
+        needed = int(chars / 3.5) + settings.AGENT_NUM_PREDICT + 256
+        if needed <= settings.AGENT_NUM_CTX:
+            return settings.AGENT_NUM_CTX
         if needed > settings.AGENT_NUM_CTX_MAX:
             logger.warning("Agent prompt (~%d tokens) exceeds AGENT_NUM_CTX_MAX=%d; the oldest text may be cut.",
                            needed, settings.AGENT_NUM_CTX_MAX)
-        return settings.AGENT_NUM_CTX_MAX
+            return settings.AGENT_NUM_CTX_MAX
+        return ((needed + 1023) // 1024) * 1024
 
     def chat_structured(
         self,

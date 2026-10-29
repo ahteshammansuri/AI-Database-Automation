@@ -1,6 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { api } from "../services/api";
+import { BootSkeleton } from "../components/ui/ShellSkeletons";
 
 /**
  * Platform settings and website texts, managed by administrators in the admin panel (Laravel). The app waits for
@@ -143,12 +144,8 @@ export const PlatformProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         </div>
       );
     }
-    // Usually ready within a few milliseconds; only a slow answer shows a spinner.
-    return slow ? (
-      <div className="min-h-screen grid place-items-center bg-slate-50" role="status" aria-label="Loading">
-        <span className="h-7 w-7 animate-spin rounded-full border-2 border-indigo-200 border-t-indigo-600" />
-      </div>
-    ) : null;
+    // Usually ready within a few milliseconds; only a slow answer shows the placeholder of the screen being opened.
+    return slow ? <BootSkeleton path={window.location.pathname} /> : null;
   }
 
   return (

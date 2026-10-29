@@ -6,6 +6,7 @@ import { api } from "../services/api";
 import { ContentPreview } from "../components/content/ContentPreview";
 import { formatInstant, relativeFromNow } from "../lib/schedule";
 import { FieldError } from "../components/ui/kit";
+import { ApprovalReviewSkeleton } from "../components/ui/ShellSkeletons";
 import { invalid, rules, serverFieldErrors, validateField } from "../lib/validation";
 import { BrandName } from "../context/PlatformContext";
 
@@ -90,12 +91,7 @@ export const ApprovalReviewPage: React.FC = () => {
   );
 
   if (loading) {
-    return shell(
-      <>
-        <Loader2 className="mx-auto h-8 w-8 animate-spin text-indigo-600" />
-        <p className="text-xs font-semibold text-slate-700">Opening the draft…</p>
-      </>
-    );
+    return <ApprovalReviewSkeleton />;
   }
 
   if (!data) {

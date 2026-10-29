@@ -27,6 +27,7 @@ export interface SweetAlertOptions {
   confirmButtonText?: string;
   cancelButtonText?: string;
   showCancelButton?: boolean;
+  isDestructive?: boolean;
   onConfirm?: () => void;
   onCancel?: () => void;
 }
@@ -106,6 +107,35 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     settlePendingConfirm(false);
     setActiveAlert(null);
   }, [settlePendingConfirm]);
+
+  // Intercept window.alert so no raw browser popups ever show
+  React.useEffect(() => {
+    const origAlert = window.alert;
+    window.alert = (message?: any) => {
+      showAlert({
+        title: "Notification",
+        text: String(message ?? ""),
+        icon: "info",
+        confirmButtonText: "Understood",
+      });
+    };
+    return () => {
+      window.alert = origAlert;
+    };
+  }, [showAlert]);
+
+  // Handle ESC key to dismiss dialog
+  React.useEffect(() => {
+    if (!activeAlert) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (activeAlert.onCancel) activeAlert.onCancel();
+        closeAlert();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [activeAlert, closeAlert]);
 
   const confirm = useCallback((options: Omit<SweetAlertOptions, "onConfirm" | "onCancel" | "showCancelButton">) =>
     new Promise<boolean>((resolve) => {
@@ -190,13 +220,22 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       {/* SweetAlert Animated Modal Dialog */}
       <AnimatePresence>
         {activeAlert && (
-          <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div
+            className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) {
+                if (activeAlert.onCancel) activeAlert.onCancel();
+                closeAlert();
+              }
+            }}
+          >
             <motion.div
               initial={{ opacity: 0, scale: 0.85, y: 15 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.9, y: 15 }}
               transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
               className="bg-white border border-slate-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl text-center space-y-4"
+              onClick={(e) => e.stopPropagation()}
             >
               {/* SweetAlert Icon Animation */}
               <div className="mx-auto flex items-center justify-center">
@@ -282,7 +321,11 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                     if (activeAlert.onConfirm) activeAlert.onConfirm();
                     closeAlert();
                   }}
-                  className="btn-primary-gradient px-5 py-2 text-white rounded-xl text-xs font-semibold shadow-xs transition"
+                  className={
+                    activeAlert.isDestructive
+                      ? "px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-semibold shadow-xs shadow-rose-500/20 transition"
+                      : "btn-primary-gradient px-5 py-2 text-white rounded-xl text-xs font-semibold shadow-xs transition"
+                  }
                 >
                   {activeAlert.confirmButtonText || "OK"}
                 </button>

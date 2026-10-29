@@ -5,6 +5,8 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Activity, AlertCircle, BrainCircuit, CheckCircle2, FileEdit, FlaskConical, Info, Loader2, Save, Sparkles, XCircle } from "lucide-react";
 import { api } from "../../services/api";
 import { FieldError } from "../ui/kit";
+import { Select2 } from "../ui/Select2";
+import { ModelRolesSkeleton } from "../ui/PageSkeletons";
 import { invalid, rules, serverFieldErrors, validateField } from "../../lib/validation";
 
 interface ModelRoleItem {
@@ -121,6 +123,7 @@ export const ModelRolesSection: React.FC = () => {
         is_active: roleItem.is_active,
       });
       setRoles((prev) => prev.map((r) => (r.role === roleItem.role ? { ...r, is_customized: true } : r)));
+      window.dispatchEvent(new CustomEvent("model-role-changed", { detail: roleItem }));
       setStatusFeedback((prev) => ({ ...prev, [roleItem.role]: { type: "success", text: "Saved. New requests use this model." } }));
       setTimeout(() => setStatusFeedback((prev) => ({ ...prev, [roleItem.role]: undefined })), 3500);
       return true;
@@ -216,12 +219,7 @@ export const ModelRolesSection: React.FC = () => {
   });
 
   if (loading) {
-    return (
-      <div className="da-card p-8 text-center">
-        <Loader2 className="mx-auto mb-2 h-6 w-6 animate-spin text-indigo-600" />
-        <p className="text-xs font-medium text-slate-500">Loading which model does which job…</p>
-      </div>
-    );
+    return <ModelRolesSkeleton />;
   }
 
   return (
@@ -275,9 +273,14 @@ export const ModelRolesSection: React.FC = () => {
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div>
                     <label htmlFor={`role-provider-${r.role}`} className="da-label">Provider</label>
-                    <select id={`role-provider-${r.role}`} value={r.provider} onChange={(e) => handleProviderChange(r.role, e.target.value)} className="da-input cursor-pointer py-2 text-[12.5px]">
-                      {PROVIDERS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
-                    </select>
+                    <Select2
+                      id={`role-provider-${r.role}`}
+                      size="sm"
+                      value={r.provider}
+                      onChange={(val) => handleProviderChange(r.role, String(val))}
+                      options={PROVIDERS}
+                      showSearch={false}
+                    />
                   </div>
                   <div>
                     <div className="mb-1 flex items-center justify-between">
@@ -291,12 +294,21 @@ export const ModelRolesSection: React.FC = () => {
                         aria-invalid={!!modelErrors[r.role]} aria-describedby={modelErrors[r.role] ? `role-model-${r.role}-error` : undefined}
                         className={`da-input py-2 font-mono text-[12.5px]${invalid(modelErrors[r.role])}`} />
                     ) : (
-                      <select id={`role-model-${r.role}`} value={r.model_name} onChange={(e) => handleFieldChange(r.role, "model_name", e.target.value)}
-                        aria-invalid={!!modelErrors[r.role]} aria-describedby={modelErrors[r.role] ? `role-model-${r.role}-error` : undefined}
-                        className={`da-input cursor-pointer py-2 font-mono text-[12.5px]${invalid(modelErrors[r.role])}`}>
-                        {!availableModels.includes(r.model_name) && r.model_name && <option value={r.model_name}>{r.model_name} (current)</option>}
-                        {availableModels.map((mod) => <option key={mod} value={mod}>{mod}</option>)}
-                      </select>
+                      <Select2
+                        id={`role-model-${r.role}`}
+                        size="sm"
+                        value={r.model_name}
+                        onChange={(val) => handleFieldChange(r.role, "model_name", String(val))}
+                        options={[
+                          ...(!availableModels.includes(r.model_name) && r.model_name
+                            ? [{ value: r.model_name, label: `${r.model_name} (current)` }]
+                            : []),
+                          ...availableModels.map((mod) => ({ value: mod, label: mod })),
+                        ]}
+                        invalid={!!modelErrors[r.role]}
+                        showSearch={availableModels.length > 5}
+                        className="font-mono"
+                      />
                     )}
                     <FieldError id={`role-model-${r.role}`} message={modelErrors[r.role]} />
                   </div>

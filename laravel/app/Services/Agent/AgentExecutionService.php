@@ -18,11 +18,8 @@ use Illuminate\Support\Str;
  */
 class AgentExecutionService
 {
-    /** Task states in which a new utterance continues the same task. */
-    public const OPEN_STATUSES = ['QUEUED', 'RUNNING', 'WAITING_FOR_INPUT', 'WAITING_FOR_APPROVAL', 'PAUSE_REQUESTED', 'PAUSED'];
-
-    /** A waiting task older than this no longer captures new utterances. */
-    public const OPEN_TASK_TTL_MINUTES = 120;
+    /** Task states in which a new utterance continues the same task (the task lifecycle, on the model). */
+    public const OPEN_STATUSES = AgentTask::OPEN_STATUSES;
 
     public function __construct(
         protected SecretVault $vault,
@@ -195,7 +192,8 @@ class AgentExecutionService
             ->first();
 
         $waiting = $task && !in_array($task->status, ['QUEUED', 'RUNNING'], true);
-        if ($waiting && $task->updated_at < now()->subMinutes(self::OPEN_TASK_TTL_MINUTES)) {
+        // A waiting task older than this no longer captures new utterances (config/orbit.php).
+        if ($waiting && $task->updated_at < now()->subMinutes((int) config('orbit.open_task_ttl_minutes', 120))) {
             $task->update(['status' => 'SUPERSEDED', 'stage' => 'DONE', 'pending_tool_call' => null]);
             return null;
         }
@@ -205,12 +203,21 @@ class AgentExecutionService
 
     protected function snapshot(AgentConversation $conversation, AgentTask $task, ?AgentMessage $message): array
     {
+        $activePlanner = \App\Services\Agent\ModelSelector::for($conversation->user, \App\Models\ModelRole::ROLE_PLANNER);
+        $activeModelLabel = \App\Services\Agent\ModelSelector::labelFor($activePlanner['provider'], $activePlanner['model']);
+
         return [
             'conversation' => $conversation->fresh(['messages']),
             'task' => $task->fresh(['timelineEvents']),
             'message' => $message,
             'turn_id' => $task->fresh()->current_turn_id,
             'queue' => AgentQueueStatus::forTask($task->fresh()),
+            'active_model' => [
+                'provider' => $activePlanner['provider'],
+                'model' => $activePlanner['model'],
+                'label' => $activeModelLabel,
+                'temperature' => $activePlanner['temperature'],
+            ],
         ];
     }
 

@@ -106,6 +106,20 @@ class ModelRoleController extends Controller
             ]
         );
 
+        if ($role->role === ModelRole::ROLE_PLANNER) {
+            \App\Models\UserAgentPreference::updateOrCreate(
+                ['user_id' => $userId],
+                ['preferred_model' => $role->model_name]
+            );
+            $label = \App\Services\Agent\ModelSelector::labelFor($role->provider, $role->model_name);
+            \App\Services\LiveEventService::publish($userId, 'agent.model_updated', [
+                'provider' => $role->provider,
+                'model' => $role->model_name,
+                'label' => $label,
+                'temperature' => $role->temperature,
+            ]);
+        }
+
         AuditLog::log(
             $userId,
             'MODEL_ROLE_UPDATED',
@@ -119,10 +133,19 @@ class ModelRoleController extends Controller
             ]
         );
 
+        $activePlanner = \App\Services\Agent\ModelSelector::for($request->user(), ModelRole::ROLE_PLANNER);
+        $activeModelLabel = \App\Services\Agent\ModelSelector::labelFor($activePlanner['provider'], $activePlanner['model']);
+
         return response()->json([
             'success' => true,
             'message' => "Model role '{$role->role}' updated successfully.",
             'role' => $role,
+            'active_model' => [
+                'provider' => $activePlanner['provider'],
+                'model' => $activePlanner['model'],
+                'label' => $activeModelLabel,
+                'temperature' => $activePlanner['temperature'],
+            ],
         ]);
     }
 

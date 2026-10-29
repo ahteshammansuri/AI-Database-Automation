@@ -92,7 +92,7 @@ class SchemaController extends Controller
             ->firstOrFail();
 
         $table = $request->query('table');
-        if (!$table || !preg_match('/^[a-zA-Z0-9_]+$/', $table)) {
+        if (!$table || !preg_match('/^[a-zA-Z0-9_$\\-]+$/', $table)) {
             return response()->json(['error' => 'Invalid table name'], 422);
         }
 
@@ -159,7 +159,7 @@ class SchemaController extends Controller
         ]);
 
         $policy = app(DataAccessPolicy::class);
-        if (!preg_match('/^[A-Za-z0-9_]{1,64}$/', (string) $tableName)) {
+        if (!preg_match('/^[A-Za-z0-9_$\\-]{1,64}$/', (string) $tableName)) {
             return response()->json(['message' => 'That is not a valid table name.'], 422);
         }
         if ($policy->defaultTableClass($tableName) === 'blocked') {

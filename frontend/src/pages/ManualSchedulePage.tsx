@@ -11,7 +11,8 @@ import { WysiwygEditor } from "../components/content/WysiwygEditor";
 import { defaultTimeZone, todayIn, nowTimeIn, addMinutesHHMM, zonedIso, formatInstant, relativeFromNow } from "../lib/schedule";
 import { ConnectionProfile, SchemaResponse, SchemaTable, SchemaColumn } from "../types";
 import { SearchableSelect } from "../components/common/SearchableSelect";
-import { EmptyState, FieldError, Loading, ModalShell, PageHeader } from "../components/ui/kit";
+import { EmptyState, FieldError, ModalShell, PageHeader } from "../components/ui/kit";
+import { ManualScheduleSkeleton } from "../components/ui/PageSkeletons";
 import { SchemaFieldControl, isNumericType, canFieldHaveAiAssist } from "../components/common/SchemaFieldControl";
 import { clearError, focusFirstError, invalid, serverFieldErrors, type FieldErrors } from "../lib/validation";
 import { InlineAiFieldAssist } from "../components/common/InlineAiFieldAssist";
@@ -373,7 +374,7 @@ export const ManualSchedulePage: React.FC = () => {
 
   // AI draft: the customer's "Writing content" model fills the empty text fields; nothing typed is overwritten.
   const handleGenerateAiDraft = async () => {
-    if (!aiTopic.trim()) {
+    if (!(aiTopic || "").trim()) {
       showFieldErrors({ $aiTopic: "Describe what the draft should be about." });
       return;
     }
@@ -606,7 +607,7 @@ export const ManualSchedulePage: React.FC = () => {
     },
     actions: {
       ai_draft: {
-        enabled: () => !!aiTopic.trim() && !!selectedTable && !isGeneratingAi,
+        enabled: () => !!(aiTopic || "").trim() && !!selectedTable && !isGeneratingAi,
         run: async () => {
           await handleGenerateAiDraft();
           return { success: true, message: "The AI filled the empty fields. Review them before publishing." };
@@ -734,7 +735,7 @@ export const ManualSchedulePage: React.FC = () => {
       )}
 
       {isInitializing || loadingSchema ? (
-        <div className="da-card"><Loading label={isInitializing ? "Opening your workspace…" : "Reading the table…"} className="py-20" /></div>
+        <ManualScheduleSkeleton label={isInitializing ? "Opening your workspace…" : "Reading the table…"} />
       ) : connections.length === 0 ? (
         <EmptyState icon={Database} title="No databases connected" description="Connect a database first to publish rows into it."
           action={<Link to="/connections" className="da-btn da-btn-primary">Connect a database</Link>} />

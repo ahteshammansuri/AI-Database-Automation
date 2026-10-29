@@ -56,6 +56,7 @@ final class SettingsRegistry
         ],
         'orbit' => [
             'Availability' => 'Turn Orbit on or off for every customer.',
+            'Agent prompting' => 'System instructions and personality guidance for Orbit LLM reasoning.',
             'Working limits' => 'How long and how many steps Orbit may take for one request.',
             'Portal link' => "How Orbit stays connected to the customer's open portal tab.",
         ],
@@ -194,6 +195,21 @@ final class SettingsRegistry
             // ---------------------------------------------------------------- orbit
             ['key' => 'orbit.enabled', 'group' => 'orbit', 'section' => 'Availability', 'type' => 'bool', 'public' => true,
                 'label' => 'Orbit is available to customers', 'help' => 'When off, Orbit is hidden in the portal and the server refuses new requests.'],
+            // The instruction texts are data, managed here and seeded by a migration (2026_10_28_000002); nothing about
+            // how Orbit behaves in a situation is written in code. Situational guidance is retrieved per request from
+            // Orbit's knowledge guides (Orbit › Knowledge), the decision protocol comes from the schema.
+            ['key' => 'orbit.system_prompt', 'group' => 'orbit', 'section' => 'Agent prompting', 'type' => 'text', 'config' => false, 'nullable' => true, 'max' => 6000,
+                'default' => null,
+                'label' => 'Role and principles', 'help' => 'What Orbit is and the principles behind every decision ({brand} is replaced by the brand name). How to act in a situation belongs in Orbit\'s knowledge guides, which are retrieved for each request. Empty: Orbit works from its guides and the decision protocol only.'],
+            ['key' => 'orbit.system_instructions', 'group' => 'orbit', 'section' => 'Agent prompting', 'type' => 'text', 'config' => false, 'nullable' => true, 'max' => 6000,
+                'default' => '',
+                'label' => 'Additional operational rules', 'help' => 'Extra rules added after the role and principles in every Orbit decision.'],
+            ['key' => 'orbit.route_instructions', 'group' => 'orbit', 'section' => 'Agent prompting', 'type' => 'text', 'config' => false, 'nullable' => true, 'max' => 6000,
+                'default' => null,
+                'label' => 'Quick routing', 'help' => 'Instructions for the small first call that recognises one question about the user\'s data (and which database) or a request to open one page. It only sees the tables and pages retrieved for the message. Empty: every request goes through the full agent loop.'],
+            ['key' => 'orbit.answer_instructions', 'group' => 'orbit', 'section' => 'Agent prompting', 'type' => 'text', 'config' => false, 'nullable' => true, 'max' => 6000,
+                'default' => null,
+                'label' => 'Replies from verified results', 'help' => 'Instructions for writing Orbit\'s reply from a verified result (a data answer, a prepared change). The reply must still contain every verified name and number, or the server\'s own sentence is used.'],
             ['key' => 'orbit.max_iterations', 'group' => 'orbit', 'section' => 'Working limits', 'type' => 'int', 'min' => 4, 'max' => 60,
                 'label' => 'Steps per request', 'help' => 'The most steps Orbit may take for one request (open a page, fill a field, press a button…). Long tasks need more steps.'],
             ['key' => 'orbit.max_turn_seconds', 'group' => 'orbit', 'section' => 'Working limits', 'type' => 'int', 'min' => 60, 'max' => 1500, 'suffix' => 'seconds',

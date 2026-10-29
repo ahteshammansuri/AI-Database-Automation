@@ -50,4 +50,22 @@ class ModelSelector
         $t = ModelRole::where('user_id', $user->id)->where('role', $roleName)->where('is_active', true)->value('temperature');
         return $t === null ? null : max(0.0, min($roleName === ModelRole::ROLE_PLANNER ? 1.0 : 1.5, (float) $t));
     }
+
+    /**
+     * Human-friendly label for a provider and model name.
+     */
+    public static function labelFor(?string $provider, ?string $model): string
+    {
+        $providerLabels = [
+            'gemini' => 'Google Gemini',
+            'openai' => 'OpenAI',
+            'anthropic' => 'Anthropic Claude',
+            'claude' => 'Anthropic Claude',
+            'ollama' => 'Local Ollama',
+            'mock' => 'Mock Provider',
+        ];
+        $p = $providerLabels[strtolower($provider ?? '')] ?? ucfirst($provider ?? 'AI');
+        $m = $model ?: 'default';
+        return "{$p} ({$m})";
+    }
 }

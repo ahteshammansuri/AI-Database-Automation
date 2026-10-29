@@ -74,10 +74,44 @@ class AgentController extends Controller
             ->latest('id')
             ->first();
 
+        $activePlanner = \App\Services\Agent\ModelSelector::for($request->user(), \App\Models\ModelRole::ROLE_PLANNER);
+        $activeModelLabel = \App\Services\Agent\ModelSelector::labelFor($activePlanner['provider'], $activePlanner['model']);
+
         return response()->json([
             'conversation' => $conversation,
             'active_task' => $activeTask,
             'queue' => $activeTask ? \App\Services\Agent\AgentQueueStatus::forTask($activeTask) : null,
+            'active_model' => [
+                'provider' => $activePlanner['provider'],
+                'model' => $activePlanner['model'],
+                'label' => $activeModelLabel,
+                'temperature' => $activePlanner['temperature'],
+            ],
+        ]);
+    }
+
+    /**
+     * Delete an agent conversation and all associated records.
+     */
+    public function destroy(Request $request, int $id): JsonResponse
+    {
+        $conversation = AgentConversation::where('user_id', $request->user()->id)->find($id);
+        if (!$conversation) {
+            return response()->json(['error' => 'Conversation not found.'], 404);
+        }
+
+        $tasks = AgentTask::where('conversation_id', $conversation->id)->get();
+        foreach ($tasks as $task) {
+            \App\Models\AgentTaskTimelineEvent::where('task_id', $task->id)->delete();
+            \App\Models\AgentToolCall::where('task_id', $task->id)->delete();
+            $task->delete();
+        }
+        \App\Models\AgentMessage::where('conversation_id', $conversation->id)->delete();
+        $conversation->delete();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Conversation deleted.',
         ]);
     }
 
@@ -289,7 +323,18 @@ class AgentController extends Controller
             ]
         );
 
-        return response()->json(['preferences' => $pref]);
+        $activePlanner = \App\Services\Agent\ModelSelector::for($request->user(), \App\Models\ModelRole::ROLE_PLANNER);
+        $activeModelLabel = \App\Services\Agent\ModelSelector::labelFor($activePlanner['provider'], $activePlanner['model']);
+
+        return response()->json([
+            'preferences' => $pref,
+            'active_model' => [
+                'provider' => $activePlanner['provider'],
+                'model' => $activePlanner['model'],
+                'label' => $activeModelLabel,
+                'temperature' => $activePlanner['temperature'],
+            ],
+        ]);
     }
 
     /**

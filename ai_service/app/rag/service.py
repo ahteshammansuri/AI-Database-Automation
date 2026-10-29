@@ -7,11 +7,13 @@ import time
 from typing import List, Dict, Any, Optional, Tuple
 
 import faiss
+import numpy as np
 
 from ai_service.app.config import settings
 from ai_service.app.rag.document_parser import DocumentParser
 from ai_service.app.rag.chunker import TextChunker, chunk_markdown_by_heading
 from ai_service.app.rag.embeddings import EmbeddingService
+from ai_service.app.rag.vector_cache import vector_cache
 from ai_service.app.rag.vector_index import UserVectorIndex
 
 logger = logging.getLogger(__name__)
@@ -278,9 +280,68 @@ class RAGService:
     # Agent retrieval: product docs + this user's knowledge base, hybrid scored
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _tokens(text: str) -> set:
+    # No word lists of any language here: meaning comes from the embeddings, and the words people use (in any language)
+    # belong in the knowledge itself, where the lexical part of the score finds them. When neither matches, the model
+    # searches the knowledge with a query it writes (the search_orbit_knowledge tool).
+
+    @classmethod
+    def _tokens(cls, text: str) -> set:
         return {w for w in re.sub(r"[^\w\s]", " ", text.lower()).split() if len(w) > 2 and w not in _STOPWORDS}
+
+    @classmethod
+    def _words(cls, text: str, min_len: int = 3) -> set:
+        """Words for ranking, identifiers split too (refund_requests, user-id -> refund, request, user)."""
+        return {cls._fold(w) for w in re.split(r"[^0-9a-z]+", text.lower().replace("_", " ")) if len(w) >= min_len}
+
+    @staticmethod
+    def _fold(token: str) -> str:
+        """users/user, orders/order: one form for matching words (keeps "address", "status" whole)."""
+        return token[:-1] if len(token) > 3 and token.endswith("s") and not token.endswith(("ss", "us", "is")) else token
+
+    def rank_texts(self, query_text: str, texts: List[str], top_k: int = 6, names: Optional[List[str]] = None,
+                   min_margin: float = 0.10, min_lexical: float = 0.5) -> List[Tuple[int, float]]:
+        """
+        Indexes of the texts a request is about, best first; empty when none stands out. Both signals are relative to
+        this set of texts, because embedding models give unrelated texts high similarities too:
+        - meaning: how far a text's similarity to the request is above the median of all of them (min_margin);
+        - words: the request's words found in what names each text (`names`, e.g. a table's name; else the text),
+          weighted by how rare they are among them (IDF), so words every name shares count for nothing and a word
+          only a few names have counts fully. A word match also needs at least average meaning.
+        A text whose vector is still being embedded (vector_cache) counts by its words until it is ready.
+        """
+        if not texts or not query_text.strip():
+            return []
+        semantic = self.embedder.backend != "lexical-fallback"
+        query_vec = self.embedder.encode(query_text) if semantic else None
+        vectors = (vector_cache.vectors(texts, self.embedder.backend, self.embedder.encode_batch, query_vec.shape[0])
+                   if semantic else [None] * len(texts))
+        sims = [float(np.dot(query_vec, v)) if v is not None and v.shape == query_vec.shape else None for v in vectors]
+        known = [x for x in sims if x is not None]
+        median = float(np.median(known)) if len(known) >= 3 else None
+
+        doc_tokens = [self._words(x, min_len=4) for x in (names if names and len(names) == len(texts) else texts)]
+        n = len(texts)
+        df: Dict[str, int] = {}
+        for toks in doc_tokens:
+            for t in toks:
+                df[t] = df.get(t, 0) + 1
+        idf = {t: float(np.log((n + 1) / (c + 0.5))) for t, c in df.items()}
+        # Only words that tell texts apart: in the set at all, and in at most half of it (not its template).
+        q_tokens = {t for t in self._words(query_text, min_len=4) if t in df and (n < 4 or df[t] <= n / 2)}
+        q_weight = sum(idf[t] for t in q_tokens)
+
+        scored = []
+        for i, toks in enumerate(doc_tokens):
+            # A name the message says in full ("users", "orders") always matches, however many other words it has
+            # (words most names share, like a common prefix, do not need to be said).
+            distinct = {t for t in toks if n < 4 or df[t] <= n / 2}
+            named = bool(distinct) and distinct <= q_tokens
+            lexical = 1.0 if named else ((sum(idf[t] for t in q_tokens & toks) / q_weight) if q_weight > 0 else 0.0)
+            margin = (sims[i] - median) if sims[i] is not None and median is not None else 0.0
+            if margin >= min_margin or (lexical >= min_lexical and (median is None or margin >= 0.0)):
+                scored.append((i, 0.7 * margin + 0.3 * lexical))
+        scored.sort(key=lambda r: r[1], reverse=True)
+        return scored[:top_k]
 
     def _hybrid_search(self, user_id: int, query_text: str, query_vec, top_k: int) -> List[Dict[str, Any]]:
         idx = self._get_user_index(user_id)
@@ -291,11 +352,12 @@ class RAGService:
         scored, seen = [], set()
         for meta, vec_score in candidates:
             text = meta.get("text", "")
-            key = hashlib.md5(text.strip().encode("utf-8")).hexdigest()
+            heading = meta.get("heading", "")
+            key = hashlib.md5((heading + ":" + text.strip()).encode("utf-8")).hexdigest()
             if key in seen:
                 continue
             seen.add(key)
-            c_tokens = self._tokens(text)
+            c_tokens = self._tokens(f"{heading} {text}")
             lex = (len(q_tokens & c_tokens) / len(q_tokens)) if q_tokens else 0.0
             combined = 0.7 * float(vec_score) + 0.3 * lex
             scored.append({"meta": meta, "vector": float(vec_score), "lexical": lex, "score": combined})
@@ -306,10 +368,10 @@ class RAGService:
         self,
         user_id: int,
         query_text: str,
-        product_k: int = 4,
-        user_k: int = 2,
-        min_vector: float = 0.45,
-        min_lexical: float = 0.2,
+        product_k: int = 6,
+        user_k: int = 3,
+        min_vector: float = 0.25,
+        min_lexical: float = 0.06,
     ) -> Dict[str, Any]:
         """
         Tenant-scoped retrieval for Orbit. Only the product partition (user_0) and the
@@ -324,19 +386,30 @@ class RAGService:
 
         chunks: List[Dict[str, Any]] = []
         for scope, uid, k in (("product", 0, product_k), ("user_kb", user_id, user_k)):
-            for r in self._hybrid_search(uid, query_text, query_vec, k):
-                if not ((semantic and r["vector"] >= min_vector) or r["lexical"] >= min_lexical):
-                    continue
-                meta = r["meta"]
-                if scope == "product":
-                    source_id = f"product:{meta.get('source', 'guide')}:{meta.get('chunk_index', 0)}"
-                else:
-                    source_id = f"kb:{meta.get('document_id', 0)}:{meta.get('chunk_id', '')}"
+            candidates = self._hybrid_search(uid, query_text, query_vec, k)
+            kept = 0
+            for r in candidates:
+                if (semantic and r["vector"] >= min_vector) or r["lexical"] >= min_lexical:
+                    meta = r["meta"]
+                    source_id = f"product:{meta.get('source', 'guide')}:{meta.get('chunk_index', 0)}" if scope == "product" else f"kb:{meta.get('document_id', 0)}:{meta.get('chunk_id', '')}"
+                    chunks.append({
+                        "source_id": source_id,
+                        "scope": scope,
+                        "text": meta.get("text", ""),
+                        "score": round(r["score"], 4),
+                        "heading": meta.get("heading"),
+                    })
+                    kept += 1
+            # If nothing passed the filter for this scope, keep the best candidate if it has reasonable score
+            if kept == 0 and candidates and candidates[0]["score"] >= 0.22:
+                best = candidates[0]
+                meta = best["meta"]
+                source_id = f"product:{meta.get('source', 'guide')}:{meta.get('chunk_index', 0)}" if scope == "product" else f"kb:{meta.get('document_id', 0)}:{meta.get('chunk_id', '')}"
                 chunks.append({
                     "source_id": source_id,
                     "scope": scope,
                     "text": meta.get("text", ""),
-                    "score": round(r["score"], 4),
+                    "score": round(best["score"], 4),
                     "heading": meta.get("heading"),
                 })
         return {

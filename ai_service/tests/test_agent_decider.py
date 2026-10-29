@@ -314,20 +314,22 @@ def test_deadline_skips_repair_instead_of_overrunning():
 def test_busy_model_lock_reports_busy_not_crash():
     decider_mod._MODEL_LOCK.acquire()
     try:
-        data = client.post("/v1/ai/agent/decide", json=decide_payload("hi", deadline_seconds=10), headers=AUTH).json()
+        # The lock guards the local model only; the request names it so the lock applies.
+        data = client.post("/v1/ai/agent/decide", json=decide_payload("hi", deadline_seconds=10, provider="ollama"), headers=AUTH).json()
     finally:
         decider_mod._MODEL_LOCK.release()
     assert data["success"] is False
     assert data["error_category"] == "MODEL_BUSY_OR_SLOW"
 
 
-def test_tool_selection_keeps_core_tools_and_caps_count(monkeypatch):
+def test_tool_selection_keeps_the_on_screen_tools_and_caps_count(monkeypatch):
     many = [{"name": f"extra_tool_{i}", "description": f"does thing {i}", "parameters": {"type": "object", "properties": {}}}
             for i in range(40)]
-    core = [{"name": n, "description": n, "parameters": {"type": "object", "properties": {}}} for n in decider_mod.CORE_TOOLS]
-    req = DecideRequest(user_id=7, utterance="do thing 3", tool_schemas=core + many, provider="mock", use_rag=False)
+    ui = [{"name": n, "description": n, "parameters": {"type": "object", "properties": {}}, "side_effect_class": "ui"}
+          for n in ("go_to_page", "fill_fields", "press")]
+    req = DecideRequest(user_id=7, utterance="do thing 3", tool_schemas=ui + many, provider="mock", use_rag=False)
     offered = decider_mod.select_tools(req)
-    assert all(n in offered for n in decider_mod.CORE_TOOLS)
+    assert all(t["name"] in offered for t in ui)
     assert len(offered) <= decider_mod.settings.AGENT_MAX_TOOLS
     msgs, _ = AgentDecider.build_messages(req, decider_mod.RagInfo(), offered)
     assert "OTHER TOOLS" in msgs[0]["content"] and "extra_tool_39" in msgs[0]["content"]
@@ -364,3 +366,42 @@ def test_runtime_context_keeps_decision_keys_when_long():
     assert out["task"]["awaiting_confirmation_for"]["tool"] == "update_automation"
     assert out["automations_more"] > 0 and len(out["automations"]) + out["automations_more"] == 60
     assert json.dumps(ctx) == original, "the request is not modified"
+
+
+UI_NAMES = ["go_to_page", "show_me", "press", "list_database_connections"]
+
+
+def test_chained_on_screen_steps_and_a_short_thought_are_accepted():
+    raw = json.dumps({
+        "kind": "CALL_TOOL",
+        "thought": "They want to see the data page; I open it and point at the table picker." + " more" * 80,
+        "tool_call": {"name": "go_to_page", "args": {"page": "/data"}},
+        "then": {"name": "show_me", "args": {"surface": "data.page", "caption": "Pick a table here."}},
+        "finish_after": True,
+    })
+    d = AgentDecider.validate_decision(raw, UI_NAMES)
+    assert [t.name for t in d.then] == ["show_me"]  # a single step sent as an object becomes a list
+    assert d.finish_after is True
+    assert len(d.thought) <= 240
+
+
+def test_then_never_carries_backend_or_unknown_tools():
+    for name in ["list_database_connections", "delete_rows"]:
+        raw = json.dumps({
+            "kind": "CALL_TOOL",
+            "tool_call": {"name": "go_to_page", "args": {"page": "/data"}},
+            "then": [{"name": name, "args": {}}],
+        })
+        with pytest.raises(ValueError):
+            AgentDecider.validate_decision(raw, UI_NAMES)
+
+
+def test_then_and_finish_after_are_dropped_when_not_calling_a_tool():
+    raw = json.dumps({
+        "kind": "ANSWER",
+        "speech_text": "You have two connections.",
+        "then": [{"name": "go_to_page", "args": {"page": "/data"}}],
+        "finish_after": True,
+    })
+    d = AgentDecider.validate_decision(raw, UI_NAMES)
+    assert d.then == [] and d.finish_after is False

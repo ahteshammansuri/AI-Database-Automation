@@ -60,6 +60,11 @@ final class PlatformSettings
         return array_key_exists($key, self::$values) ? self::cast($def, self::$values[$key]) : (self::$defaults[$key] ?? ($def['default'] ?? null));
     }
 
+    public static function get(string $key, mixed $default = null): mixed
+    {
+        return self::value($key) ?? $default;
+    }
+
     public static function default(string $key): mixed
     {
         return self::$defaults[$key] ?? (SettingsRegistry::get($key)['default'] ?? null);

@@ -62,6 +62,15 @@ class ProviderError(Exception):
     category = "PROVIDER_ERROR"
 
 
+class ProviderHTTPError(ProviderError):
+    """The provider answered with an HTTP error (status and the provider's own message kept for fallbacks)."""
+
+    def __init__(self, message: str, status: int = 0, detail: str = ""):
+        super().__init__(message)
+        self.status = status
+        self.detail = detail
+
+
 class ProviderUnavailableError(ProviderError):
     """Provider daemon/API unreachable, or the selected model is not installed."""
     category = "MODEL_UNAVAILABLE"
