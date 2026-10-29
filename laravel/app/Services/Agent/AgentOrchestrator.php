@@ -463,6 +463,7 @@ class AgentOrchestrator
                 'product_name' => (string) config('platform.brand_name'),
                 'system_prompt' => self::branded((string) \App\Settings\PlatformSettings::get('orbit.system_prompt')) ?: null,
                 'system_instructions' => self::branded((string) \App\Settings\PlatformSettings::get('orbit.system_instructions')) ?: null,
+                'decision_schema' => \App\Settings\PlatformSettings::get('orbit.decision_schema') ?: null,
                 'observations' => $observations,
                 'conversation_summary' => $this->context->conversationSummary($task, $userMsg->id),
                 'slots' => $task->slots ?: (object) [],

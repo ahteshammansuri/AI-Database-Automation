@@ -359,8 +359,8 @@ def test_runtime_context_keeps_decision_keys_when_long():
         "task": {"id": 9, "awaiting_confirmation_for": {"tool": "update_automation", "args": {"automation_id": 3, "is_active": False}}},
     }
     original = json.dumps(ctx)
-    text = _compact_context(ctx, MAX_CONTEXT_CHARS)
-    assert len(text) <= MAX_CONTEXT_CHARS + len("…(truncated)")
+    text = _compact_context(ctx, 4000)
+    assert len(text) <= 4000 + len("…(truncated)")
     out = json.loads(text)  # shortened, not cut: still valid JSON
     assert out["browser_present"] is True
     assert out["task"]["awaiting_confirmation_for"]["tool"] == "update_automation"

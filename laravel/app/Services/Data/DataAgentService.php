@@ -58,14 +58,14 @@ class DataAgentService
         $foreignKeys = $catalog['foreign_keys'] ?? [];
 
         // 2. Fast-path: "How many tables" / Schema Overview
-        if (preg_match('/how many tables|list tables|show tables|all tables/i', $uLower)) {
+        if (preg_match('/how many tables|list tables|show tables|all tables|kitne tables|tables dikhao|saari tables|tables ki list|tables batao|what tables|overview of database|database summary/i', $uLower)) {
             $tableNames = array_keys($tables);
             $count = count($tableNames);
             return [
                 'success' => true,
-                'message' => "Your database '{$connection->name}' has {$count} tables.",
+                'message' => "Your database '{$connection->name}' has {$count} tables: " . implode(', ', $tableNames) . ".",
                 'type' => 'schema_overview',
-                'headline' => "Your database '{$connection->name}' has {$count} tables.",
+                'headline' => "Your database '{$connection->name}' has {$count} tables: " . implode(', ', $tableNames) . ".",
                 'tables' => $tableNames,
                 'connection' => ['id' => $connection->id, 'name' => $connection->name, 'driver' => $connection->driver],
                 'diagnostics' => [
@@ -76,17 +76,26 @@ class DataAgentService
             ];
         }
 
-        // 3. Fast-path: "Which table stores user data / order data"
-        if (preg_match('/which table stores|where is (?:the )?(?:user|customer|account|order|product) data/i', $uLower)) {
+        // 3. Fast-path: "Describe table X" / "Columns of table X" / "Structure of table X"
+        if (preg_match('/(?:describe|structure of|columns (?:of|in)|fields (?:of|in)|schema of)\s+(?:table\s+)?([a-zA-Z0-9_]+)|([a-zA-Z0-9_]+)\s+(?:table\s+)?(?:ke columns|ka structure|ki details)/i', $uLower, $m)) {
+            $rawTable = trim($m[1] ?: $m[2] ?? '');
+            $bestTable = $this->findBestMatchingTable($tables, $rawTable, $rawTable);
+            if ($bestTable && isset($tables[$bestTable])) {
+                return $this->answerTableDescription($connection, $bestTable, $tables[$bestTable]);
+            }
+        }
+
+        // 4. Fast-path: "Which table stores user data / order data"
+        if (preg_match('/which table stores|where is (?:the )?(?:user|customer|account|order|product) data|([\w]+) (?:ka )?data kis table|([\w]+) kis table me/i', $uLower)) {
             return $this->answerTableDiscovery($connection, $uLower, $catalog);
         }
 
-        // 4. Fast-path: "How are X and Y related" / Relationships
-        if (preg_match('/how are ([\w$\\-]+) and ([\w$\\-]+) related|relationship between ([\w$\\-]+) and ([\w$\\-]+)|fk graph/i', $uLower, $m)) {
+        // 5. Fast-path: "How are X and Y related" / Relationships
+        if (preg_match('/how are ([\w$\\-]+) and ([\w$\\-]+) related|relationship between ([\w$\\-]+) and ([\w$\\-]+)|fk graph|([\w$\\-]+) aur ([\w$\\-]+) ka relation/i', $uLower, $m)) {
             return $this->answerRelationships($connection, $uLower, $catalog);
         }
 
-        // 5. Fast-path: "Dummy / test data detection"
+        // 6. Fast-path: "Dummy / test data detection"
         if (preg_match('/dummy|test data|fake data|seeded data/i', $uLower)) {
             // Find target table
             $targetTable = $this->findBestMatchingTable($tables, $uLower, $convState->active_table ?: 'users');
@@ -101,7 +110,7 @@ class DataAgentService
             ];
         }
 
-        // 6. Everything else: one model-written SELECT through the validated read gate.
+        // 7. Everything else: one model-written SELECT through the validated read gate.
         return $this->answerWithSql($user, $connection, $convState, $u, $catalog, $options);
     }
 
@@ -118,7 +127,7 @@ class DataAgentService
     protected function answerWithSql(User $user, DbConnection $connection, DataConversationState $convState, string $question, array $catalog, array $options): array
     {
         $connInfo = ['id' => $connection->id, 'name' => $connection->name, 'driver' => $connection->driver];
-        $slice = $this->schemaLinker->slice($connection, $question, ['max_tables' => 6]);
+        $slice = $this->schemaLinker->slice($connection, $question, ['max_tables' => 10]);
         $readable = $this->readableSchema($connection, $catalog);
         // Real keys let the gate catch joins that would inflate counts and sums (fan-out).
         $relations = array_values(array_filter(array_map(fn ($fk) => [
@@ -538,10 +547,53 @@ class DataAgentService
         ];
     }
 
+    protected function answerTableDescription(DbConnection $connection, string $tableName, array $meta): array
+    {
+        $cols = $meta['columns'] ?? [];
+        $readableCols = [];
+        foreach ($cols as $colName => $colData) {
+            if (ColumnClassifier::isSecret($colName)) {
+                continue;
+            }
+            $readableCols[$colName] = [
+                'type' => $colData['raw_type'] ?? $colData['type'] ?? 'varchar',
+                'nullable' => $colData['nullable'] ?? true,
+                'is_primary' => $colData['is_primary'] ?? false,
+            ];
+        }
+        $count = count($readableCols);
+        $approxRows = $meta['approx_row_count'] ?? 0;
+        $colList = implode(', ', array_keys($readableCols));
+        $headline = "Table '{$tableName}' has {$count} columns and approximately {$approxRows} rows. Columns: {$colList}.";
+
+        return [
+            'success' => true,
+            'message' => $headline,
+            'type' => 'table_description',
+            'headline' => $headline,
+            'table' => $tableName,
+            'approx_rows' => $approxRows,
+            'columns' => $readableCols,
+            'primary_key' => $meta['primary_key'] ?? [],
+            'connection' => ['id' => $connection->id, 'name' => $connection->name],
+            'diagnostics' => [
+                'source' => 'live_schema_introspection',
+                'table' => $tableName,
+                'total_columns' => $count,
+            ],
+        ];
+    }
+
     protected function findBestMatchingTable(array $tables, string $u, string $default): string
     {
+        $uLower = strtolower($u);
         foreach (array_keys($tables) as $t) {
-            if (str_contains($u, strtolower($t))) {
+            $tLower = strtolower($t);
+            if (str_contains($uLower, $tLower) || str_contains($tLower, $uLower)) {
+                return $t;
+            }
+            $singular = rtrim($tLower, 's');
+            if (strlen($singular) > 2 && (str_contains($uLower, $singular) || str_contains($singular, $uLower))) {
                 return $t;
             }
         }

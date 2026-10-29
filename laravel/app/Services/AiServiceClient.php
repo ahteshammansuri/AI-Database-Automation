@@ -458,6 +458,12 @@ class AiServiceClient
     public function writeSelectSql(array $params, int $timeoutSeconds = 420): array
     {
         try {
+            if (!isset($params['rules'])) {
+                $customRules = \App\Settings\PlatformSettings::get('data_agent.sql_writer_rules');
+                if ($customRules && is_string($customRules) && trim($customRules) !== '') {
+                    $params['rules'] = trim($customRules);
+                }
+            }
             $res = $this->agentClient($timeoutSeconds)->post("{$this->baseUrl}/v1/ai/data/sql", $params + [
                 'deadline_seconds' => max(20, $timeoutSeconds - 15),
             ]);
@@ -468,6 +474,29 @@ class AiServiceClient
             return ['success' => false, 'error_category' => 'AI_SERVICE_ERROR', 'error' => "AI service HTTP {$res->status()}."];
         } catch (\Throwable $e) {
             return ['success' => false, 'error_category' => 'AI_SERVICE_UNREACHABLE', 'error' => 'The AI service did not answer: ' . $e->getMessage()];
+        }
+    }
+
+    /**
+     * Rank table candidates against an utterance using semantic embeddings on the AI service.
+     *
+     * @param list<array{name: string, description?: string}> $tables
+     * @return list<array{name: string, score: float}>
+     */
+    public function rankTables(string $utterance, array $tables, int $topK = 10, int $timeoutSeconds = 15): array
+    {
+        try {
+            $res = $this->agentClient($timeoutSeconds)->post("{$this->baseUrl}/v1/ai/data/rank-tables", [
+                'utterance' => $utterance,
+                'tables' => $tables,
+                'top_k' => $topK,
+            ]);
+            if ($res->successful() && is_array($res->json('ranked'))) {
+                return $res->json('ranked');
+            }
+            return [];
+        } catch (\Throwable) {
+            return [];
         }
     }
 

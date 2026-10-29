@@ -193,7 +193,10 @@ ALLOWED_FUNCTIONS: Set[str] = {
     "case", "if", "coalesce", "nullif", "greatest", "least", "cast", "trycast",
     "concat", "concatws", "lower", "upper", "length", "substring", "trim", "replace", "left", "right", "pad",
     "strposition", "numbertostr", "initcap", "reverse", "repeat",
-    "round", "abs", "ceil", "floor", "pow", "sqrt", "mod", "sign", "ln", "log", "exp",
+    "round", "abs", "ceil", "floor", "pow", "sqrt", "mod", "sign", "ln", "log", "exp", "trunc", "truncate", "power",
+    "rownumber", "row_number", "rank", "denserank", "dense_rank", "lag", "lead", "ntile",
+    "firstvalue", "first_value", "lastvalue", "last_value", "cumedist", "cume_dist", "percentrank", "percent_rank",
+    "jsonextract", "json_extract", "jsonextractscalar", "json_extract_scalar",
     "currentdate", "currenttimestamp", "currenttime", "datesub", "dateadd", "datediff", "timestampdiff",
     "timestampadd", "timetostr", "strtodate", "strtotime", "tsordstotimestamp", "tsordstodate", "date",
     "day", "dayofweek", "dayofmonth", "dayofyear", "dayname", "week", "weekofyear", "month", "monthname",
@@ -205,6 +208,9 @@ ALLOWED_ANONYMOUS: Set[str] = {
     "now", "curdate", "curtime", "unix_timestamp", "from_unixtime", "yearweek", "monthname", "dayname",
     "date_format", "char_length", "character_length", "format", "ifnull", "instr", "locate", "weekday",
     "dayofmonth", "adddate", "subdate", "field", "to_char", "to_date", "date_part", "age", "string_agg",
+    "row_number", "rank", "dense_rank", "lag", "lead", "ntile", "first_value", "last_value",
+    "cume_dist", "percent_rank", "json_extract", "json_unquote", "json_array", "json_object",
+    "group_concat", "truncate", "power", "str_to_date", "timediff",
 }
 
 
@@ -267,7 +273,12 @@ def _guard_fan_out(tree: exp.Expression, relations: List[Dict[str, Any]], primar
     return tree, notes, errors
 
 
-_RANKING_WORDS = {"top", "most", "least", "highest", "lowest", "largest", "smallest", "best", "worst", "biggest", "maximum", "minimum"}
+_RANKING_WORDS = {
+    "top", "most", "least", "highest", "lowest", "largest", "smallest",
+    "best", "worst", "biggest", "maximum", "minimum",
+    # Common multilingual ranking stems
+    "sabse", "zyada", "kam", "adhik", "adhiktam", "nyuntam",
+}
 
 
 def _words(text: str) -> List[str]:

@@ -80,7 +80,11 @@ final class PlatformSettings
     {
         $out = [];
         foreach (SettingsRegistry::group($group) as $key => $def) {
-            $out[$key] = self::value($key);
+            $val = self::value($key);
+            if ($def['type'] === 'json' && (is_array($val) || is_object($val))) {
+                $val = json_encode($val, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+            }
+            $out[$key] = $val;
         }
         return $out;
     }
@@ -268,6 +272,7 @@ final class PlatformSettings
                 is_array($value) ? $value : []
             )),
             'tags' => array_values(array_unique(array_filter(array_map(fn ($v) => trim((string) $v), is_array($value) ? $value : []), fn ($v) => $v !== ''))),
+            'json' => is_string($value) ? (json_decode($value, true) ?? $value) : $value,
             'url', 'email' => ($value === null || $value === '') ? null : trim((string) $value),
             default => $value === null ? (($def['nullable'] ?? false) ? null : '') : trim((string) $value),
         };
@@ -275,7 +280,7 @@ final class PlatformSettings
 
     private static function rules(array $def): array
     {
-        $required = ($def['nullable'] ?? false) || in_array($def['type'], ['bool', 'list'], true) ? 'nullable' : 'required';
+        $required = ($def['nullable'] ?? false) || in_array($def['type'], ['bool', 'list', 'json'], true) ? 'nullable' : 'required';
         return match ($def['type']) {
             'bool' => ['nullable', 'boolean'],
             'int' => ['required', 'integer', 'min:' . ($def['min'] ?? 0), 'max:' . ($def['max'] ?? PHP_INT_MAX)],
@@ -284,7 +289,23 @@ final class PlatformSettings
             'select' => ['required', 'in:' . implode(',', array_keys($def['options']))],
             'list' => ['nullable', 'array', 'max:' . ($def['max_items'] ?? 50)],
             'tags' => [($def['nullable'] ?? false) ? 'nullable' : 'required', 'array', 'min:' . (($def['nullable'] ?? false) ? 0 : 1), 'max:' . ($def['max_items'] ?? 30)],
-            'text' => [$def['group'] === 'content' ? 'nullable' : $required, 'string', 'max:' . ($def['max'] ?? 2000)],
+            'json' => [
+                ($def['nullable'] ?? false) ? 'nullable' : 'required',
+                function ($attribute, $value, $fail) {
+                    if ($value === null || $value === '') {
+                        return;
+                    }
+                    if (is_string($value)) {
+                        json_decode($value);
+                        if (json_last_error() !== JSON_ERROR_NONE) {
+                            $fail('The ' . $attribute . ' must be valid JSON: ' . json_last_error_msg());
+                        }
+                    } elseif (!is_array($value) && !is_object($value)) {
+                        $fail('The ' . $attribute . ' must be a valid JSON string or object.');
+                    }
+                },
+            ],
+            'text' => [$def['group'] === 'content' ? 'nullable' : $required, 'string', 'max:' . ($def['max'] ?? 20000)],
             default => [$def['group'] === 'content' ? 'nullable' : $required, 'string', 'max:' . ($def['max'] ?? 255)],
         };
     }

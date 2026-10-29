@@ -33,9 +33,45 @@ Rules:
 - "Which/who has the most/least X" or "top N": GROUP BY the entity's id (and its name/title/email columns), COUNT or SUM the X, ORDER BY that value DESC (most) or ASC (least). Use LIMIT 5 (or N if asked) so ties are visible. Give the count/sum a clear alias.
 - When returning people or things, include readable columns (name, title, email, order_no ...) next to ids.
 - Status words must use the exact values listed for that column (for example a refund is the value 'refunded' if that is listed).
+
+DATE AND TIME RULES:
 - Dates: "today" = DATE(col) = CURDATE(), "this month" = YEAR and MONTH of col equal the current ones, "last N days" = col >= NOW() - INTERVAL N DAY. Prefer created_at-style columns for "when".
-- Always end with LIMIT (50 unless the question asks for a different number). One statement, no semicolons, no comments.
+- Hindi/Hinglish date words: "aaj" = today/CURDATE(), "kal" = yesterday (DATE_SUB(CURDATE(), INTERVAL 1 DAY)), "parso" = day before yesterday, "is hafte" = this week, "is mahine" = this month, "is saal" = this year, "pichle hafte/mahine/saal" = last week/month/year.
+- Between dates: "se lekar" or "se ... tak" means BETWEEN. "ke baad" means after. "se pehle" means before.
+
+COMPLEX QUERY PATTERNS:
+- Subqueries: Use subqueries in WHERE for "X that has/doesn't have Y" patterns. E.g. "users who never ordered" = WHERE id NOT IN (SELECT user_id FROM orders) or use NOT EXISTS.
+- HAVING: Use HAVING for conditions on aggregates. E.g. "customers with more than 5 orders" = GROUP BY customer_id HAVING COUNT(*) > 5.
+- CASE WHEN: Use for conditional counting/summing. E.g. "count of active vs inactive" = SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) AS active_count.
+- COALESCE: Use for null handling. E.g. "show name or 'Unknown'" = COALESCE(name, 'Unknown').
+- DISTINCT: Use when duplicates would be misleading. E.g. "how many different categories" = COUNT(DISTINCT category).
+- EXISTS/NOT EXISTS: Preferred over IN for correlated conditions. E.g. "suppliers with products" = WHERE EXISTS (SELECT 1 FROM products WHERE products.supplier_id = suppliers.id).
+- Percentages: E.g. "what percentage of orders are refunded" = ROUND(SUM(CASE WHEN status='refunded' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) AS refund_percentage.
+- Running calculations: for ratios, averages, and growth use appropriate aggregate functions.
+
+MULTI-TABLE QUERY RULES:
+- For questions involving data from multiple related tables, identify the correct join path through foreign keys.
+- When counting/summing from a parent-child relationship, GROUP BY the parent and aggregate the child values.
+- For "X with the most Y": JOIN, GROUP BY X, ORDER BY COUNT/SUM of Y DESC.
+- Self-join: Use table aliases when comparing rows within the same table.
+
+STRING MATCHING:
+- "contains/having word X" = LIKE '%X%'
+- "starts with/beginning with X" = LIKE 'X%'
+- "ends with X" = LIKE '%X'
+- "sabse bada naam" (longest name) = ORDER BY LENGTH(name) DESC
+- Case insensitive search: LOWER(col) LIKE LOWER('%search%')
+
+NULL HANDLING:
+- "empty/blank/missing/null/not filled" = IS NULL or = ''
+- "filled/not empty" = IS NOT NULL AND != ''
+
+HINDI/HINGLISH UNDERSTANDING:
 - The question may be in Hindi, Hinglish or another language: understand it, but use the English table and column names.
+- Common Hindi words: "kitne" = how many (COUNT), "sabse zyada" = most/maximum, "sabse kam" = least/minimum, "kul" = total (SUM), "ausat" = average (AVG), "dikha/dikhao/batao" = show/list.
+- "kaun/kaunsa" = which/who, "kaha" = where, "kab" = when, "kaise" = how, "kyun" = why.
+
+- Always end with LIMIT (50 unless the question asks for a different number). One statement, no semicolons, no comments.
 - If the listed tables cannot answer the question, return "sql": "" and put a short question or explanation in "clarification".
 - "assumptions": each interpretation you made, in plain words (e.g. "customers are rows of users", "refund = orders.status 'refunded'").
 Return JSON: {{"sql": "...", "assumptions": ["..."], "clarification": ""}}"""
@@ -76,10 +112,12 @@ def write_select(
     model: Optional[str] = None,
     api_key: Optional[str] = None,
     deadline_seconds: float = 240.0,
+    custom_rules: Optional[str] = None,
 ) -> Dict[str, Any]:
     deadline = time.monotonic() + max(20.0, deadline_seconds)
     d = "PostgreSQL" if str(dialect).lower() in ("postgres", "postgresql", "pgsql") else "MySQL"
-    system = RULES.format(dialect=d)
+    rule_template = (custom_rules.strip() if custom_rules and custom_rules.strip() else RULES)
+    system = rule_template.format(dialect=d) if "{dialect}" in rule_template else f"DIALECT: {d}\n\n{rule_template}"
     user = (
         f"TABLES:\n{describe_schema(schema_slice)}\n\n"
         f"Timezone for dates: {timezone}\n\n"

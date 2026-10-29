@@ -39,11 +39,12 @@ Decide what the message asks for. Listed below are only the tables of the user's
 TXT, $now);
 
         $this->setting('orbit.answer_instructions', <<<'TXT'
-Write Orbit's reply from the verified result below, in the same language and style as the user's message (Hinglish stays Hinglish, Hindi stays Hindi).
-- Start with the direct answer as a complete sentence. Do not repeat the question.
-- Include every name and number under MUST INCLUDE exactly as written (numbers as digits). If FACTS says there is a tie, say so and name everyone in it.
+Write Orbit's reply from the verified result below, in the same language and style as the user's message (Hinglish stays Hinglish, Hindi stays Hindi, English stays English).
+- Start directly with the clear, conversational answer in natural language. Do not repeat the question.
+- NEVER speak in SQL, query syntax, or database code. Always explain what the data means in plain, friendly words in the user's language.
+- Include every name and number under MUST INCLUDE exactly as written (numbers as digits). If FACTS says there is a tie, say so clearly and name everyone in it.
 - Keep masked values masked. Never invent rows, names or numbers. One to three short sentences, no tables.
-- If the result is an error, say plainly that it could not be done and why.
+- If the result is an error or no records found, say so plainly and politely in the user's language without technical errors.
 - If FACTS describes a prepared change that is not applied yet, say what will change and ask the user to confirm the way FACTS says.
 TXT, $now);
 

@@ -7,6 +7,7 @@ use App\Settings\PlatformSettings;
 use App\Settings\SettingsRegistry;
 use Filament\Actions\Action;
 use Filament\Facades\Filament;
+use Filament\Forms\Components\FileUpload;
 use Filament\Forms\Components\Repeater;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\Textarea;
@@ -187,6 +188,60 @@ abstract class SettingsPage extends Page
                 ->nestedRecursiveRules(['max:' . ($def['item_max'] ?? 120)]),
             'text' => Textarea::make($name)->rows(3)->maxLength($def['max'] ?? 2000)->columnSpanFull()
                 ->required($def['group'] !== 'content' && !($def['nullable'] ?? false)),
+            'json' => Textarea::make($name)
+                ->rows(12)
+                ->columnSpanFull()
+                ->placeholder('Optional — leave empty to let the platform generate dynamically...')
+                ->extraInputAttributes([
+                    'class' => 'font-mono text-xs leading-relaxed bg-gray-950 text-emerald-400 dark:bg-gray-950 dark:text-emerald-400 p-3 rounded-lg border border-gray-800 focus:border-indigo-500',
+                    'spellcheck' => 'false',
+                ])
+                ->hintAction(
+                    Action::make('uploadJson_' . $name)
+                        ->label('Upload JSON')
+                        ->icon('heroicon-m-arrow-up-tray')
+                        ->modalHeading('Upload JSON File')
+                        ->modalDescription('Select a .json file to populate this setting.')
+                        ->form([
+                            \Filament\Forms\Components\FileUpload::make('json_file')
+                                ->label('JSON File')
+                                ->acceptedFileTypes(['application/json', 'text/plain', 'text/json'])
+                                ->disk('local')
+                                ->required(),
+                        ])
+                        ->action(function (array $data, $set) use ($name) {
+                            $filePath = is_array($data['json_file'] ?? null)
+                                ? reset($data['json_file'])
+                                : ($data['json_file'] ?? null);
+
+                            if ($filePath) {
+                                $disk = \Illuminate\Support\Facades\Storage::disk('local');
+                                $content = null;
+                                if ($disk->exists($filePath)) {
+                                    $content = $disk->get($filePath);
+                                } elseif (file_exists($filePath)) {
+                                    $content = file_get_contents($filePath);
+                                }
+
+                                if ($content !== null) {
+                                    $decoded = json_decode($content, true);
+                                    if (json_last_error() === JSON_ERROR_NONE) {
+                                        $set($name, json_encode($decoded, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+                                        Notification::make()->title('JSON file loaded successfully')->success()->send();
+                                    } else {
+                                        Notification::make()->title('Invalid JSON file')->body(json_last_error_msg())->danger()->send();
+                                    }
+                                    try {
+                                        if ($disk->exists($filePath)) {
+                                            $disk->delete($filePath);
+                                        } elseif (file_exists($filePath)) {
+                                            @unlink($filePath);
+                                        }
+                                    } catch (\Throwable) {}
+                                }
+                            }
+                        })
+                ),
             'list' => Repeater::make($name)
                 ->components(collect($def['fields'])->map(fn ($f, $fieldName) => ($f['rows'] ?? null)
                     ? Textarea::make($fieldName)->label($f['label'])->rows($f['rows'])->maxLength($f['max'] ?? 1000)->required()

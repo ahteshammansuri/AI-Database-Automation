@@ -36,9 +36,16 @@ def spec_names(specs: Iterable[Any]) -> List[str]:
     return [str(_spec_value(s, "name")) for s in specs if _spec_value(s, "name")]
 
 
-def build_field_contract(specs: Iterable[Any], length: str = "medium") -> str:
+def build_field_contract(
+    specs: Iterable[Any],
+    length: str = "medium",
+    kind_guides: Optional[Dict[str, str]] = None,
+    length_words: Optional[Dict[str, int]] = None,
+) -> str:
     """Instruction block listing every field the model must return, with type, limits and options."""
-    words = LENGTH_WORDS.get(length or "medium", LENGTH_WORDS["medium"])
+    word_map = length_words or LENGTH_WORDS
+    guide_map = {**_KIND_GUIDE, **(kind_guides or {})}
+    words = word_map.get(length or "medium", word_map.get("medium", 750))
     lines: List[str] = []
     example: Dict[str, str] = {}
     for spec in specs:
@@ -46,7 +53,7 @@ def build_field_contract(specs: Iterable[Any], length: str = "medium") -> str:
         if not name:
             continue
         kind = _spec_value(spec, "kind", "text") or "text"
-        guide = _KIND_GUIDE.get(kind, _KIND_GUIDE["text"])
+        guide = guide_map.get(kind, guide_map.get("text", "A short plain-text value appropriate for this column."))
         parts = [guide]
 
         if kind == "body":

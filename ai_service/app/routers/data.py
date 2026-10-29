@@ -4,10 +4,43 @@ Data Agent router: /v1/ai/data/plan and related NL-to-QueryPlan endpoints.
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
+from ai_service.app.rag.service import rag_service
 from ai_service.app.services.data_planner import data_planner
 from ai_service.app.services.data_sql_writer import write_select
 
 router = APIRouter(prefix="/v1/ai/data", tags=["Data Agent"])
+
+
+class TableCandidate(BaseModel):
+    name: str
+    description: str = ""
+
+
+class RankTablesRequest(BaseModel):
+    utterance: str
+    tables: List[TableCandidate]
+    top_k: int = 12
+
+
+class RankedTableItem(BaseModel):
+    name: str
+    score: float
+
+
+class RankTablesResponse(BaseModel):
+    ranked: List[RankedTableItem]
+
+
+@router.post("/rank-tables", response_model=RankTablesResponse)
+def rank_tables_endpoint(req: RankTablesRequest):
+    """Rank table candidates against an utterance using semantic embeddings and dynamic IDF."""
+    if not req.tables or not req.utterance.strip():
+        return RankTablesResponse(ranked=[])
+    texts = [t.description or t.name for t in req.tables]
+    names = [t.name for t in req.tables]
+    scored = rag_service.rank_texts(req.utterance, texts, top_k=req.top_k, names=names)
+    items = [RankedTableItem(name=names[idx], score=score) for idx, score in scored]
+    return RankTablesResponse(ranked=items)
 
 
 class DataPlanRequest(BaseModel):
@@ -53,6 +86,7 @@ class DataSqlRequest(BaseModel):
     model: Optional[str] = None
     api_key: Optional[str] = None
     deadline_seconds: float = 240.0
+    rules: Optional[str] = Field(None, description="Dynamic SQL writer rules from Admin Panel or RAG")
 
 
 @router.post("/sql")
@@ -60,4 +94,4 @@ def write_sql(req: DataSqlRequest):
     """The user's model proposes one SELECT; Laravel validates it with /v1/sql/validate-select."""
     return write_select(req.question, req.schema_slice, dialect=req.dialect, timezone=req.timezone,
                         previous=req.previous, provider=req.provider, model=req.model, api_key=req.api_key,
-                        deadline_seconds=req.deadline_seconds)
+                        deadline_seconds=req.deadline_seconds, custom_rules=req.rules)

@@ -226,6 +226,7 @@ class DecideRequest(BaseModel):
     # Total time budget for this decision. Laravel sets it below its own HTTP timeout so the
     # AI service always answers (with MODEL_BUSY_OR_SLOW if needed) before Laravel gives up.
     deadline_seconds: float = Field(280.0, ge=10.0, le=1800.0)
+    decision_schema: Optional[Dict[str, Any]] = Field(None, description="Dynamic decision schema from Admin Panel or custom configuration")
 
     @field_validator("slots", "runtime_context", mode="before")
     @classmethod

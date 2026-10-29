@@ -468,7 +468,7 @@ class AgentDecider:
 
         available = [t.name for t in req.tool_schemas if t.available]
         candidate_tools = list(dict.fromkeys(offered + [o.tool for o in req.observations] + available[:4]))
-        schema = build_decision_schema(candidate_tools or available)
+        schema = req.decision_schema or build_decision_schema(candidate_tools or available)
 
         def done(**kw) -> DecideResponse:
             return DecideResponse(rag=rag, provider_used=provider_name,

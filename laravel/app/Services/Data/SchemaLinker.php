@@ -3,17 +3,22 @@
 namespace App\Services\Data;
 
 use App\Models\DbConnection;
+use App\Services\AiServiceClient;
 use PDO;
 
 class SchemaLinker
 {
     public function __construct(
         protected LiveSchemaService $schemaService,
-        protected TargetConnector $targetConnector
-    ) {}
+        protected TargetConnector $targetConnector,
+        protected ?AiServiceClient $aiServiceClient = null
+    ) {
+        $this->aiServiceClient ??= app(AiServiceClient::class);
+    }
 
     /**
      * Slice live schema down to the most relevant tables and columns for the query.
+     * Uses dynamic vector embedding ranking and direct metadata token matching.
      */
     public function slice(
         DbConnection $connection,
@@ -28,66 +33,16 @@ class SchemaLinker
             return ['tables' => [], 'foreign_keys' => [], 'grounded_values' => []];
         }
 
-        $utteranceLower = strtolower($utterance);
-        $scoredTables = [];
-
-        // 1. Keyword & Synonym Scoring
-        foreach ($allTables as $tName => $tMeta) {
-            $score = 0;
-            $tLower = strtolower($tName);
-
-            // Exact or substring match in utterance
-            if (str_contains($utteranceLower, $tLower)) {
-                $score += 10;
-            }
-
-            // Word token match
-            $words = preg_split('/[\s_\-]+/', $tLower);
-            foreach ($words as $w) {
-                if (strlen($w) > 2 && str_contains($utteranceLower, $w)) {
-                    $score += 4;
-                }
-            }
-
-            // Synonyms
-            if ($this->matchesSynonym($utteranceLower, ['user', 'customer', 'account', 'client', 'member']) &&
-                $this->matchesSynonym($tLower, ['user', 'acct', 'account', 'cust', 'customer', 'member'])) {
-                $score += 8;
-            }
-            if ($this->matchesSynonym($utteranceLower, ['order', 'purchase', 'sale', 'checkout']) &&
-                $this->matchesSynonym($tLower, ['order', 'ord', 'sale', 'purchase'])) {
-                $score += 8;
-            }
-            if ($this->matchesSynonym($utteranceLower, ['product', 'item', 'catalog', 'merchandise', 'article']) &&
-                $this->matchesSynonym($tLower, ['product', 'prod', 'item', 'article', 'post'])) {
-                $score += 8;
-            }
-
-            // Column name matches in utterance
-            foreach ($tMeta['columns'] as $colName => $colMeta) {
-                $cLower = strtolower($colName);
-                if (strlen($cLower) > 2 && str_contains($utteranceLower, $cLower)) {
-                    $score += 2;
-                }
-            }
-
-            $scoredTables[$tName] = $score;
-        }
-
-        // Sort by score descending
-        arsort($scoredTables);
-
-        // Pick top candidate tables (at least 1, up to max_tables or all if schema is small)
-        $maxTables = $options['max_tables'] ?? 5;
+        $maxTables = $options['max_tables'] ?? 10;
         $selectedTables = [];
 
-        foreach ($scoredTables as $tName => $sc) {
-            if ($sc > 0 || empty($selectedTables)) {
-                $selectedTables[] = $tName;
-                if (count($selectedTables) >= $maxTables) {
-                    break;
-                }
-            }
+        // If the database has a small-to-medium schema (<= maxTables), include all tables!
+        // This guarantees 100% table availability and zero missed tables for customer questions.
+        if (count($allTables) <= $maxTables) {
+            $selectedTables = array_keys($allTables);
+        } else {
+            // Large schema: Dynamically rank tables using AI service embeddings / RAG
+            $selectedTables = $this->rankTablesDynamically($utterance, $allTables, $maxTables);
         }
 
         // 2. FK Graph Expansion (include immediate join-neighbors)
@@ -112,16 +67,16 @@ class SchemaLinker
             $tMeta = $allTables[$tName];
             $cleanCols = [];
 
-            foreach ($tMeta['columns'] as $cName => $cMeta) {
+            foreach ($tMeta['columns'] as $cName => $colMeta) {
                 if (ColumnClassifier::isSecret($cName)) {
                     continue; // Secrets never sent to LLM prompt
                 }
                 $cleanCols[$cName] = [
-                    'type' => $cMeta['raw_type'] ?? $cMeta['type'] ?? $cMeta['data_type'] ?? 'varchar',
-                    'values' => !empty($cMeta['enum']) ? array_values($cMeta['enum']) : null,
-                    'nullable' => $cMeta['nullable'] ?? $cMeta['is_nullable'] ?? true,
-                    'is_primary' => ($cMeta['is_primary'] ?? false) || in_array($cName, (array) ($tMeta['primary_key'] ?? []), true),
-                    'temporal_role' => $cMeta['temporal_role'] ?? null,
+                    'type' => $colMeta['raw_type'] ?? $colMeta['type'] ?? $colMeta['data_type'] ?? 'varchar',
+                    'values' => !empty($colMeta['enum']) ? array_values($colMeta['enum']) : null,
+                    'nullable' => $colMeta['nullable'] ?? $colMeta['is_nullable'] ?? true,
+                    'is_primary' => ($colMeta['is_primary'] ?? false) || in_array($cName, (array) ($tMeta['primary_key'] ?? []), true),
+                    'temporal_role' => $colMeta['temporal_role'] ?? null,
                     'is_pii' => ColumnClassifier::isPii($cName),
                 ];
             }
@@ -141,8 +96,7 @@ class SchemaLinker
             }
         }
 
-        // 4. Value grounding: real stored values of short categorical columns, so the model can map the
-        //    user's words to them (e.g. "Rajasthan" -> 'RJ', "refund" -> 'refunded').
+        // 4. Value grounding: real stored values of short categorical columns
         $this->attachCategoryValues($connection, $tablesSlice, $allTables);
         $groundedValues = [];
 
@@ -151,6 +105,94 @@ class SchemaLinker
             'foreign_keys' => $relevantFks,
             'grounded_values' => $groundedValues,
         ];
+    }
+
+    /**
+     * Rank tables using AI semantic vector embeddings, falling back to dynamic metadata token matching.
+     */
+    protected function rankTablesDynamically(string $utterance, array $allTables, int $maxTables): array
+    {
+        // 1. Try AI service semantic vector ranking
+        try {
+            $tableCandidates = [];
+            foreach ($allTables as $tName => $tMeta) {
+                $cols = array_keys($tMeta['columns'] ?? []);
+                $tableCandidates[] = [
+                    'name' => $tName,
+                    'description' => "Table {$tName} with columns: " . implode(', ', array_slice($cols, 0, 20)),
+                ];
+            }
+
+            $aiRanked = $this->aiServiceClient->rankTables($utterance, $tableCandidates, $maxTables);
+            if (!empty($aiRanked)) {
+                $names = [];
+                foreach ($aiRanked as $item) {
+                    if (isset($item['name']) && isset($allTables[$item['name']])) {
+                        $names[] = $item['name'];
+                    }
+                }
+                if (!empty($names)) {
+                    return array_slice(array_unique($names), 0, $maxTables);
+                }
+            }
+        } catch (\Throwable) {
+            // Fall through to metadata token matching
+        }
+
+        // 2. Resilient dynamic fallback: match utterance tokens directly against schema metadata (table & column names)
+        $utteranceLower = strtolower($utterance);
+        $scored = [];
+
+        foreach ($allTables as $tName => $tMeta) {
+            $score = 0;
+            $tLower = strtolower($tName);
+
+            // Exact match
+            if (str_contains($utteranceLower, $tLower)) {
+                $score += 10;
+            }
+
+            // Singular/plural matching
+            $singular = rtrim($tLower, 's');
+            $plural = $tLower . 's';
+            if (strlen($singular) > 2 && str_contains($utteranceLower, $singular)) {
+                $score += 8;
+            }
+            if (strlen($plural) > 3 && str_contains($utteranceLower, $plural)) {
+                $score += 8;
+            }
+
+            // Token overlap with table name
+            $tWords = preg_split('/[\s_\-]+/', $tLower);
+            foreach ($tWords as $w) {
+                if (strlen($w) > 2 && str_contains($utteranceLower, $w)) {
+                    $score += 4;
+                }
+            }
+
+            // Column name matches
+            foreach ($tMeta['columns'] ?? [] as $colName => $colMeta) {
+                $cLower = strtolower($colName);
+                if (strlen($cLower) > 2 && str_contains($utteranceLower, $cLower)) {
+                    $score += 3;
+                }
+            }
+
+            $scored[$tName] = $score;
+        }
+
+        arsort($scored);
+        $result = [];
+        foreach ($scored as $tName => $sc) {
+            if ($sc > 0 || empty($result)) {
+                $result[] = $tName;
+                if (count($result) >= $maxTables) {
+                    break;
+                }
+            }
+        }
+
+        return $result ?: array_slice(array_keys($allTables), 0, $maxTables);
     }
 
     /** At most this many columns are sampled per question, each from a bounded row sample. */
@@ -168,7 +210,12 @@ class SchemaLinker
         foreach ($tablesSlice as $t => $tData) {
             foreach ($tData['columns'] as $c => $cData) {
                 $meta = $allTables[$t]['columns'][$c] ?? [];
-                if (!empty($cData['values']) || ($meta['family'] ?? '') !== 'string' || !empty($meta['is_label'])
+                $family = $meta['family'] ?? '';
+                $isCategorical = $family === 'string'
+                    || in_array($family, ['enum', 'boolean'], true)
+                    || ($family === 'integer' && preg_match('/status|type|role|state|flag/i', $c));
+
+                if (!empty($cData['values']) || !$isCategorical || !empty($meta['is_label'])
                     || ColumnClassifier::isPii($c) || ColumnClassifier::isSecret($c) || (int) ($meta['max_length'] ?? 255) > 64) {
                     continue;
                 }
@@ -194,15 +241,5 @@ class SchemaLinker
         } catch (\Throwable) {
             // Grounding only improves the query; the question is still answered without it.
         }
-    }
-
-    private function matchesSynonym(string $subject, array $words): bool
-    {
-        foreach ($words as $w) {
-            if (str_contains($subject, $w)) {
-                return true;
-            }
-        }
-        return false;
     }
 }

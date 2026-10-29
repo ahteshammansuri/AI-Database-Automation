@@ -18,11 +18,6 @@ from ai_service.app.rag.vector_index import UserVectorIndex
 
 logger = logging.getLogger(__name__)
 
-_STOPWORDS = {
-    "the", "and", "for", "are", "you", "your", "with", "this", "that", "what", "how", "can",
-    "does", "into", "from", "have", "has", "was", "were", "will", "about", "please", "orbit",
-}
-
 
 class RAGService:
     """
@@ -286,7 +281,7 @@ class RAGService:
 
     @classmethod
     def _tokens(cls, text: str) -> set:
-        return {w for w in re.sub(r"[^\w\s]", " ", text.lower()).split() if len(w) > 2 and w not in _STOPWORDS}
+        return {w for w in re.sub(r"[^\w\s]", " ", text.lower()).split() if len(w) > 2}
 
     @classmethod
     def _words(cls, text: str, min_len: int = 3) -> set:

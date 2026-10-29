@@ -7,6 +7,7 @@ request by meaning (embeddings) and shared words, so a request in any wording fi
 name in another database always comes along: with several databases the model must see each one that has it, not just
 the best match.
 """
+import re
 from typing import List, Sequence, Tuple
 
 from ai_service.app.rag.service import rag_service
