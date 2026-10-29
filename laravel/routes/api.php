@@ -14,14 +14,6 @@ use App\Http\Controllers\Api\AuditLogController;
 use App\Http\Controllers\Api\LiveEventController;
 use App\Http\Controllers\Api\AgentController;
 use App\Http\Controllers\Api\ModelRoleController;
-use App\Http\Controllers\FeatureFlagController;
-use App\Http\Controllers\SimulationController;
-use App\Http\Controllers\SchemaDriftController;
-use App\Http\Controllers\CompensationController;
-use App\Http\Controllers\QualityScoreController;
-use App\Http\Controllers\TemplateController;
-use App\Http\Controllers\DatabaseInsightsController;
-use App\Http\Controllers\CalendarController;
 use App\Http\Controllers\Api\DataAgentController;
 use App\Http\Controllers\Api\OrbitRemoteController;
 use App\Http\Controllers\Api\OrbitRemoteDeviceController;
@@ -208,17 +200,6 @@ Route::middleware(['auth:sanctum', \App\Http\Middleware\EnsureCustomerActive::cl
     Route::post('/data-agent/undo-change', [DataAgentController::class, 'undoChange']);
     Route::get('/data-agent/results/{id}', [DataAgentController::class, 'showResult']);
 
-    // Phase 6: Feature Flags & Advanced Platform Capabilities
-    Route::get('/features', [FeatureFlagController::class, 'index']);
-    Route::post('/automations/{id}/dry-run', [SimulationController::class, 'dryRun']);
-    Route::post('/connections/{id}/detect-drift', [SchemaDriftController::class, 'detectDrift']);
-    Route::post('/executions/{id}/undo', [CompensationController::class, 'undo']);
-    Route::post('/content/evaluate-quality', [QualityScoreController::class, 'evaluate']);
-    Route::get('/templates', [TemplateController::class, 'index']);
-    Route::post('/automations/from-template', [TemplateController::class, 'createFromTemplate']);
-    Route::get('/connections/{id}/insights', [DatabaseInsightsController::class, 'insights']);
-    Route::get('/calendar/events', [CalendarController::class, 'events']);
-    Route::post('/calendar/reschedule/{automationId}', [CalendarController::class, 'reschedule']);
 
     // Orbit Remote, computer side
     Route::post('/orbit-remote/sessions', [OrbitRemoteController::class, 'store'])->middleware('throttle:20,1');

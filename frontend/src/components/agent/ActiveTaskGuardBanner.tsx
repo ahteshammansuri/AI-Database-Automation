@@ -1,7 +1,7 @@
 import React from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useAssistant, ACTIVE_TASK_STATUSES } from "../../context/AssistantContext";
-import { OrbitalCoreCharacter } from "./OrbitalCoreCharacter";
+import { OrbitMascotCharacter } from "./OrbitMascotCharacter";
 import { ShieldAlert, Square, Pause, ExternalLink } from "lucide-react";
 
 export const ActiveTaskGuardBanner: React.FC = () => {
@@ -32,7 +32,7 @@ export const ActiveTaskGuardBanner: React.FC = () => {
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex items-center gap-3 min-w-0">
             <div className="flex-shrink-0">
-              <OrbitalCoreCharacter state={characterState} size="sm" />
+              <OrbitMascotCharacter state={characterState} size="sm" />
             </div>
             <div className="min-w-0">
               <div className="flex items-center gap-2">

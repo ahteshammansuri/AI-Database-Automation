@@ -114,6 +114,7 @@ ai_service/storage/product_guides/
 !storage/faiss_index/.gitkeep
 storage/logs/*.log
 storage/scratch/
+ai_service/storage/indexes/_cache/
 
 # ------------------------------------------------------------------------------
 # 6. IDE, Editors, and OS Artifacts

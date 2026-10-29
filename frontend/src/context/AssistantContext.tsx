@@ -2,7 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
 import { api } from "../services/api";
 import { useLiveEvents } from "./LiveEventsContext";
 import { useToast } from "./ToastContext";
-import { CharacterState } from "../components/agent/AuraCoreCharacter";
+import { CharacterState } from "../components/agent/OrbitMascotCharacter";
 import { redactSecretsFromUtterance } from "../services/secretRedactor";
 import { ttsAdapter } from "../services/ttsAdapter";
 import { pageStateService } from "../services/pageStateService";
