@@ -90,3 +90,17 @@ cd laravel && php artisan test tests/Unit/ScheduleCalculatorTest.php tests/Featu
 cd .. && .venv/bin/python -m pytest ai_service/tests/test_content_contract_and_images.py
 cd frontend && npm test
 ```
+
+
+## Linked records (2026-10-29)
+
+| Suite | What it proves | Needs |
+|---|---|---|
+| `tests/Unit/RelationInferenceTest.php` | prefix-first detection (`blogs.category_id -> blog_categories`), pivots/views/backups never targets, self links, qualifiers, person roles, type mismatches and polymorphic pairs refused, declared keys win, owner settings, row labels never secret/personal, status-like columns | nothing |
+| `tests/Feature/LinkedRecordsTest.php` | on a database with no foreign keys: links and labels on the Data page and Schema Explorer, options by name or id, create rules (name vs details, view-only and protected parents), new parent with the row in one transaction and Undo of both, existing names reused, wrong ids refused, `0` as none, new parent with details on edit, Undo keeps a parent still in use, value choices and names, owner link settings and audit, data check, IDOR, manual publishing through detected links with parent details | fixture MySQL on 127.0.0.1:3317 |
+| `frontend/src/components/links/linkValue.test.ts` | new-link values, names in words, value names, typed values per type, schema facts | Node 24 |
+
+```bash
+cd laravel && php artisan test tests/Unit/RelationInferenceTest.php tests/Feature/LinkedRecordsTest.php tests/Feature/DataExplorerManagerTest.php
+cd ../frontend && npm test && npx tsc -b && npm run build
+```

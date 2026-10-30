@@ -1,16 +1,19 @@
-import React, { useEffect, useRef, useState } from "react";
-import { ChevronDown, KeyRound, Link2, Loader2, Search } from "lucide-react";
-import { api } from "../../services/api";
+import React from "react";
+import { KeyRound } from "lucide-react";
 import { FieldError } from "../ui/kit";
 import { DatePicker } from "../ui/DatePicker";
 import { TimePicker } from "../ui/TimePicker";
 import { Select2 } from "../ui/Select2";
 import { todayIn } from "../../lib/schedule";
+import { LinkPicker } from "../links/LinkPicker";
+import { ValuePicker } from "../links/ValuePicker";
+import { humanize, linkSourceText, type LinkScope } from "../links/linkValue";
 import type { DataColumn } from "./types";
 import { isEditable } from "./types";
 
 interface Props {
-  connectionId: number;
+  /** Where linked rows and value choices are read from (the Data page, or publishing). */
+  scope: LinkScope;
   table: string;
   columns: DataColumn[];
   values: Record<string, any>;
@@ -19,6 +22,10 @@ interface Props {
   insert: boolean;
   /** Readable names of the current linked values (category_id 3 -> "Fashion"). */
   labels?: Record<string, Record<string, string>>;
+  /** Offer adding new linked rows from this form (off inside the "new linked row" form itself). */
+  allowCreateLinks?: boolean;
+  /** List the columns the database fills under the form. */
+  automaticNote?: boolean;
 }
 
 const KIND: Record<string, string> = {
@@ -28,78 +35,7 @@ const KIND: Record<string, string> = {
 
 export const fieldId = (column: string) => `row-field-${column}`;
 
-/** Search the linked table by its readable name and pick a row (stores its id). */
-const LinkSelect: React.FC<{ connectionId: number; table: string; col: DataColumn; value: any; label?: string; invalid: boolean; onChange: (v: any) => void }> = ({
-  connectionId, table, col, value, label, invalid, onChange,
-}) => {
-  const [open, setOpen] = useState(false);
-  const [q, setQ] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [options, setOptions] = useState<{ id: any; label: string | null }[]>([]);
-  const [picked, setPicked] = useState<string | null>(label ?? null);
-  const box = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const t = setTimeout(async () => {
-      setLoading(true);
-      try {
-        const res = await api.dataLinkOptions(connectionId, table, col.name, q);
-        setOptions(res?.options ?? []);
-      } catch {
-        setOptions([]);
-      } finally {
-        setLoading(false);
-      }
-    }, 250);
-    return () => clearTimeout(t);
-  }, [open, q, connectionId, table, col.name]);
-
-  useEffect(() => {
-    if (!open) return;
-    const close = (e: MouseEvent) => box.current && !box.current.contains(e.target as Node) && setOpen(false);
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
-
-  return (
-    <div className="relative" ref={box}>
-      <button type="button" id={fieldId(col.name)} onClick={() => setOpen((o) => !o)} aria-expanded={open} aria-invalid={invalid || undefined}
-        aria-describedby={invalid ? `${fieldId(col.name)}-error` : undefined}
-        className={`da-input flex items-center justify-between gap-2 text-left${invalid ? " da-input-invalid" : ""}`}>
-        <span className={`flex min-w-0 items-center gap-1.5 ${value === null || value === "" || value === undefined ? "text-slate-400" : "text-slate-900"}`}>
-          <Link2 className="h-3.5 w-3.5 shrink-0 text-indigo-400" />
-          <span className="truncate">{value === null || value === "" || value === undefined ? `Choose from ${col.link!.table}…` : `${picked ?? ""} #${value}`.trim()}</span>
-        </span>
-        <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" />
-      </button>
-      {open && (
-        <div className="absolute left-0 right-0 z-40 mt-1.5 rounded-2xl border border-slate-200 bg-white p-2 shadow-lift">
-          <div className="relative mb-1.5">
-            <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-400" />
-            <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder={`Search ${col.link!.table}…`}
-              className="w-full rounded-lg border border-slate-200 bg-slate-50 py-1.5 pl-8 pr-2 text-[13px] focus:bg-white focus:outline-none focus:ring-1 focus:ring-indigo-500" />
-          </div>
-          <div className="max-h-56 overflow-y-auto">
-            {loading ? <p className="flex items-center gap-1.5 px-2 py-2 text-[12.5px] text-slate-500"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Searching…</p>
-              : options.length === 0 ? <p className="px-2 py-2 text-[12.5px] text-slate-500">No rows found in {col.link!.table}.</p>
-              : options.map((o) => (
-                <button key={String(o.id)} type="button" onClick={() => { onChange(o.id); setPicked(o.label); setOpen(false); }}
-                  className={`flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] hover:bg-indigo-50 ${String(o.id) === String(value) ? "bg-indigo-50 font-semibold text-indigo-800" : "text-slate-700"}`}>
-                  <span className="truncate">{o.label ?? `Row ${o.id}`}</span><span className="shrink-0 font-mono text-[11px] text-slate-400">#{String(o.id)}</span>
-                </button>
-              ))}
-            {col.nullable && (
-              <button type="button" onClick={() => { onChange(null); setPicked(null); setOpen(false); }} className="mt-1 w-full rounded-lg px-2 py-1.5 text-left text-[12.5px] text-slate-500 hover:bg-slate-50">Leave empty</button>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-};
-
-export const RowForm: React.FC<Props> = ({ connectionId, table, columns, values, onChange, errors, insert, labels }) => {
+export const RowForm: React.FC<Props> = ({ scope, table, columns, values, onChange, errors, insert, labels, allowCreateLinks = true, automaticNote = true }) => {
   const today = todayIn(Intl.DateTimeFormat().resolvedOptions().timeZone);
   const editable = columns.filter((c) => isEditable(c, insert));
   const automatic = columns.filter((c) => !isEditable(c, insert));
@@ -116,7 +52,16 @@ export const RowForm: React.FC<Props> = ({ connectionId, table, columns, values,
           const cls = `da-input${err ? " da-input-invalid" : ""}`;
           let input: React.ReactNode;
           if (c.link) {
-            input = <LinkSelect connectionId={connectionId} table={table} col={c} value={v} label={v !== null && v !== undefined ? labels?.[c.name]?.[String(v)] : undefined} invalid={!!err} onChange={(x) => onChange(c.name, x)} />;
+            input = (
+              <LinkPicker id={fieldId(c.name)} scope={scope} table={table} column={c.name} value={v} onChange={(x) => onChange(c.name, x)}
+                allowCreate={allowCreateLinks} invalid={!!err} describedBy={err ? `${fieldId(c.name)}-error` : undefined}
+                initialLabel={v !== null && v !== undefined ? labels?.[c.name]?.[String(v)] : undefined} />
+            );
+          } else if (c.choices === "values") {
+            input = (
+              <ValuePicker id={fieldId(c.name)} scope={scope} table={table} column={c.name} value={v} onChange={(x) => onChange(c.name, x)}
+                family={c.family} nullable={c.nullable} labels={c.value_labels} defaultValue={insert ? c.default : null} invalid={!!err} describedBy={err ? `${fieldId(c.name)}-error` : undefined} />
+            );
           } else if (c.family === "boolean") {
             const on = v === 1 || v === "1" || v === true;
             input = (
@@ -130,7 +75,7 @@ export const RowForm: React.FC<Props> = ({ connectionId, table, columns, values,
           } else if (c.enum.length && c.family === "enum") {
             const enumOptions = [
               ...(c.nullable ? [{ value: "", label: "Empty (NULL)" }] : []),
-              ...c.enum.map((o) => ({ value: o, label: o })),
+              ...c.enum.map((o) => ({ value: o, label: c.value_labels?.[o] ?? o, badge: c.value_labels?.[o] ? o : undefined })),
             ];
             input = (
               <Select2
@@ -165,10 +110,15 @@ export const RowForm: React.FC<Props> = ({ connectionId, table, columns, values,
           }
           return (
             <div key={c.name} className={wide ? "sm:col-span-2" : ""}>
-              <label htmlFor={fieldId(c.name)} className="da-label flex items-center gap-1.5">
-                <span className="font-mono">{c.name}</span>
+              <label htmlFor={fieldId(c.name)} className="da-label flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                <span>{humanize(c.name)}</span>
+                <span className="font-mono text-[11px] font-normal text-slate-400">{c.name}</span>
                 {required && <span className="rounded bg-amber-50 px-1 text-[10px] font-semibold text-amber-700">Required</span>}
-                <span className="ml-auto text-[11px] font-normal text-slate-400">{c.link ? `Links to ${c.link.table}` : KIND[c.family] ?? c.type}{c.max_length && ["string"].includes(c.family) ? ` · max ${c.max_length}` : ""}</span>
+                <span className="ml-auto text-[11px] font-normal text-slate-400" title={c.link?.reason ?? undefined}>
+                  {c.link ? <>Links to <span className="font-mono">{c.link.table}</span>{c.link.source && c.link.source !== "declared" ? ` · ${linkSourceText(c.link.source).toLowerCase()}` : ""}</>
+                    : c.choices === "values" ? "Choice" : KIND[c.family] ?? c.type}
+                  {c.max_length && ["string"].includes(c.family) && !c.choices ? ` · max ${c.max_length}` : ""}
+                </span>
               </label>
               {input}
               <FieldError id={fieldId(c.name)} message={err} />
@@ -177,7 +127,7 @@ export const RowForm: React.FC<Props> = ({ connectionId, table, columns, values,
           );
         })}
       </div>
-      {automatic.length > 0 && (
+      {automaticNote && automatic.length > 0 && (
         <p className="flex items-start gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[12px] text-slate-500">
           <KeyRound className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span>Filled by the database: {automatic.map((c) => <code key={c.name} className="mx-0.5 rounded bg-white px-1">{c.name}</code>)}</span>

@@ -42,7 +42,8 @@ class DataChangeService
         string $tableName,
         array $filter,
         array $patchValues,
-        ?int $taskId = null
+        ?int $taskId = null,
+        array $parents = []
     ): array {
         $this->policy->assertCanWrite($connection, $tableName, 'update');
 
@@ -104,7 +105,7 @@ class DataChangeService
             $sampleBefore = $targetRows[0][$col] ?? null;
             $diffSummary[$col] = [
                 'before' => ColumnClassifier::mask($sampleBefore, $col),
-                'after' => ColumnClassifier::mask($newVal, $col),
+                'after' => self::isParentMarker($newVal) ? 'New: ' . ($parents[$newVal['$parent']]['label'] ?? '') : ColumnClassifier::mask($newVal, $col),
             ];
         }
 
@@ -121,6 +122,7 @@ class DataChangeService
             'primary_keys' => $pks,
             'filter_spec' => $normalizedFilter,
             'patch_values' => $patchValues,
+            'linked_parents' => $parents ? ['parents' => $parents] : null,
             'affected_count' => $count,
             'preview_rows' => $maskedPreview,
             'diff_summary' => $diffSummary,
@@ -139,6 +141,7 @@ class DataChangeService
             'primary_keys' => $pks,
             'diff_summary' => $diffSummary,
             'preview_rows' => $maskedPreview,
+            'new_parents' => self::describeParents($parents),
             'requires_confirmation' => true,
             'confirmation_type' => $count === 1 ? 'light_confirm' : 'count_confirm',
         ];
@@ -169,11 +172,26 @@ class DataChangeService
         }
 
         $validator = app(RowValidator::class);
+        $linked = app(LinkedRecords::class);
         $clean = [];
         $errors = [];
+        $parentErrors = [];
+        $parents = [];
+        $reused = [];
         foreach (array_values($rows) as $i => $row) {
-            [$c, $e] = $validator->validate($tableMeta, (array) $row, true);
-            $clean[$i] = $c;
+            // A new linked row ({"$new": {...}} instead of an id) is checked on its own and added first on confirm.
+            $x = $linked->extractNewParents($connection, $catalog, $tableName, (array) $row, 'data', "r{$i}.");
+            $markers = array_filter($x['row'], fn ($v) => self::isParentMarker($v));
+            [$c, $e] = $validator->validate($tableMeta, array_diff_key($x['row'], $markers), true);
+            $e = $x['errors'] + array_diff_key($e, $markers);
+            $clean[$i] = $c + $markers;
+            $parents += $x['parents'];
+            if ($x['parent_errors']) {
+                $parentErrors[$i] = $x['parent_errors'];
+            }
+            foreach ($x['reused'] as $col => $r) {
+                $reused[] = ['row' => $i, 'column' => $col] + $r;
+            }
             if ($e) {
                 $errors[$i] = $e;
             }
@@ -184,10 +202,11 @@ class DataChangeService
         }
         if ($errors) {
             ksort($errors);
-            return ['success' => false, 'errors' => $errors];
+            return ['success' => false, 'errors' => $errors, 'parent_errors' => $parentErrors];
         }
 
-        $preview = $this->policy->maskResultRows(array_slice($clean, 0, 20));
+        $shown = array_map(fn ($r) => array_map(fn ($v) => self::isParentMarker($v) ? null : $v, $r), $clean);
+        $preview = $this->policy->maskResultRows(array_slice($shown, 0, 20));
         $change = DataChangeRequest::create([
             'user_id' => $user->id,
             'connection_id' => $connection->id,
@@ -196,6 +215,7 @@ class DataChangeService
             'target_table' => $tableName,
             'primary_keys' => [],
             'patch_values' => ['rows' => array_values($clean), 'source' => $source],
+            'linked_parents' => $parents ? ['parents' => $parents] : null,
             'affected_count' => count($clean),
             'preview_rows' => $preview,
             'status' => 'pending_confirmation',
@@ -210,9 +230,113 @@ class DataChangeService
             'table' => $tableName,
             'affected_count' => count($clean),
             'preview_rows' => $preview,
+            'labels' => $linked->labels($connection, $catalog, $tableName, $shown),
+            'new_parents' => self::describeParents($parents),
+            'reused' => $reused,
             'requires_confirmation' => true,
             'confirmation_type' => count($clean) === 1 ? 'light_confirm' : 'count_confirm',
         ];
+    }
+
+    public static function isParentMarker(mixed $v): bool
+    {
+        return is_array($v) && isset($v['$parent']) && is_string($v['$parent']);
+    }
+
+    /** New linked rows as shown in a preview (personal values masked). */
+    private static function describeParents(array $parents): array
+    {
+        $out = [];
+        foreach ($parents as $key => $p) {
+            $out[] = [
+                'key' => $key,
+                'row' => preg_match('/^r(\d+)\./', $key, $m) ? (int) $m[1] : 0,
+                'column' => $p['column'],
+                'table' => $p['table'],
+                'thing' => LinkedRecords::thing($p['table']),
+                'label' => $p['label'],
+                'values' => array_map(fn ($v, $c) => ColumnClassifier::mask($v, $c), $p['values'], array_keys($p['values'])),
+                'columns' => array_keys($p['values']),
+            ];
+        }
+        return $out;
+    }
+
+    /**
+     * Inside the change's transaction: add the new linked rows it asked for (a row with the same name added meanwhile
+     * is used instead) and return [marker key => new id, rows added].
+     */
+    private function createParents(PDO $pdo, Dialect $dialect, DbConnection $connection, DataChangeRequest $change): array
+    {
+        $ids = [];
+        $created = [];
+        foreach ((array) (($change->linked_parents ?? [])['parents'] ?? []) as $key => $p) {
+            $this->policy->assertCanWrite($connection, $p['table'], 'insert');
+            $qt = $dialect->quoteIdentifier($p['table']);
+            $qk = $dialect->quoteIdentifier($p['key_column']);
+            $id = null;
+            if (!empty($p['reuse_by_name']) && !empty($p['label_column'])) {
+                $stmt = $pdo->prepare("SELECT {$qk} FROM {$qt} WHERE LOWER(" . $dialect->quoteIdentifier($p['label_column']) . ") = LOWER(?) ORDER BY {$qk} LIMIT 1");
+                $stmt->execute([$p['label']]);
+                $found = $stmt->fetchColumn();
+                $id = $found === false ? null : $found;
+            }
+            if ($id === null) {
+                $cols = array_keys($p['values']);
+                $sql = "INSERT INTO {$qt} (" . implode(', ', array_map(fn ($c) => $dialect->quoteIdentifier($c), $cols)) . ') VALUES (' . implode(', ', array_fill(0, count($cols), '?')) . ')';
+                $pg = ($connection->driver ?: 'mysql') === 'pgsql';
+                $stmt = $pdo->prepare($sql . ($pg ? " RETURNING {$qk}" : ''));
+                $stmt->execute(array_values($p['values']));
+                $id = $pg ? $stmt->fetchColumn() : ($p['values'][$p['key_column']] ?? $pdo->lastInsertId());
+                $created[] = ['table' => $p['table'], 'key_column' => $p['key_column'], 'id' => $id, 'label' => $p['label']];
+            }
+            $ids[$key] = is_numeric($id) && (string) (int) $id === (string) $id ? (int) $id : $id;
+        }
+        return [$ids, $created];
+    }
+
+    private static function withParentIds(array $row, array $ids): array
+    {
+        foreach ($row as $col => $v) {
+            if (self::isParentMarker($v)) {
+                $row[$col] = $ids[$v['$parent']] ?? throw new DataException('PARENT_MISSING', "The new linked row for {$col} could not be added.");
+            }
+        }
+        return $row;
+    }
+
+    /**
+     * Undo: linked rows this change added are removed again, unless another row now points at them.
+     *
+     * @return array{removed: int, kept: list<string>}
+     */
+    private function removeCreatedParents(PDO $pdo, Dialect $dialect, DbConnection $connection, DataChangeRequest $change, array $catalog): array
+    {
+        $removed = 0;
+        $kept = [];
+        foreach (array_reverse((array) (($change->linked_parents ?? [])['created'] ?? [])) as $p) {
+            $this->policy->assertCanWrite($connection, $p['table'], 'insert');
+            $used = false;
+            foreach ($catalog['foreign_keys'] ?? [] as $fk) {
+                if ($fk['ref_table'] !== $p['table'] || count($fk['columns']) !== 1 || ($catalog['tables'][$fk['table']]['class'] ?? null) === 'blocked') {
+                    continue;
+                }
+                $stmt = $pdo->prepare('SELECT 1 FROM ' . $dialect->quoteIdentifier($fk['table']) . ' WHERE ' . $dialect->quoteIdentifier($fk['columns'][0]) . ' = ? LIMIT 1');
+                $stmt->execute([$p['id']]);
+                if ($stmt->fetchColumn()) {
+                    $used = true;
+                    break;
+                }
+            }
+            if ($used) {
+                $kept[] = "{$p['label']} ({$p['table']})";
+                continue;
+            }
+            $stmt = $pdo->prepare('DELETE FROM ' . $dialect->quoteIdentifier($p['table']) . ' WHERE ' . $dialect->quoteIdentifier($p['key_column']) . ' = ?');
+            $stmt->execute([$p['id']]);
+            $removed += $stmt->rowCount();
+        }
+        return ['removed' => $removed, 'kept' => $kept];
     }
 
     /**
@@ -234,7 +358,7 @@ class DataChangeService
         foreach ($uniqueSets as [$col]) {
             $seen = [];
             foreach ($rows as $i => $row) {
-                if (!array_key_exists($col, $row) || $row[$col] === null) {
+                if (!array_key_exists($col, $row) || $row[$col] === null || is_array($row[$col])) {
                     continue;
                 }
                 $v = (string) $row[$col];
@@ -262,15 +386,23 @@ class DataChangeService
                 continue;
             }
             $col = $fk['columns'][0];
+            $enforced = $fk['enforced'] ?? true;
+            if (!$enforced && $this->policy->getTableClass($connection, $fk['ref_table']) === 'blocked') {
+                continue; // a detected link never reads a credential or session table
+            }
+            $none = LinkedRecords::noneValue($tableMeta['columns'][$col] ?? [], $fk);
             $q = 'SELECT 1 FROM ' . $dialect->quoteIdentifier($fk['ref_table']) . ' WHERE ' . $dialect->quoteIdentifier($fk['ref_columns'][0]) . ' = ? LIMIT 1';
             foreach ($rows as $i => $row) {
-                if (!array_key_exists($col, $row) || $row[$col] === null || isset($errors[$i][$col])) {
+                if (!array_key_exists($col, $row) || $row[$col] === null || is_array($row[$col]) || isset($errors[$i][$col])) {
                     continue;
+                }
+                if ($none['allowed'] && $none['value'] === 0 && (string) $row[$col] === '0') {
+                    continue; // 0 means "not linked" here (e.g. a top-level category)
                 }
                 $stmt = $pdo->prepare($q);
                 $stmt->execute([$row[$col]]);
                 if (!$stmt->fetchColumn()) {
-                    $errors[$i][$col] = "No row in “{$fk['ref_table']}” has the id {$row[$col]}.";
+                    $errors[$i][$col] = "No row in “{$fk['ref_table']}” has the id {$row[$col]}. Choose one from the list.";
                 }
             }
         }
@@ -514,7 +646,8 @@ class DataChangeService
         $totalDependentCount = 0;
 
         foreach ($fks as $fk) {
-            if ($fk['ref_table'] === $tableName && in_array($primaryKey, $fk['ref_columns'], true)) {
+            if ($fk['ref_table'] === $tableName && in_array($primaryKey, $fk['ref_columns'], true)
+                && ($catalog['tables'][$fk['table']]['class'] ?? null) !== 'blocked') {
                 $childTable = $fk['table'];
                 $childCol = $fk['columns'][0];
 
@@ -532,6 +665,7 @@ class DataChangeService
                         'foreign_key_column' => $childCol,
                         'dependent_row_count' => $depCount,
                         'cascade_action' => $fk['on_delete'] ?? 'RESTRICT/CASCADE',
+                        'enforced' => (bool) ($fk['enforced'] ?? true),
                     ];
                     $totalDependentCount += $depCount;
                 }
@@ -636,11 +770,14 @@ class DataChangeService
 
         try {
             $placeholders = implode(', ', array_fill(0, count($pks), '?'));
+            // New linked rows first, in this transaction, so the change points at their new ids.
+            [$parentIds, $createdParents] = $this->createParents($pdo, $dialect, $connection, $change);
 
             if ($change->action === 'insert') {
                 $rows = (array) ($change->patch_values['rows'] ?? []);
                 $inserted = [];
                 foreach ($rows as $row) {
+                    $row = self::withParentIds($row, $parentIds);
                     $cols = array_keys($row);
                     $sql = "INSERT INTO {$qTable} (" . implode(', ', array_map(fn ($c) => $dialect->quoteIdentifier($c), $cols)) . ') VALUES (' . implode(', ', array_fill(0, count($cols), '?')) . ')';
                     if (($connection->driver ?: 'mysql') === 'pgsql') {
@@ -653,7 +790,7 @@ class DataChangeService
                 $pks = $inserted;
                 $change->primary_keys = $inserted;
             } elseif ($change->action === 'update') {
-                $patch = (array) $change->patch_values;
+                $patch = self::withParentIds((array) $change->patch_values, $parentIds);
                 $setSql = [];
                 $bindings = [];
 
@@ -694,6 +831,9 @@ class DataChangeService
 
             $change->status = 'executed';
             $change->executed_at = now();
+            if ($createdParents) {
+                $change->linked_parents = ['created' => $createdParents] + (array) $change->linked_parents;
+            }
             $change->save();
 
             $diff = $change->action === 'update' ? (array) ($change->diff_summary ?? []) : [];
@@ -702,6 +842,7 @@ class DataChangeService
                 'affected_count' => count($pks),
                 'primary_keys' => $pks,
                 'change_request_id' => $change->id,
+                'linked_rows_added' => $createdParents ? array_map(fn ($p) => ['table' => $p['table'], 'id' => $p['id']], $createdParents) : null,
                 'changes' => $diff ? AuditLog::changes(
                     array_map(fn ($d) => $d['before'] ?? null, $diff),
                     array_map(fn ($d) => $d['after'] ?? null, $diff),
@@ -713,7 +854,9 @@ class DataChangeService
                 'action' => $change->action,
                 'table' => $change->target_table,
                 'affected_count' => count($pks),
-                'message' => ['insert' => 'Added', 'update' => 'Updated', 'delete' => 'Deleted'][$change->action] . ' ' . count($pks) . " row(s) in '{$change->target_table}'.",
+                'message' => ['insert' => 'Added', 'update' => 'Updated', 'delete' => 'Deleted'][$change->action] . ' ' . count($pks) . " row(s) in '{$change->target_table}'"
+                    . ($createdParents ? ', and added ' . implode(', ', array_map(fn ($p) => '“' . $p['label'] . '” to ' . $p['table'], $createdParents)) : '') . '.',
+                'linked_rows_added' => array_map(fn ($p) => ['table' => $p['table'], 'id' => $p['id'], 'label' => $p['label']], $createdParents),
                 'primary_keys' => $pks,
                 'can_undo' => true,
                 'change_request_id' => $change->id,
@@ -781,6 +924,7 @@ class DataChangeService
                     $stmt = $pdo->prepare($sql);
                     $stmt->execute($bindings);
                 }
+                $this->removeCreatedParents($pdo, $dialect, $connection, $change, $catalog);
             } elseif ($change->action === 'delete') {
                 // Re-insert deleted rows
                 foreach ($beforeRows as $row) {
@@ -844,6 +988,7 @@ class DataChangeService
             $stmt = $pdo->prepare('DELETE FROM ' . $dialect->quoteIdentifier($change->target_table) . ' WHERE ' . $dialect->quoteIdentifier($primaryKey) . ' IN (' . implode(', ', array_fill(0, count($pks), '?')) . ')');
             $stmt->execute($pks);
             $removed = $stmt->rowCount();
+            $parents = $this->removeCreatedParents($pdo, $dialect, $connection, $change, $catalog);
             $pdo->commit();
         } catch (\Throwable $e) {
             if ($pdo->inTransaction()) {
@@ -854,12 +999,14 @@ class DataChangeService
 
         $change->update(['status' => 'undone', 'undone_at' => now()]);
         AuditLog::log($user->id, 'data.insert_undone', 'db_connections', (string) $connection->id, [
-            'table' => $change->target_table, 'primary_keys' => $pks, 'removed' => $removed,
+            'table' => $change->target_table, 'primary_keys' => $pks, 'removed' => $removed, 'linked_rows_removed' => $parents['removed'] ?: null,
         ]);
 
         return [
             'success' => true,
-            'message' => "Removed {$removed} added row(s) from '{$change->target_table}'.",
+            'message' => "Removed {$removed} added row(s) from '{$change->target_table}'"
+                . ($parents['removed'] ? " and the {$parents['removed']} linked row(s) added with them" : '')
+                . ($parents['kept'] ? '; kept ' . implode(', ', $parents['kept']) . ' because other rows use it now' : '') . '.',
             'affected_count' => $removed,
         ];
     }

@@ -94,7 +94,7 @@ class SampleDataService
                     $blockers[] = "“{$name}” must link to “{$fk['ref_table']}”, which is protected, so sample rows cannot be created here.";
                     continue;
                 }
-                $label = collect($parent['columns'])->keys()->first(fn ($n) => !empty($parent['columns'][$n]['is_label']) && !ColumnClassifier::isSecret($n) && !ColumnClassifier::isPii($n));
+                $label = $parent['label_column'] ?? null;
                 $readParents[$name] = [$fk['ref_table'], $fk['ref_columns'][0], $label];
                 $rule['link'] = ['table' => $fk['ref_table'], 'options' => []];
             }

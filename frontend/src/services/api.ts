@@ -1,4 +1,5 @@
 import { redactSecretsFromUtterance } from "./secretRedactor";
+import type { LinkOptions, LinkScope, ValueChoices } from "../components/links/linkValue";
 
 const BASE_URL = "/api";
 
@@ -314,6 +315,40 @@ export const api = {
     request<any>(`/data/changes/${changeId}/confirm`, { method: "POST", body: JSON.stringify({ typed_phrase: typedPhrase }) }),
   dataCancel: (changeId: number) => request<any>(`/data/changes/${changeId}/cancel`, { method: "POST" }),
   dataUndo: (changeId: number) => request<any>(`/data/changes/${changeId}/undo`, { method: "POST" }),
+
+  // Linked rows and value choices. The Data page reads through the Data endpoints (Data Manager rules); manual
+  // publishing and automation fields through the connection endpoints (publishing rules: protected tables are never
+  // created). Always fresh, so a row added a moment ago is listed.
+  linkOptions: (scope: LinkScope, table: string, column: string, q = "", selected?: string | number | null) => {
+    const sel = selected !== undefined && selected !== null && selected !== "" ? `&selected=${encodeURIComponent(String(selected))}` : "";
+    return request<LinkOptions>(scope.context === "data"
+      ? `/data/connections/${scope.connectionId}/tables/${encodeURIComponent(table)}/links/${encodeURIComponent(column)}?q=${encodeURIComponent(q)}${sel}`
+      : `/connections/${scope.connectionId}/links/options?table=${encodeURIComponent(table)}&column=${encodeURIComponent(column)}&q=${encodeURIComponent(q)}${sel}`, { forceRefresh: true });
+  },
+  linkForm: (scope: LinkScope, table: string) =>
+    request<any>(`${scope.context === "data" ? "/data" : ""}/connections/${scope.connectionId}/tables/${encodeURIComponent(table)}/form`, { forceRefresh: true }),
+  validateLinkedRow: (scope: LinkScope, table: string, values: Record<string, any>) =>
+    request<{ valid: boolean; label: string; existing: string | number | null }>(
+      `${scope.context === "data" ? "/data" : ""}/connections/${scope.connectionId}/tables/${encodeURIComponent(table)}/validate-row`,
+      { method: "POST", body: JSON.stringify({ values }) },
+    ),
+  columnValues: (scope: LinkScope, table: string, column: string) =>
+    request<ValueChoices>(scope.context === "data"
+      ? `/data/connections/${scope.connectionId}/tables/${encodeURIComponent(table)}/values/${encodeURIComponent(column)}`
+      : `/connections/${scope.connectionId}/columns/values?table=${encodeURIComponent(table)}&column=${encodeURIComponent(column)}`, { forceRefresh: true }),
+  /** Owner: confirm, change or remove where a column points (auto / link / none). */
+  setColumnLink: (connectionId: number, table: string, column: string, body: { mode: "auto" | "link" | "none"; ref_table?: string; ref_column?: string }) =>
+    request<{ link: any; message: string }>(`/connections/${connectionId}/tables/${encodeURIComponent(table)}/columns/${encodeURIComponent(column)}/link`, { method: "PUT", body: JSON.stringify(body) }),
+  setValueLabels: (connectionId: number, table: string, column: string, labels: Record<string, string>) =>
+    request<{ labels: Record<string, string>; message: string }>(`/connections/${connectionId}/tables/${encodeURIComponent(table)}/columns/${encodeURIComponent(column)}/value-labels`, { method: "PUT", body: JSON.stringify({ labels }) }),
+  setDisplayColumn: (connectionId: number, table: string, column: string | null) =>
+    request<{ label_column: string | null; display_column: string | null; message: string }>(`/connections/${connectionId}/tables/${encodeURIComponent(table)}/display-column`, { method: "PUT", body: JSON.stringify({ column }) }),
+  /** How many sampled values of a column exist in each table (read-only, bounded). */
+  checkLink: (connectionId: number, table: string, column: string, refTables: string[]) =>
+    request<{ sampled: number; results: { ref_table: string; found: number; sampled: number; verdict: string; message: string }[] }>(
+      `/connections/${connectionId}/links/check?table=${encodeURIComponent(table)}&column=${encodeURIComponent(column)}${refTables.map((t) => `&ref_tables[]=${encodeURIComponent(t)}`).join("")}`,
+      { forceRefresh: true },
+    ),
   autopilots: (connectionId?: number, table?: string) =>
     request<any>(`/data/autopilots?${new URLSearchParams({ ...(connectionId ? { connection_id: String(connectionId) } : {}), ...(table ? { table } : {}) }).toString()}`, { forceRefresh: true }),
   createAutopilot: (data: any) => request<any>("/data/autopilots", { method: "POST", body: JSON.stringify(data) }),
@@ -365,7 +400,7 @@ export const api = {
   }),
 
   // Schema Discovery
-  getSchema: (id: number) => request<any>(`/connections/${id}/schema`).then(normalizeSchema),
+  getSchema: (id: number, fresh = false) => request<any>(`/connections/${id}/schema`, { forceRefresh: fresh }).then(normalizeSchema),
   refreshSchema: (id: number) => request<any>(`/connections/${id}/refresh-schema`, { method: "POST" }),
   getLookupValues: (connectionId: number, table: string, search?: string) =>
     request<any[]>(`/connections/${connectionId}/lookup-values?table=${encodeURIComponent(table)}${search ? `&search=${encodeURIComponent(search)}` : ""}`),
@@ -491,6 +526,8 @@ export const api = {
     scheduled_time?: string;
     timezone?: string;
     relation_policies?: Record<string, "CREATE_IF_MISSING" | "REUSE_EXISTING_ONLY">;
+    /** Details of each new linked row ("add with details"), by linked column. */
+    relation_values?: Record<string, Record<string, any>>;
     name?: string;
   }) => request<any>("/automations/manual-publish", {
     method: "POST",

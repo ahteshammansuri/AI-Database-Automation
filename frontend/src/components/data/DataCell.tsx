@@ -2,7 +2,7 @@ import React from "react";
 import { Check, Link2, Minus } from "lucide-react";
 import type { DataColumn } from "./types";
 
-/** One value shown in the table: links by name, yes/no as icons, empty as a dash, long text shortened. */
+/** One value shown in the table: links and named values by name, yes/no as icons, empty as a dash, long text shortened. */
 export const DataCell: React.FC<{ col: DataColumn; value: any; label?: string; full?: boolean }> = ({ col, value, label, full }) => {
   if (value === null || value === undefined) return <span className="text-slate-300">—</span>;
   if (col.family === "boolean") {
@@ -18,7 +18,15 @@ export const DataCell: React.FC<{ col: DataColumn; value: any; label?: string; f
       </span>
     );
   }
-  if (col.enum.length) return <span className="rounded-md bg-slate-100 px-1.5 py-0.5 text-[12px] font-medium text-slate-700">{String(value)}</span>;
+  const named = col.value_labels?.[String(value)];
+  if (col.enum.length || named) {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-md bg-slate-100 px-1.5 py-0.5 text-[12px] font-medium text-slate-700" title={named ? `Stored as ${String(value)}` : undefined}>
+        {named ?? String(value)}
+        {named && <span className="font-mono text-[10.5px] font-normal text-slate-400">{String(value)}</span>}
+      </span>
+    );
+  }
   const text = typeof value === "object" ? JSON.stringify(value) : String(value);
   if (["integer", "decimal"].includes(col.family)) return <span className="tabular-nums">{text}</span>;
   if (full) return <span className="whitespace-pre-wrap break-words">{text}</span>;

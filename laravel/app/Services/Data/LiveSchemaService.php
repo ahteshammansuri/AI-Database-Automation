@@ -119,6 +119,9 @@ class LiveSchemaService
             ];
         });
 
+        // Declared, detected and owner-set links, row labels and value names (SchemaRelations).
+        $schema = app(SchemaRelations::class)->decorateCatalog($connection, $schema);
+
         Cache::put($cacheKey, $schema, $ttl);
         return $schema;
     }

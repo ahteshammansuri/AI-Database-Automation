@@ -1,7 +1,9 @@
 import React, { useState } from "react";
+import { LinkPicker } from "../links/LinkPicker";
+import { ValuePicker } from "../links/ValuePicker";
+import { linkSourceText } from "../links/linkValue";
 import { AlertCircle, ArrowRight, CheckCircle2, ChevronDown, ChevronUp, Cpu, GitBranch, Image as ImageIcon, KeyRound, Link2, Lock, PlusCircle, Settings2, Sparkles } from "lucide-react";
 import { SearchableSelect } from "../common/SearchableSelect";
-import { SearchableRelationshipSelect } from "../common/SearchableRelationshipSelect";
 import { DatePicker } from "../ui/DatePicker";
 import { TimePicker } from "../ui/TimePicker";
 import { FieldPlan, Mapping, Mode, PlanColumn, explain, groupColumns, mappingFor, modeOf, modeOptions } from "./fieldPlan";
@@ -26,9 +28,10 @@ const KIND_LABEL: Record<string, string> = {
   number: "Number", url: "Link", contact: "Contact", json: "JSON", text: "Text",
 };
 
-const ColumnRow: React.FC<{ col: PlanColumn } & Omit<Props, "plan" | "problems"> & { titleColumn: string | null; problem?: string }> = ({
-  col, mappings, onChange, connectionId, manual, length, format, timezone, titleColumn, problem,
+const ColumnRow: React.FC<{ col: PlanColumn; table: string } & Omit<Props, "plan" | "problems"> & { titleColumn: string | null; problem?: string }> = ({
+  col, table, mappings, onChange, connectionId, manual, length, format, timezone, titleColumn, problem,
 }) => {
+  const [fixedLabel, setFixedLabel] = useState<string | null>(null);
   const m = mappings[col.name];
   const mode = modeOf(m, col);
   const options = modeOptions(col).filter((o) => !manual || !["AI", "AI_CREATE", "AI_REUSE"].includes(o.value));
@@ -56,8 +59,8 @@ const ColumnRow: React.FC<{ col: PlanColumn } & Omit<Props, "plan" | "problems">
             {col.required && <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">Required</span>}
             {col.is_unique && <span className="rounded bg-violet-50 px-1.5 py-0.5 text-[10px] font-semibold text-violet-700">Unique</span>}
             {col.relation && (
-              <span className="inline-flex items-center gap-0.5 rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700">
-                <GitBranch className="h-2.5 w-2.5" /> {col.relation.table}
+              <span className="inline-flex items-center gap-0.5 rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700" title={linkSourceText(col.relation.source)}>
+                <GitBranch className="h-2.5 w-2.5" /> {col.relation.table}{col.relation.source && col.relation.source !== "declared" ? " · detected" : ""}
               </span>
             )}
           </div>
@@ -73,13 +76,13 @@ const ColumnRow: React.FC<{ col: PlanColumn } & Omit<Props, "plan" | "problems">
               placeholder="How is it filled?"
             />
             {needsValueEditor(mode, col) && (
-              <ValueEditor col={col} mode={mode} value={m?.fixed_value} onChange={setValue} connectionId={connectionId} timezone={timezone} />
+              <ValueEditor col={col} table={table} mode={mode} value={m?.fixed_value} onChange={setValue} connectionId={connectionId} timezone={timezone} onLabel={setFixedLabel} />
             )}
           </div>
           {col.relation && (mode === "AI_CREATE" || mode === "AI_REUSE") && !problem && <RelationFlow col={col} create={mode === "AI_CREATE"} />}
           <p role={problem ? "alert" : undefined} className={`flex items-start gap-1.5 leading-relaxed ${problem ? "text-[12px] font-medium text-rose-600" : "text-[11px] text-slate-500"}`}>
             {problem ? <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" /> : <Sparkles className="mt-0.5 h-3 w-3 shrink-0 text-indigo-400" />}
-            <span>{problem ?? explain(col, m, { titleColumn, length, format, manual })}</span>
+            <span>{problem ?? explain(col, m, { titleColumn, length, format, manual, fixedLabel })}</span>
           </p>
         </div>
       </div>
@@ -111,18 +114,22 @@ function needsValueEditor(mode: Mode, col: PlanColumn) {
   return mode === "FIXED" || mode === "FIXED_REL";
 }
 
-const ValueEditor: React.FC<{ col: PlanColumn; mode: Mode; value: any; onChange: (v: any) => void; connectionId: number; timezone: string }> = ({
-  col, mode, value, onChange, connectionId, timezone,
+const ValueEditor: React.FC<{ col: PlanColumn; table: string; mode: Mode; value: any; onChange: (v: any) => void; connectionId: number; timezone: string; onLabel: (label: string | null) => void }> = ({
+  col, table, mode, value, onChange, connectionId, timezone, onLabel,
 }) => {
+  const scope = { connectionId, context: "publish" as const };
   if (mode === "FIXED_REL" && col.relation) {
+    // An existing row only: new parents are added by the AI choice above, or on the Data page.
     return (
-      <SearchableRelationshipSelect
-        connectionId={connectionId}
-        targetTable={col.relation.table}
-        value={value ?? null}
-        onChange={(v) => onChange(v)}
-        placeholder={`Search ${col.relation.table}…`}
-      />
+      <LinkPicker id={`builder-fixed-${col.name}`} scope={scope} table={table} column={col.name} value={value ?? null} allowCreate={false}
+        onChange={(v, label) => { onChange(v); onLabel(label ?? null); }}
+        onLoaded={(info) => onLabel(info.selected?.label ?? null)} />
+    );
+  }
+  if (col.categorical && col.kind !== "boolean") {
+    return (
+      <ValuePicker id={`builder-fixed-${col.name}`} scope={scope} table={table} column={col.name} value={value} onChange={onChange}
+        family={col.family ?? (col.kind === "number" ? "integer" : "string")} nullable={col.nullable} labels={col.value_labels} />
     );
   }
   if (col.kind === "enum") {
@@ -194,7 +201,7 @@ export const FieldMappingStep: React.FC<Props> = (props) => {
   const parentCreates = groups.relations.filter((c) => modeOf(mappings[c.name], c) === "AI_CREATE");
   const otherProblems = groups.other.filter((c) => problems[c.name]).length;
 
-  const row = (c: PlanColumn) => <ColumnRow key={c.name} col={c} {...props} titleColumn={titleColumn} problem={problems[c.name]} />;
+  const row = (c: PlanColumn) => <ColumnRow key={c.name} col={c} table={plan.table} {...props} titleColumn={titleColumn} problem={problems[c.name]} />;
   const problemCount = Object.keys(problems).length;
 
   // One new row at a glance: which columns the AI writes, which are linked, which fill themselves.

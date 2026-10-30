@@ -2,7 +2,9 @@
 
 namespace App\Services\Automation;
 
+use App\Models\DbConnection;
 use App\Services\Data\ColumnClassifier;
+use App\Services\Data\LiveSchemaService;
 use PDO;
 
 /**
@@ -104,10 +106,49 @@ class TargetTableInspector
         ];
     }
 
+    /**
+     * describe() plus the links the database does not declare: detected from names or set by the owner on this
+     * connection (SchemaRelations), so automations and manual publishing link the same columns as the rest of the
+     * product. A column the owner marked "not a link" keeps only a declared key. Falls back to the declared keys when
+     * the live catalog cannot be read.
+     */
+    public function describeFor(DbConnection $connection, PDO $pdo, string $table): ?array
+    {
+        $info = $this->describe($pdo, $connection->database_name, $table);
+        if ($info === null) {
+            return null;
+        }
+        $key = 'for|' . spl_object_id($pdo) . "|{$connection->id}|{$table}";
+        if (array_key_exists($key, $this->cache)) {
+            return $this->cache[$key];
+        }
+        try {
+            $meta = app(LiveSchemaService::class)->getCatalog($connection)['tables'][$table] ?? null;
+        } catch (\Throwable) {
+            $meta = null;
+        }
+        foreach ($meta['foreign_keys'] ?? [] as $fk) {
+            $col = $fk['columns'][0] ?? null;
+            if (count($fk['columns'] ?? []) !== 1 || !isset($info['columns'][$col]) || !empty($info['columns'][$col]['foreign_key'])) {
+                continue;
+            }
+            $link = ['table' => $fk['ref_table'], 'column' => $fk['ref_columns'][0], 'source' => $fk['source'] ?? 'detected', 'enforced' => false];
+            $info['columns'][$col]['foreign_key'] = $link;
+            $info['foreign_keys'][$col] = $link;
+        }
+        if (!empty($meta['label_column']) && isset($info['columns'][$meta['label_column']])) {
+            $info['label_column'] = $meta['label_column'];
+        }
+        return $this->cache[$key] = $info;
+    }
+
     /** Best human-readable label column of a table (never a secret or e-mail/phone column). */
     public static function labelColumn(array $info): ?string
     {
         $cols = $info['columns'] ?? [];
+        if (!empty($info['label_column']) && isset($cols[$info['label_column']])) {
+            return $info['label_column'];
+        }
         foreach (['name', 'title', 'label', 'display_name', 'category_name', 'tag_name', 'heading', 'topic', 'username', 'slug'] as $cand) {
             if (isset($cols[$cand]) && in_array($cols[$cand]['data_type'], ['varchar', 'char', 'text', 'tinytext'], true)) {
                 return $cand;

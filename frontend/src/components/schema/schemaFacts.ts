@@ -1,4 +1,4 @@
-import type { SchemaColumn, SchemaTable } from "../../types";
+import type { SchemaColumn, SchemaRelationship, SchemaTable } from "../../types";
 
 /** Facts about a schema table and its columns, worded for people who do not read SQL. */
 
@@ -24,15 +24,30 @@ export const addRule = (col: SchemaColumn): AddRule => {
   return { label: "Optional", tone: "slate", title: "Can be left empty." };
 };
 
-export interface IncomingLink { table: string; column: string; referenced_column: string }
+export interface IncomingLink { table: string; column: string; referenced_column: string; relation: SchemaRelationship }
 
-/** Tables whose rows point at this table. */
+/** Tables whose rows point at this table (declared, detected or set by the owner). */
 export const incomingLinks = (table: SchemaTable, all: SchemaTable[]): IncomingLink[] =>
   all.flatMap((t) =>
     (t.relationships || [])
       .filter((r) => r.referenced_table === table.name)
-      .map((r) => ({ table: t.name, column: (r.foreign_key || r.constrained_column) ?? "", referenced_column: r.referenced_column })),
+      .map((r) => ({ table: t.name, column: (r.foreign_key || r.constrained_column) ?? "", referenced_column: r.referenced_column, relation: r })),
   );
+
+/** "blog_categories" -> "blog category" (a friendly singular for sentences). */
+export const thingOf = (table: string): string => {
+  const words = table.replace(/[_-]+/g, " ").trim().toLowerCase();
+  if (/ies$/.test(words)) return words.replace(/ies$/, "y");
+  if (/(ses|xes|zes|ches|shes)$/.test(words)) return words.replace(/es$/, "");
+  if (/s$/.test(words) && !/ss$/.test(words)) return words.replace(/s$/, "");
+  return words;
+};
+
+/** Columns named like a link (category_id, authorId) that point nowhere yet: the owner may want to set them. */
+export const unlinkedIdColumns = (table: SchemaTable): SchemaColumn[] => {
+  const linked = new Set((table.relationships || []).map((r) => r.foreign_key || r.constrained_column));
+  return (table.columns || []).filter((c) => !c.is_primary_key && !linked.has(c.name) && /(_id|Id|ID)$/.test(c.name) && c.sensitivity !== "secret");
+};
 
 /**
  * What the Data page may do with this table's rows: the table's class (blocked, read_only, writable or an owner

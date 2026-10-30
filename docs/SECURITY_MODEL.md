@@ -153,3 +153,15 @@ The backend enforces the access mode regardless of the database user's privilege
 | Orbit knowledge tampering through files | Orbit's product guides live only in the platform database, edited by admins with the `orbit_knowledge.manage` permission; the AI service indexes what Laravel publishes and keeps no guide files. |
 | Interrupting a finished run | The Orbit interrupt tool follows the portal's rules: a published run cannot be cancelled and a stopped run keeps its real outcome. |
 
+
+
+## Linked records (2026-10-29, ADR-021)
+| Risk | Control |
+| :--- | :--- |
+| A wrong or random id typed into an undeclared link | Detected and owner-set links are checked by the platform before every Data page write and every publication (the id must exist in the linked table, `0` only where it means "none"); pickers list real rows by name, so a number is never typed. |
+| A detected link opening a protected table | Links to credential/session tables are never listed, labelled, checked or offered; the owner cannot point a link at one. Labels and choices never use secret or personal columns. |
+| Creating rows the customer did not intend | A new linked row is shown in the preview and added only on confirmation, in the same transaction as the row (rolled back together); its values pass the same validation; Data Manager rules (access mode, table class) apply on the Data page, and publishing never creates rows in protected tables (users, roles, payments …). |
+| Orphan rows after Undo | Undo removes the linked rows a change added unless another row now points at them (checked through every known link). |
+| Personal data in pending changes | New linked rows are stored in `data_change_requests.linked_parents` with Laravel's encrypted cast; previews mask personal values; audit records keep only table and id. |
+| Reading customer rows | Value choices read at most 5,000 rows of one column; a link check reads at most 2,000 rows and 50 distinct values, then counts matching keys; both run in read-only transactions with the statement time limit, only when the owner asks. Detection itself reads metadata only. |
+| Cross-customer access | Every link, value and picker endpoint resolves the connection through the signed-in owner (`404` otherwise); owner settings are scoped by connection and user. |

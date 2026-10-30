@@ -558,6 +558,8 @@ class AutomationController extends Controller
             'scheduled_time' => 'nullable|string',
             'timezone' => 'nullable|string|max:64',
             'relation_policies' => 'nullable|array',
+            'relation_values' => 'nullable|array|max:20',
+            'relation_values.*' => 'array|max:100',
             'name' => 'nullable|string|max:255',
         ]);
 
@@ -573,6 +575,12 @@ class AutomationController extends Controller
         foreach ((array) ($validated['relation_policies'] ?? []) as $col => $policy) {
             if (is_string($col) && in_array($policy, ['CREATE_IF_MISSING', 'REUSE_EXISTING_ONLY'], true)) {
                 $relationOptions[$col] = ['creation_policy' => $policy];
+            }
+        }
+        // Details entered for a new linked record ("add with details"), checked again by the executor.
+        foreach ((array) ($validated['relation_values'] ?? []) as $col => $values) {
+            if (is_string($col) && isset($relationOptions[$col]) && $relationOptions[$col]['creation_policy'] === 'CREATE_IF_MISSING') {
+                $relationOptions[$col]['parent_values'] = array_filter((array) $values, fn ($v, $k) => is_string($k) && !is_array($v), ARRAY_FILTER_USE_BOTH);
             }
         }
 

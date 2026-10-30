@@ -16,7 +16,9 @@ import { ManualScheduleSkeleton } from "../components/ui/PageSkeletons";
 import { SchemaFieldControl, isNumericType, canFieldHaveAiAssist } from "../components/common/SchemaFieldControl";
 import { clearError, focusFirstError, invalid, serverFieldErrors, type FieldErrors } from "../lib/validation";
 import { InlineAiFieldAssist } from "../components/common/InlineAiFieldAssist";
-import { RelationPicker, type RelationOption } from "../components/manual/RelationPicker";
+import { LinkPicker } from "../components/links/LinkPicker";
+import { ValuePicker } from "../components/links/ValuePicker";
+import { isNewLink, newLink, type LinkOptions } from "../components/links/linkValue";
 import { isDatabaseNumbered } from "../components/schema/schemaFacts";
 import { useOrbitSurface } from "../hooks/useOrbitSurface";
 import { orbitTargets } from "../services/orbitTargets";
@@ -53,15 +55,9 @@ const pickTable = (data: SchemaResponse | null, wanted: string | null): SchemaTa
     ?? null;
 };
 
-/** The table a column links to: a declared foreign key, or a conventional name (category_id -> categories) that exists. */
-const refTableFor = (col: SchemaColumn, table: SchemaTable, schema: SchemaResponse | null): string | null => {
-  const rel = (table.relationships || []).find((r) => (r.foreign_key || r.constrained_column) === col.name);
-  if (rel?.referenced_table) return rel.referenced_table;
-  if (!/_id$/i.test(col.name)) return null;
-  const base = col.name.replace(/_id$/i, "");
-  const names = new Set((schema?.tables || []).map((t) => t.name));
-  return [`${base}s`, `${base}es`, base.endsWith("y") ? `${base.slice(0, -1)}ies` : "", base].find((n) => n && names.has(n)) ?? null;
-};
+/** The table a column links to, as the server sees it: declared, detected from the name, or set by the owner. */
+const refTableFor = (col: SchemaColumn, table: SchemaTable): string | null =>
+  (table.relationships || []).find((r) => (r.foreign_key || r.constrained_column) === col.name)?.referenced_table ?? null;
 
 /** Starting values: only what the database itself defines (defaults, the first allowed value of a required choice). */
 const initialValues = (table: SchemaTable): Record<string, any> => {
@@ -96,7 +92,8 @@ interface DraftPayload {
   connection_id: number;
   table: string;
   formData: Record<string, any>;
-  relationNew: Record<string, boolean>;
+  /** Older drafts: a new linked row was a plain name with this flag (now a NewLink value in formData). */
+  relationNew?: Record<string, boolean>;
   publishMode: "NOW" | "SCHEDULED";
   scheduleDate: string;
   scheduleClock: string;
@@ -115,9 +112,8 @@ export const ManualSchedulePage: React.FC = () => {
   const [selectedTable, setSelectedTable] = useState<SchemaTable | null>(null);
 
   const [formData, setFormData] = useState<Record<string, any>>({});
-  // Linked columns where the customer names a new parent row (created first) instead of picking an existing one.
-  const [relationNew, setRelationNew] = useState<Record<string, boolean>>({});
-  const [relationOptions, setRelationOptions] = useState<Record<string, RelationOption[]>>({});
+  // What each linked column offers (its rows, what can be created), as its picker loaded it; Orbit uses the same.
+  const [linkInfo, setLinkInfo] = useState<Record<string, LinkOptions>>({});
   const [publishMode, setPublishMode] = useState<"NOW" | "SCHEDULED">("NOW");
   const [scheduleTz, setScheduleTz] = useState<string>(defaultTimeZone());
   // Default: one hour from now, rounded up to 5 minutes (tomorrow if that crosses midnight).
@@ -160,8 +156,7 @@ export const ManualSchedulePage: React.FC = () => {
   const loadTable = (table: SchemaTable | null) => {
     setSelectedTable(table);
     setFormData(table ? initialValues(table) : {});
-    setRelationNew({});
-    setRelationOptions({});
+    setLinkInfo({});
     setFieldErrors({});
     setShowAuto(false);
   };
@@ -201,8 +196,11 @@ export const ManualSchedulePage: React.FC = () => {
         if (draft && table && draft.table === table.name && draft.connection_id === connId) {
           const cols = new Set(table.columns.map((c) => c.name));
           const keep = <T,>(o: Record<string, T> | undefined) => Object.fromEntries(Object.entries(o ?? {}).filter(([k]) => cols.has(k)));
-          setFormData((prev) => ({ ...prev, ...keep(draft!.formData) }));
-          setRelationNew(keep(draft.relationNew));
+          const restored = keep(draft!.formData);
+          for (const [col, isNew] of Object.entries(keep(draft.relationNew))) {
+            if (isNew && typeof restored[col] === "string") restored[col] = newLink(restored[col], null);
+          }
+          setFormData((prev) => ({ ...prev, ...restored }));
           if (draft.publishMode === "NOW" || draft.publishMode === "SCHEDULED") setPublishMode(draft.publishMode);
           if (draft.scheduleDate) setScheduleDate(draft.scheduleDate);
           if (draft.scheduleClock) setScheduleClock(draft.scheduleClock);
@@ -222,7 +220,7 @@ export const ManualSchedulePage: React.FC = () => {
   useEffect(() => {
     if (!dirty || !selectedConnId || !selectedTable || successResult) return;
     setDraftState("saving");
-    const payload: DraftPayload = { connection_id: selectedConnId, table: selectedTable.name, formData, relationNew, publishMode, scheduleDate, scheduleClock, scheduleTz };
+    const payload: DraftPayload = { connection_id: selectedConnId, table: selectedTable.name, formData, publishMode, scheduleDate, scheduleClock, scheduleTz };
     const t = setTimeout(async () => {
       try {
         await api.saveDraft("manual_publish", payload, 1);
@@ -232,7 +230,7 @@ export const ManualSchedulePage: React.FC = () => {
       }
     }, 1000);
     return () => clearTimeout(t);
-  }, [dirty, selectedConnId, selectedTable, formData, relationNew, publishMode, scheduleDate, scheduleClock, scheduleTz, successResult]);
+  }, [dirty, selectedConnId, selectedTable, formData, publishMode, scheduleDate, scheduleClock, scheduleTz, successResult]);
 
   // Elapsed seconds while the AI writes (a local model can take a minute or two).
   useEffect(() => {
@@ -300,11 +298,6 @@ export const ManualSchedulePage: React.FC = () => {
     });
   };
 
-  const handleRelationChange = (colName: string, value: any, createNew: boolean) => {
-    setRelationNew((p) => ({ ...p, [colName]: createNew }));
-    handleFieldChange(colName, value);
-  };
-
   // Images are uploaded to the platform and the column receives the public URL (never a base64 blob).
   const handleImageFileChange = async (e: React.ChangeEvent<HTMLInputElement>, colName: string) => {
     const file = e.target.files?.[0];
@@ -328,7 +321,7 @@ export const ManualSchedulePage: React.FC = () => {
   const formColumns = allColumns.filter((c) => !isDatabaseNumbered(c) && c.sensitivity !== "secret" && !AUTO_COLUMNS.has(c.name.toLowerCase()));
   const autoColumns = allColumns.filter((c) => AUTO_COLUMNS.has(c.name.toLowerCase()) && !c.is_primary_key);
   const refTables: Record<string, string | null> = Object.fromEntries(
-    formColumns.map((c) => [c.name, selectedTable ? refTableFor(c, selectedTable, schema) : null]),
+    formColumns.map((c) => [c.name, selectedTable ? refTableFor(c, selectedTable) : null]),
   );
   const groups: Record<"main" | "media" | "content" | "other", SchemaColumn[]> = { main: [], media: [], content: [], other: [] };
   for (const c of formColumns) {
@@ -338,11 +331,7 @@ export const ManualSchedulePage: React.FC = () => {
     else if ((/text/i.test(c.data_type) || /content|excerpt|description|body|summary/.test(n)) && !n.includes("meta")) groups.content.push(c);
     else groups.other.push(c);
   }
-  const parentWritable = (ref: string | null) => {
-    const t = ref ? (schema?.tables || []).find((x) => x.name === ref) : undefined;
-    return !!t && isEligible(t);
-  };
-  const thingFor = (col: SchemaColumn) => labelFor(col.name).toLowerCase();
+  const thingFor = (col: SchemaColumn) => linkInfo[col.name]?.thing ?? labelFor(col.name).toLowerCase();
 
   /** The values sent: blanks of optional columns become empty (or the database default), never invented. */
   const buildPayload = () => {
@@ -357,13 +346,30 @@ export const ManualSchedulePage: React.FC = () => {
           continue;
         }
       }
-      out[col.name] = typeof v === "string" && refTables[col.name] && relationNew[col.name] ? v.trim() : v;
+      // A new linked row is sent by its name; the server creates it first (relation_policies) with its details.
+      out[col.name] = isNewLink(v) ? v.label.trim() : v;
     }
     return out;
   };
 
-  const relationPolicyPayload = () =>
-    Object.fromEntries(Object.entries(relationNew).filter(([, on]) => on).map(([col]) => [col, "CREATE_IF_MISSING" as const]));
+  /** The executor's decisions for linked columns, by name, as the content preview shows them ("Category: Fashion"). */
+  const planRelations = (plan: any) => (plan?.relations ?? [])
+    .filter((r: any) => r?.column && r.action !== "LEFT_EMPTY")
+    .map((r: any) => ({
+      column: r.column,
+      entity: linkInfo[r.column]?.thing ?? labelFor(r.column).toLowerCase(),
+      label: r.action === "NOT_LINKED" ? "none" : r.label ?? (r.lookup !== null && r.lookup !== undefined ? `#${r.lookup}` : ""),
+      decision: ["WILL_CREATE", "CREATED_NEW"].includes(r.action) ? "create" : "existing",
+    }));
+
+  const newLinkColumns = () => formColumns.filter((c) => refTables[c.name] && isNewLink(formData[c.name]));
+  const relationPolicyPayload = () => Object.fromEntries(newLinkColumns().map((c) => [c.name, "CREATE_IF_MISSING" as const]));
+  /** Details entered for each new linked row (its name travels in the payload). */
+  const relationValuesPayload = () => Object.fromEntries(newLinkColumns().flatMap((c) => {
+    const labelCol = linkInfo[c.name]?.create.label_column;
+    const details = Object.fromEntries(Object.entries(formData[c.name].$new).filter(([k, v]) => k !== labelCol && v !== "" && v !== null && v !== undefined));
+    return Object.keys(details).length ? [[c.name, details]] : [];
+  }));
 
   const scheduledAtIso = () => zonedIso(scheduleDate, scheduleClock, scheduleTz);
 
@@ -425,8 +431,8 @@ export const ManualSchedulePage: React.FC = () => {
       const v = formData[col.name];
       const label = labelFor(col.name);
       if (refTables[col.name]) {
-        if (relationNew[col.name] && blank(v)) out[col.name] = `Name the new ${thingFor(col)}.`;
-        else if (!relationNew[col.name] && blank(v) && isRequired(col)) out[col.name] = `Choose a ${thingFor(col)}.`;
+        if (isNewLink(v) && !v.label.trim()) out[col.name] = `Name the new ${thingFor(col)}.`;
+        else if (blank(v) && isRequired(col)) out[col.name] = `Choose a ${thingFor(col)}.`;
         continue;
       }
       if (blank(v)) {
@@ -482,7 +488,7 @@ export const ManualSchedulePage: React.FC = () => {
     try {
       setIsPlanning(true);
       const payload = buildPayload();
-      const res = await api.manualPublish({ connection_id: selectedConnId, target_table: selectedTable.name, payload, dry_run: true, relation_policies: relationPolicyPayload() });
+      const res = await api.manualPublish({ connection_id: selectedConnId, target_table: selectedTable.name, payload, dry_run: true, relation_policies: relationPolicyPayload(), relation_values: relationValuesPayload() });
       // Problems with a column the customer can fix are shown under that column instead of in the review.
       const colErrs = columnErrorsFrom(res.plan?.issues);
       if (Object.keys(colErrs).length) {
@@ -513,9 +519,10 @@ export const ManualSchedulePage: React.FC = () => {
         scheduled_at: publishMode === "SCHEDULED" ? scheduledAtIso() : undefined,
         timezone: scheduleTz,
         relation_policies: relationPolicyPayload(),
+        relation_values: relationValuesPayload(),
       });
       setReview(null);
-      setSuccessResult({ ...res, written: review.payload });
+      setSuccessResult({ ...res, written: review.payload, relations: planRelations(review.plan) });
       discardDraft();
     } catch (err: any) {
       const colErrs = { ...columnErrorsFrom(err.data?.plan?.issues), ...payloadErrors(err) };
@@ -539,8 +546,8 @@ export const ManualSchedulePage: React.FC = () => {
       table: selectedTable?.name ?? null,
       columns: formColumns.map((c) => ({
         field: `col.${c.name}`, label: labelFor(c.name), type: c.data_type, required: isRequired(c),
-        links_to: refTables[c.name] ?? undefined, new_linked_row: refTables[c.name] ? !!relationNew[c.name] : undefined,
-        value: formData[c.name] === undefined ? null : String(formData[c.name]).slice(0, 120),
+        links_to: refTables[c.name] ?? undefined, new_linked_row: refTables[c.name] ? isNewLink(formData[c.name]) : undefined,
+        value: formData[c.name] === undefined ? null : isNewLink(formData[c.name]) ? `new: ${formData[c.name].label}` : String(formData[c.name]).slice(0, 120),
       })),
       tables: (schema?.tables || []).filter(isEligible).map((t) => t.name).slice(0, 60),
       result: successResult?.message,
@@ -577,14 +584,15 @@ export const ManualSchedulePage: React.FC = () => {
           const ref = refTables[c];
           if (ref) {
             const isId = typeof v === "number" || /^\d+$/.test(String(v ?? "").trim());
-            if (!isId && !parentWritable(ref)) return `${ref} is protected, so a new ${thingFor(col)} cannot be added. Pick an existing one.`;
-            handleRelationChange(c, isId ? Number(v) : String(v ?? ""), !isId);
+            const create = linkInfo[c]?.create;
+            if (!isId && create && !create.allowed) return `A new ${thingFor(col)} cannot be added here: ${create.reason ?? `${ref} is protected`}. Pick an existing one.`;
+            handleFieldChange(c, isId ? Number(v) : newLink(String(v ?? "").trim(), create?.label_column ?? null));
             return null;
           }
           handleFieldChange(c, v);
           return null;
         },
-        options: (key) => (relationOptions[colKey(key)] || []).map((o) => ({ value: o.id, label: String(o.label) })),
+        options: (key) => (linkInfo[colKey(key)]?.options || []).map((o) => ({ value: o.id, label: String(o.label ?? `#${o.id}`) })),
         target: (key) => `manual.col.${colKey(key)}`,
       },
       publish_mode: {
@@ -630,7 +638,7 @@ export const ManualSchedulePage: React.FC = () => {
             const res: any = await api.manualPublish({
               connection_id: selectedConnId, target_table: selectedTable.name, payload,
               publish_now: publishMode === "NOW", scheduled_at: publishMode === "SCHEDULED" ? scheduledAtIso() : undefined,
-              timezone: scheduleTz, relation_policies: relationPolicyPayload(),
+              timezone: scheduleTz, relation_policies: relationPolicyPayload(), relation_values: relationValuesPayload(),
             });
             setSuccessResult({ ...res, written: payload });
             discardDraft();
@@ -664,24 +672,40 @@ export const ManualSchedulePage: React.FC = () => {
         <InlineAiFieldAssist fieldName={col.name} currentValue={formData[col.name]} topic={formData.title || formData.name || aiTopic}
           targetTable={selectedTable?.name} onApply={(v) => handleFieldChange(col.name, v)} compact />
       ))} />
-      <SchemaFieldControl id={manualFieldId(col.name)} invalid={!!fieldErrors[col.name]} column={col} value={formData[col.name]}
-        onChange={(val) => handleFieldChange(col.name, val)} targetTable={selectedTable?.name} topic={formData.title || formData.name || aiTopic} hideFieldAssist />
+      {col.categorical && selectedConnId && selectedTable ? (
+        <ValuePicker id={manualFieldId(col.name)} scope={{ connectionId: selectedConnId, context: "publish" }} table={selectedTable.name} column={col.name}
+          value={formData[col.name]} onChange={(val) => handleFieldChange(col.name, val)} family={isNumericType(col) ? "integer" : "string"}
+          nullable={col.nullable} labels={col.value_labels} invalid={!!fieldErrors[col.name]} describedBy={fieldErrors[col.name] ? `${manualFieldId(col.name)}-error` : undefined} />
+      ) : (
+        <SchemaFieldControl id={manualFieldId(col.name)} invalid={!!fieldErrors[col.name]} column={col} value={formData[col.name]}
+          onChange={(val) => handleFieldChange(col.name, val)} targetTable={selectedTable?.name} topic={formData.title || formData.name || aiTopic} hideFieldAssist />
+      )}
       <FieldError id={manualFieldId(col.name)} message={fieldErrors[col.name]} />
     </div>
   );
 
   const renderRelation = (col: SchemaColumn) => {
     const ref = refTables[col.name]!;
+    const info = linkInfo[col.name];
     return (
       <div key={col.name} ref={colRef(col.name)} className="sm:col-span-2">
         <FieldLabel htmlFor={manualFieldId(col.name)} col={col} hint={`links to ${ref}`} />
-        {selectedConnId && (
-          <RelationPicker id={manualFieldId(col.name)} connectionId={selectedConnId} refTable={ref} thing={thingFor(col)}
-            value={formData[col.name]} createNew={!!relationNew[col.name]} canCreate={parentWritable(ref)} optional={!isRequired(col)}
-            invalid={!!fieldErrors[col.name]} onChange={(v, isNew) => handleRelationChange(col.name, v, isNew)}
-            onOptions={(o) => setRelationOptions((p) => ({ ...p, [col.name]: o }))} />
+        {selectedConnId && selectedTable && (
+          <LinkPicker id={manualFieldId(col.name)} scope={{ connectionId: selectedConnId, context: "publish" }} table={selectedTable.name} column={col.name}
+            value={formData[col.name]} onChange={(v) => handleFieldChange(col.name, v)} invalid={!!fieldErrors[col.name]}
+            describedBy={fieldErrors[col.name] ? `${manualFieldId(col.name)}-error` : undefined}
+            onLoaded={(o) => setLinkInfo((p) => ({ ...p, [col.name]: o }))} />
         )}
         <FieldError id={manualFieldId(col.name)} message={fieldErrors[col.name]} />
+        {!fieldErrors[col.name] && info && (
+          <p className="mt-1 text-[11.5px] text-slate-500">
+            {isNewLink(formData[col.name])
+              ? `“${formData[col.name].label}” is added to ${ref} first, then this row uses its new id. Both are written together, or neither.`
+              : info.create.allowed
+                ? `Pick a ${info.thing}, or type a new name to add one to ${ref}.`
+                : `Pick a ${info.thing} from ${ref}.`}
+          </p>
+        )}
       </div>
     );
   };
@@ -780,7 +804,13 @@ export const ManualSchedulePage: React.FC = () => {
               {Object.entries(successResult.written ?? {}).map(([k, v]) => (
                 <div key={k} className="flex items-start justify-between gap-4 border-b border-slate-100 py-1 last:border-0">
                   <span className="font-semibold text-slate-700">{labelFor(k)}</span>
-                  <span className="max-w-md truncate text-right text-slate-600">{v === null ? "empty" : typeof v === "object" ? JSON.stringify(v) : String(v).replace(/<[^>]+>/g, " ")}</span>
+                  <span className="max-w-md truncate text-right text-slate-600">
+                    {(() => {
+                      const rel = (successResult.relations ?? []).find((r: any) => r.column === k);
+                      if (rel) return `${rel.label}${rel.decision === "create" ? " (new)" : ""}`;
+                      return v === null ? "empty" : typeof v === "object" ? JSON.stringify(v) : String(v).replace(/<[^>]+>/g, " ");
+                    })()}
+                  </span>
                 </div>
               ))}
             </div>
@@ -1056,7 +1086,7 @@ export const ManualSchedulePage: React.FC = () => {
         }
       >
         {review && (
-          <ContentPreview payload={review.payload} meta={{ write_plan: review.plan, issues: review.plan?.issues ?? [], manual: true }}
+          <ContentPreview payload={review.payload} meta={{ write_plan: review.plan, issues: review.plan?.issues ?? [], manual: true, relations: planRelations(review.plan) }}
             targetTable={selectedTable?.name} timezone={scheduleTz} publicationTime={publishMode === "SCHEDULED" ? scheduledAtIso() : null} defaultTab="database" />
         )}
       </ModalShell>

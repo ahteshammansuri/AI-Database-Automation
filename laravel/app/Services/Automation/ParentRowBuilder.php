@@ -18,7 +18,7 @@ class ParentRowBuilder
     /**
      * @return array{values: array<string, mixed>, issues: array<int, array{level: string, column: ?string, message: string}>, label_column: ?string}
      */
-    public function build(array $parentInfo, string $label, ?string $description = null, string $dbTimezone = 'UTC'): array
+    public function build(array $parentInfo, string $label, ?string $description = null, string $dbTimezone = 'UTC', array $given = []): array
     {
         $values = [];
         $issues = [];
@@ -40,6 +40,12 @@ class ParentRowBuilder
 
             if ($name === $labelCol) {
                 $values[$name] = $this->fit($label, $c);
+                continue;
+            }
+
+            // Values the person entered for the new record (already checked against the column by the executor).
+            if (array_key_exists($name, $given) && !$c['is_secret']) {
+                $values[$name] = $given[$name];
                 continue;
             }
 

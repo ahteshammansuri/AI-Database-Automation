@@ -206,3 +206,23 @@ Task folder: `docs/tasks/2026-10-22_portal-automation-orbit-admin/` (PLAN.md and
 
 Results and test runs: see that task's PROGRESS.md.
 
+
+
+## Linked records everywhere (2026-10-29)
+Task folder: `docs/tasks/2026-10-29_relations/` (PLAN.md and PROGRESS.md). Decision: ADR-021.
+
+| # | Slice | Status |
+|---|---|---|
+| L1 | `RelationInference`: links from names and types for any schema; labels; status-like columns | DONE (unit tested; checked on a real 141-table schema: 8 declared -> 175 links) |
+| L2 | Owner settings (`connection_column_settings`, display column); `SchemaRelations` decorates the live catalog and the snapshot | DONE (tested) |
+| L3 | `LinkedRecords`: options by name/id, create rules, new parent preparation, labels, value choices, data check; Data API and previews with names; `$new` parents on insert and edit; Undo removes them | DONE (tested) |
+| L4 | Executor and field plan through `describeFor` (detected links), parent details from a form, `0` = none, parent names in plans | DONE (tested) |
+| L5 | Schema API: link editor, value names, display column, check; publishing pickers | DONE (tested, IDOR) |
+| L6 | Frontend: `LinkPicker`, `NewRecordModal`, `ValuePicker` on Data, Manual publishing and automation fields; relationship map and editors in the Schema Explorer; named values in tables and previews | DONE (tsc, lint, unit tests, build, headless browser run at 1440 px and 390 px) |
+| L7 | Docs | DONE |
+
+**Known limitations**
+- Detection reads names and types only; it can pick the wrong table when two fit (for example `orders.seller_id` while a `sellers` table exists but the ids are user ids). The explorer shows the reason and other possible tables, "Check with my data" compares the stored values, and the owner corrects it.
+- Composite (multi-column) links are shown when declared but are not offered in pickers.
+- Status-like choices come from at most 5,000 rows; rarer values can still be typed.
+- Automation fields pick an existing parent for "always the same"; new parents there come from the AI choice (as before) or the Data page.

@@ -47,18 +47,21 @@ class FieldPlanBuilder
      */
     public function suggest(DbConnection $connection, PDO $pdo, string $table): array
     {
-        $info = $this->inspector->describe($pdo, $connection->database_name, $table);
+        $info = $this->inspector->describeFor($connection, $pdo, $table);
         if ($info === null) {
             throw new \Exception("Table '{$table}' was not found in '{$connection->database_name}'.");
         }
 
         $titleCol = $this->firstOfKind($info, 'title');
+        $valueNames = app(\App\Services\Data\SchemaRelations::class)->settings($connection)['values'][strtolower($table)] ?? [];
+        $dialect = new \App\Services\Data\Dialects\MySqlDialect();
         $columns = [];
         foreach ($info['columns'] as $name => $c) {
             if ($c['auto_increment'] || $c['generated']) {
                 continue;
             }
             $relation = $c['foreign_key'] ? $this->relationInfo($connection, $pdo, $c) : null;
+            $family = $dialect->typeFamily(['data_type' => $c['data_type'], 'raw_type' => $c['column_type']]);
             $columns[] = [
                 'name' => $name,
                 'type' => $c['column_type'],
@@ -73,6 +76,10 @@ class FieldPlanBuilder
                 'is_unique' => $c['is_unique'],
                 'is_secret' => $c['is_secret'],
                 'relation' => $relation,
+                'family' => $family,
+                // A status-like column: its fixed value is chosen from the values it already holds.
+                'categorical' => !$relation && !$c['enum_values'] && \App\Services\Data\RelationInference::isCategorical($name, ['family' => $family, 'max_length' => $c['max_length']]),
+                'value_labels' => (object) ($valueNames[strtolower($name)] ?? []),
                 'suggested' => $this->suggestMapping($c, $relation, $titleCol),
             ];
         }
@@ -93,7 +100,7 @@ class FieldPlanBuilder
     public function build(Automation $automation, DbConnection $connection, PDO $pdo): array
     {
         $table = $automation->target_table;
-        $info = $this->inspector->describe($pdo, $connection->database_name, $table);
+        $info = $this->inspector->describeFor($connection, $pdo, $table);
         if ($info === null) {
             throw new \Exception("Target table '{$table}' was not found in '{$connection->database_name}'.");
         }
@@ -248,7 +255,7 @@ class FieldPlanBuilder
         }
         $refTable = $fk['table'];
         $class = $this->accessPolicy->getTableClass($connection, $refTable);
-        $refInfo = $class === 'blocked' ? null : $this->inspector->describe($pdo, $connection->database_name, $refTable);
+        $refInfo = $class === 'blocked' ? null : $this->inspector->describeFor($connection, $pdo, $refTable);
         $labelCol = $refInfo ? TargetTableInspector::labelColumn($refInfo) : null;
 
         $blockedReason = null;
@@ -294,6 +301,7 @@ class FieldPlanBuilder
         return [
             'table' => $refTable,
             'column' => $fk['column'],
+            'source' => $fk['source'] ?? 'declared',
             'label_column' => $labelCol,
             'entity' => \Illuminate\Support\Str::singular(str_replace('_', ' ', $refTable)),
             'existing_count' => $count,

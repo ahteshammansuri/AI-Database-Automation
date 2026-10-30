@@ -1,4 +1,5 @@
 import React, { useEffect } from "react";
+import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { AlertCircle, ArrowUpRight, X } from "lucide-react";
@@ -189,15 +190,23 @@ export const ModalShell: React.FC<{
   closeOnBackdrop?: boolean;
   /** Ref on the panel (e.g. an Orbit target for the whole form). */
   panelRef?: React.Ref<HTMLDivElement>;
-}> = ({ open, onClose, title, description, icon, tone = "indigo", size = "md", footer, children, closeOnBackdrop = true, panelRef }) => {
+  /** Render into <body>: needed for a dialog opened from inside another dialog. */
+  portal?: boolean;
+}> = ({ open, onClose, title, description, icon, tone = "indigo", size = "md", footer, children, closeOnBackdrop = true, panelRef, portal = false }) => {
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    // Only the dialog opened last answers Escape, so closing a dialog on top of another keeps the one below.
+    const id = ++modalSeq;
+    openModals.push(id);
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && openModals[openModals.length - 1] === id && onClose();
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      openModals.splice(openModals.indexOf(id), 1);
+    };
   }, [open, onClose]);
   const width = size === "sm" ? "max-w-md" : size === "lg" ? "max-w-3xl" : size === "xl" ? "max-w-5xl" : "max-w-xl";
-  return (
+  const dialog = (
     <AnimatePresence>
       {open && (
         <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-6" role="dialog" aria-modal="true">
@@ -234,7 +243,11 @@ export const ModalShell: React.FC<{
       )}
     </AnimatePresence>
   );
+  return portal && typeof document !== "undefined" ? createPortal(dialog, document.body) : dialog;
 };
+
+let modalSeq = 0;
+const openModals: number[] = [];
 
 /**
  * A field's validation message, shown directly below the field. Give the input

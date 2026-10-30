@@ -15,9 +15,12 @@ import { orbitTargets } from "../services/orbitTargets";
 import { fieldTarget } from "../services/orbitSurfaces";
 import { pageStateService } from "../services/pageStateService";
 import { BrandName, usePlatform } from "../context/PlatformContext";
-import { TableLinks } from "../components/schema/TableLinks";
+import { RelationshipMap } from "../components/schema/RelationshipMap";
 import { ColumnsTable } from "../components/schema/ColumnsTable";
-import { accessLabel, formatRows } from "../components/schema/schemaFacts";
+import { LinkEditor } from "../components/schema/LinkEditor";
+import { ValueNamesEditor } from "../components/schema/ValueNamesEditor";
+import { Select2 } from "../components/ui/Select2";
+import { accessLabel, formatRows, incomingLinks } from "../components/schema/schemaFacts";
 import { TableAccessControl } from "../components/schema/TableAccessControl";
 
 export const SchemaExplorerPage: React.FC = () => {
@@ -49,6 +52,12 @@ export const SchemaExplorerPage: React.FC = () => {
   const [isSavingNote, setIsSavingNote] = useState(false);
   const [noteSavedFeedback, setNoteSavedFeedback] = useState(false);
   const [noteError, setNoteError] = useState<string | null>(null);
+
+  // The owner's corrections: where a column points, names for stored values, which column names rows.
+  const [editLink, setEditLink] = useState<string | null>(null);
+  const [nameValues, setNameValues] = useState<string | null>(null);
+  const [linkNotice, setLinkNotice] = useState<string | null>(null);
+  const [displayError, setDisplayError] = useState<string | null>(null);
 
   // Initial load
   useEffect(() => {
@@ -162,6 +171,12 @@ export const SchemaExplorerPage: React.FC = () => {
     },
   }));
 
+  // A message about the previous table does not carry over to another one.
+  useEffect(() => {
+    setLinkNotice(null);
+    setDisplayError(null);
+  }, [selectedTable?.name]);
+
   // Sync userNote when selectedTable changes
   useEffect(() => {
     if (selectedTable) {
@@ -220,6 +235,32 @@ export const SchemaExplorerPage: React.FC = () => {
       setError(`Schema refresh failed: ${err.message}`);
     } finally {
       setIsRefreshing(false);
+    }
+  };
+
+  /** Read the schema again (with the owner's latest settings) and keep the open table. */
+  const reloadSchema = async (message?: string) => {
+    if (!selectedConnId) return;
+    const name = selectedTable?.name;
+    try {
+      const data = await api.getSchema(selectedConnId, true);
+      setSchema(data);
+      const again = (data?.tables || []).find((t: SchemaTable) => t.name === name);
+      if (again) setSelectedTable(again);
+      if (message) setLinkNotice(message);
+    } catch (err: any) {
+      setError(err.message || "The schema could not be read again.");
+    }
+  };
+
+  const changeDisplayColumn = async (column: string | null) => {
+    if (!selectedConnId || !selectedTable) return;
+    setDisplayError(null);
+    try {
+      const res = await api.setDisplayColumn(selectedConnId, selectedTable.name, column);
+      await reloadSchema(res.message);
+    } catch (err: any) {
+      setDisplayError(err.errors?.column?.[0] ?? err.message ?? "That column cannot name the rows.");
     }
   };
 
@@ -452,6 +493,7 @@ export const SchemaExplorerPage: React.FC = () => {
                       : tier === "REVIEW_REQUIRED"
                         ? { text: "Review", cls: "da-chip-amber" }
                         : { text: "Ready", cls: "da-chip-emerald" };
+                    const links = (t.relationships || []).length + incomingLinks(t, schema.tables).length;
                     return (
                       <button
                         key={tableName}
@@ -470,7 +512,7 @@ export const SchemaExplorerPage: React.FC = () => {
                           <span className="min-w-0">
                             <span className="block truncate font-mono">{tableName}</span>
                             <span className="block truncate text-[11px] font-normal text-slate-400">
-                              {[formatRows(t.approx_rows), `${(t.columns || []).length} columns`].filter(Boolean).join(" · ")}
+                              {[formatRows(t.approx_rows), `${(t.columns || []).length} columns`, links ? `${links} link${links === 1 ? "" : "s"}` : null].filter(Boolean).join(" · ")}
                             </span>
                           </span>
                         </span>
@@ -538,6 +580,22 @@ export const SchemaExplorerPage: React.FC = () => {
                     {access && (
                       <span className={`da-chip ${access.tone} px-2 text-[11px]`} title={access.help}>{access.text}</span>
                     )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 text-[12.5px] text-slate-600">
+                    <span>Rows are named by</span>
+                    <div className="w-56">
+                      <Select2 id="schema-display-column" size="sm" value={selectedTable.display_column ?? ""}
+                        onChange={(v) => changeDisplayColumn(v === "" ? null : String(v))} invalid={!!displayError}
+                        options={[
+                          { value: "", label: `Automatic${selectedTable.label_column && !selectedTable.display_column ? ` (${selectedTable.label_column})` : ""}` },
+                          ...(selectedTable.columns || [])
+                            .filter((c) => /char|text/i.test(c.data_type || "") && (!c.sensitivity || c.sensitivity === "standard"))
+                            .map((c) => ({ value: c.name, label: c.name })),
+                        ]}
+                        ariaLabel="Column that names this table's rows" />
+                    </div>
+                    <span className="text-[11.5px] text-slate-400">shown in every list that links here</span>
+                    <FieldError id="schema-display-column" message={displayError} />
                   </div>
                   {selectedTable.restriction_reason ? (
                     <p className="flex items-center gap-1.5 text-[13px] font-medium text-rose-600">
@@ -621,9 +679,25 @@ export const SchemaExplorerPage: React.FC = () => {
                   </div>
                 </div>
 
-                <TableLinks table={selectedTable} all={schema.tables} onOpen={openTable} />
+                {linkNotice && (
+                  <p className="flex items-center justify-between gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-[12.5px] text-emerald-900" role="status">
+                    <span className="flex items-center gap-1.5"><CheckCircle2 className="h-4 w-4 text-emerald-600" /> {linkNotice}</span>
+                    <button type="button" onClick={() => setLinkNotice(null)} className="text-emerald-700 hover:text-emerald-900" aria-label="Dismiss">✕</button>
+                  </p>
+                )}
 
-                <ColumnsTable table={selectedTable} onOpenTable={openTable} />
+                <RelationshipMap table={selectedTable} all={schema.tables} onOpen={openTable} onEditLink={(c) => { setLinkNotice(null); setEditLink(c); }} />
+
+                <ColumnsTable table={selectedTable} onOpenTable={openTable} onEditLink={(c) => { setLinkNotice(null); setEditLink(c); }} onNameValues={(c) => { setLinkNotice(null); setNameValues(c); }} />
+
+                {selectedConnId && editLink && (
+                  <LinkEditor open connectionId={selectedConnId} table={selectedTable} column={editLink} all={schema.tables}
+                    onClose={() => setEditLink(null)} onSaved={(msg) => { setEditLink(null); reloadSchema(msg); }} />
+                )}
+                {selectedConnId && nameValues && (
+                  <ValueNamesEditor open connectionId={selectedConnId} table={selectedTable.name} column={nameValues}
+                    onClose={() => setNameValues(null)} onSaved={(_, msg) => { setNameValues(null); reloadSchema(msg); }} />
+                )}
               </motion.div>
             ) : (
               <EmptyState icon={TableProperties} title="Pick a table" description="Choose a table on the left to see its columns, keys and relationships." />

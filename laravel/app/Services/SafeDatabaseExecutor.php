@@ -79,7 +79,7 @@ class SafeDatabaseExecutor
         $pdo = null;
         try {
             $pdo = $connection->createTargetPdo();
-            $info = $this->inspector->describe($pdo, $connection->database_name, $tableName);
+            $info = $this->inspector->describeFor($connection, $pdo, $tableName);
             if ($info === null) {
                 throw new Exception("Target table '{$tableName}' not found or has no accessible columns.");
             }
@@ -154,7 +154,7 @@ class SafeDatabaseExecutor
         $pdo = null;
         try {
             $pdo = $connection->createTargetPdo();
-            $info = $this->inspector->describe($pdo, $connection->database_name, $tableName);
+            $info = $this->inspector->describeFor($connection, $pdo, $tableName);
             if ($info === null) {
                 throw new Exception("Target table '{$tableName}' not found or has no accessible columns.");
             }
@@ -276,6 +276,9 @@ class SafeDatabaseExecutor
                 if ($res['status'] === 'error') {
                     $issues[] = ['level' => 'error', 'column' => $key, 'message' => $res['details']];
                     continue;
+                }
+                if ($res['status'] === 'default') {
+                    continue; // left out, so the database default applies (e.g. parent_id 0)
                 }
                 if ($res['status'] !== 'null') {
                     $resolutions[] = $res;
@@ -469,26 +472,37 @@ class SafeDatabaseExecutor
             if ($c['nullable']) {
                 return $base + ['status' => 'null', 'action' => 'LEFT_EMPTY', 'details' => "`{$column}` left empty."];
             }
+            if ($c['has_default']) {
+                return $base + ['status' => 'default', 'action' => 'DB_DEFAULT', 'details' => "`{$column}` uses the database default."];
+            }
             return $base + ['status' => 'error', 'action' => 'FAILED', 'details' => "`{$column}` needs a `{$refTable}` record but none was chosen."];
+        }
+        // A link the database does not enforce, where 0 means "none" (a top-level category's parent_id).
+        if ((string) $val === '0' && ($c['foreign_key']['enforced'] ?? true) === false && (string) $c['default'] === '0') {
+            return ['status' => 'ok', 'action' => 'NOT_LINKED', 'column' => $column, 'table' => $refTable, 'lookup' => 0, 'resolved_id' => 0, 'label' => null,
+                'details' => "`{$column}` is 0: not linked to any `{$refTable}` record."];
         }
 
         if ($this->accessPolicy->getTableClass($connection, $refTable) === 'blocked') {
             return $base + ['status' => 'error', 'action' => 'FAILED', 'details' => "`{$column}` points at protected table `{$refTable}`, which automations cannot use."];
         }
 
-        $refInfo = $this->inspector->describe($pdo, $connection->database_name, $refTable);
+        $refInfo = $this->inspector->describeFor($connection, $pdo, $refTable);
         if ($refInfo === null) {
             return $base + ['status' => 'error', 'action' => 'FAILED', 'details' => "Referenced table `{$refTable}` for `{$column}` was not found."];
         }
 
-        // 1. Explicit id
+        // 1. Explicit id (its name is reported so previews say "Fashion", not "#3")
         if (is_int($val) || (is_string($val) && ctype_digit(trim($val)))) {
             $id = (int) $val;
-            $stmt = $pdo->prepare("SELECT 1 FROM `{$refTable}` WHERE `{$refCol}` = :id LIMIT 1");
+            $nameCol = TargetTableInspector::labelColumn($refInfo);
+            $stmt = $pdo->prepare('SELECT ' . ($nameCol ? "`{$nameCol}`" : '1') . " FROM `{$refTable}` WHERE `{$refCol}` = :id LIMIT 1");
             $stmt->execute(['id' => $id]);
-            if ($stmt->fetchColumn()) {
-                return ['status' => 'ok', 'action' => 'REUSED_BY_ID', 'column' => $column, 'table' => $refTable, 'lookup' => $id, 'resolved_id' => $id,
-                    'details' => "Uses existing `{$refTable}` record #{$id}."];
+            $found = $stmt->fetch(PDO::FETCH_NUM);
+            if ($found) {
+                $name = $nameCol && $found[0] !== null && $found[0] !== '' ? Str::limit((string) $found[0], 120) : null;
+                return ['status' => 'ok', 'action' => 'REUSED_BY_ID', 'column' => $column, 'table' => $refTable, 'lookup' => $id, 'resolved_id' => $id, 'label' => $name,
+                    'details' => $name ? "Uses existing `{$refTable}` record '{$name}' (#{$id})." : "Uses existing `{$refTable}` record #{$id}."];
             }
             return $base + ['status' => 'error', 'action' => 'FAILED', 'details' => "`{$column}` points at `{$refTable}` #{$id}, which does not exist (it may have been deleted). Choose another record."];
         }
@@ -525,7 +539,7 @@ class SafeDatabaseExecutor
             }
             $id = is_numeric($pick['id']) ? (int) $pick['id'] : $pick['id'];
             $shown = $pick['label'] ?? $label;
-            return ['status' => 'ok', 'action' => 'MATCHED_EXISTING', 'column' => $column, 'table' => $refTable, 'lookup' => $label, 'resolved_id' => $id,
+            return ['status' => 'ok', 'action' => 'MATCHED_EXISTING', 'column' => $column, 'table' => $refTable, 'lookup' => $label, 'resolved_id' => $id, 'label' => (string) $shown,
                 'details' => "Matched existing `{$refTable}` record '{$shown}' (#{$id})."];
         }
 
@@ -537,7 +551,35 @@ class SafeDatabaseExecutor
             return $base + ['status' => 'error', 'action' => 'FAILED', 'details' => "No `{$refTable}` record named '{$label}' exists, and `{$refTable}` is protected, so automations will not create one."];
         }
 
-        $built = $this->parentRowBuilder->build($refInfo, $label, $opts['description'] ?? null, $connection->data_timezone ?: 'UTC');
+        // Values entered for the new record in the form (manual publishing), each checked against its column.
+        $given = [];
+        foreach ((array) ($opts['parent_values'] ?? []) as $k => $v) {
+            if (!is_string($k) || !isset($refInfo['columns'][$k]) || is_array($v)) {
+                continue;
+            }
+            $rc = $refInfo['columns'][$k];
+            if ($rc['is_secret'] || $rc['auto_increment'] || $rc['generated']) {
+                continue;
+            }
+            if ($rc['foreign_key'] && $v !== null && $v !== '') {
+                $exists = $pdo->prepare("SELECT 1 FROM `{$rc['foreign_key']['table']}` WHERE `{$rc['foreign_key']['column']}` = :v LIMIT 1");
+                $exists->execute(['v' => $v]);
+                if (!$exists->fetchColumn() && !((string) $v === '0' && ($rc['foreign_key']['enforced'] ?? true) === false)) {
+                    return $base + ['status' => 'error', 'action' => 'FAILED', 'details' => "The new `{$refTable}` record's `{$k}` points at `{$rc['foreign_key']['table']}` #{$v}, which does not exist."];
+                }
+            }
+            [$cv, $ci] = $this->coerceValue($rc, $v);
+            foreach ($ci as $issue) {
+                if ($issue['level'] === 'error') {
+                    return $base + ['status' => 'error', 'action' => 'FAILED', 'details' => "The new `{$refTable}` record's `{$k}`: {$issue['message']}"];
+                }
+            }
+            if ($cv !== self::OMIT) {
+                $given[$k] = $cv;
+            }
+        }
+
+        $built = $this->parentRowBuilder->build($refInfo, $label, $opts['description'] ?? null, $connection->data_timezone ?: 'UTC', $given);
         $errors = array_filter($built['issues'], fn($i) => $i['level'] === 'error');
         if (!empty($errors)) {
             return $base + ['status' => 'error', 'action' => 'FAILED', 'details' => implode(' ', array_map(fn($e) => $e['message'], $errors))];
@@ -556,7 +598,7 @@ class SafeDatabaseExecutor
         ];
 
         if ($dryRun) {
-            return ['status' => 'create', 'action' => 'WILL_CREATE', 'column' => $column, 'table' => $refTable, 'lookup' => $label, 'resolved_id' => null,
+            return ['status' => 'create', 'action' => 'WILL_CREATE', 'column' => $column, 'table' => $refTable, 'lookup' => $label, 'resolved_id' => null, 'label' => $label,
                 'values' => $this->displayRow($values),
                 'details' => "No `{$refTable}` record named '{$label}' exists yet; it will be created in the same transaction and its new id stored in `{$column}`."];
         }
@@ -576,7 +618,7 @@ class SafeDatabaseExecutor
         }
 
         $id = is_numeric($newId) ? (int) $newId : $newId;
-        return ['status' => 'ok', 'action' => 'CREATED_NEW', 'column' => $column, 'table' => $refTable, 'lookup' => $label, 'resolved_id' => $id,
+        return ['status' => 'ok', 'action' => 'CREATED_NEW', 'column' => $column, 'table' => $refTable, 'lookup' => $label, 'resolved_id' => $id, 'label' => $label,
             'values' => $this->displayRow($values),
             'details' => "Created `{$refTable}` record '{$label}' (#{$id}) and used it for `{$column}`."];
     }

@@ -459,3 +459,34 @@ All endpoints below require `auth:sanctum` and act only on the signed-in custome
 | `POST /v1/ai/sample-rows` | Rows for a table from column rules (batches of 8, unique values avoided, links as enums of real ids). |
 | `POST /v1/rag/product-guides`, `GET /v1/rag/product-guides/status` | Guides are indexed straight from the request (no files kept); status `source` is `published` or `none`. `/v1/rag/ingest-corpus` was removed. |
 
+
+
+## Linked records and value choices (2026-10-29)
+
+All endpoints require `auth:sanctum` and act on the signed-in customer's own connections (another customer's id is **404**). A link is `declared` (a foreign key), `detected` (from the column name) or `owner` (set in the Schema Explorer); see ADR-021.
+
+### Schema and owner settings
+| Endpoint | Purpose |
+| :--- | :--- |
+| `GET /api/connections/{id}/schema` | Each table's `relationships[]` now holds every effective link: `{foreign_key, referenced_table, referenced_column, source, enforced, rule, reason, alternatives[]}`; per table `label_column` and `display_column`; per column `is_foreign_key`, `link_setting` (`auto`/`link`/`none`), `value_labels {value: name}` and `categorical`. |
+| `PUT /api/connections/{id}/tables/{table}/columns/{column}/link` | `{mode: "auto" | "link" | "none", ref_table?, ref_column?}`. `link` needs a table with that key (or a unique column) of a compatible type; credential tables and declared keys are refused (**422**). Audited `CONNECTION_COLUMN_LINK_CHANGED`. |
+| `PUT /api/connections/{id}/tables/{table}/columns/{column}/value-labels` | `{labels: {"1": "Published", ...}}` (≤ 50, names ≤ 60 chars; `{}` removes them). Audited `CONNECTION_VALUE_NAMES_CHANGED`. |
+| `PUT /api/connections/{id}/tables/{table}/display-column` | `{column: string | null}`: the text column that names rows in every picker (not secret or personal). Audited. |
+| `GET /api/connections/{id}/links/check?table=&column=&ref_tables[]=` | Up to 50 distinct stored values (from ≤ 2,000 rows) compared with the key of each table (≤ 4): `{results: [{ref_table, found, sampled, verdict: matches|partly|no_match|empty, message}]}`. Read-only. |
+
+### Pickers (manual publishing and automation fields: publishing rules)
+| Endpoint | Purpose |
+| :--- | :--- |
+| `GET /api/connections/{id}/links/options?table=&column=&q=&selected=` | `{ref_table, ref_column, thing, source, enforced, reason, none {allowed, value}, label_column, options[{id, label}], total, selected, create {allowed, reason, mode: name|details, label_column, required[], automatic[]}}`. Search by name or id; 50 rows. Protected tables are never offered for creation. |
+| `GET /api/connections/{id}/columns/values?table=&column=` | `{kind: enum|boolean|values, complete, values[{value, count, label}]}` from ≤ 5,000 rows; secret and personal columns refused. |
+| `GET /api/connections/{id}/tables/{table}/form`, `POST .../validate-row {values}` | The columns of a new linked row and a check of its values (nothing is written). |
+| `POST /api/automations/manual-publish` | Adds `relation_values {column: {field: value}}`: details of a new linked row named in `payload` with `relation_policies.column = CREATE_IF_MISSING`. Plan relations now include `label` (the parent's name). |
+
+### Data page (Data Manager rules)
+| Endpoint | Purpose |
+| :--- | :--- |
+| `GET /api/data/connections/{id}/tables/{table}/rows` | Columns add `link {table, column, source, enforced, reason, none}`, `choices` (`enum`/`boolean`/`values`) and `value_labels`; `labels` covers detected links; response adds `label_column`. |
+| `GET .../links/{column}?q=&selected=` | Same shape as the publishing picker, with the Data Manager's creation rules. |
+| `GET .../values/{column}`, `GET .../form`, `POST .../validate-row` | As above, for the Data page. |
+| `POST .../preview-insert`, `.../preview-update` | A linked column may hold `{"$new": {name_column: "…", other: …}}`: the new parent is validated (errors also in `parent_errors`), a row with the same name is reused when only a name was typed (`reused[]`), otherwise it is listed in `new_parents[]` and added first on confirm, in the same transaction. Inserts return `labels` for linked ids; updates return `labels {column: {before, after}}`. |
+| `POST /api/data/changes/{id}/confirm`, `.../undo` | Confirm also reports `linked_rows_added`; Undo removes those rows again unless another row now uses them. |

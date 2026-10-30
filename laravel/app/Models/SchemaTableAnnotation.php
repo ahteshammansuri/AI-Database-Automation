@@ -13,6 +13,7 @@ class SchemaTableAnnotation extends Model
         'user_id',
         'connection_id',
         'table_name',
+        'display_column',
         'ai_purpose',
         'ai_business_concept',
         'user_override_notes',

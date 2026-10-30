@@ -30,7 +30,20 @@ export interface DataColumn {
   auto: boolean;
   generated: boolean;
   is_pk: boolean;
-  link: { table: string; column: string } | null;
+  /** Where a linked column points: declared by the database, detected from its name, or set by the owner. */
+  link: {
+    table: string;
+    column: string;
+    source?: "declared" | "detected" | "owner";
+    enforced?: boolean;
+    reason?: string | null;
+    /** The value meaning "not linked" (NULL, or 0 on a link the database does not enforce). */
+    none?: { allowed: boolean; value: number | null };
+  } | null;
+  /** enum / boolean: fixed choices; values: a status-like column offered as the values it uses. */
+  choices?: "enum" | "boolean" | "values" | null;
+  /** The owner's names for stored values ({"1": "Published"}). */
+  value_labels?: Record<string, string>;
   personal: boolean;
   comment: string;
 }
@@ -38,6 +51,7 @@ export interface DataColumn {
 export interface RowsResponse {
   table: string;
   primary_key: string[];
+  label_column?: string | null;
   columns: DataColumn[];
   hidden_columns: string[];
   rows: Record<string, any>[];
@@ -61,9 +75,15 @@ export interface ChangePreview {
   preview_rows?: Record<string, any>[];
   rows?: Record<string, any>[];
   diff_summary?: Record<string, { before: any; after: any }>;
-  impact_analysis?: { child_table: string; foreign_key_column: string; dependent_row_count: number; cascade_action: string }[];
+  impact_analysis?: { child_table: string; foreign_key_column: string; dependent_row_count: number; cascade_action: string; enforced?: boolean }[];
   confirmation_phrase?: string;
   warning_message?: string;
+  /** Names of the linked ids in the preview rows, by column then id; for an edit: {column: {before, after}}. */
+  labels?: Record<string, Record<string, string | null>>;
+  /** New linked rows added first when this change is confirmed. */
+  new_parents?: { key: string; row: number; column: string; table: string; thing: string; label: string; columns: string[]; values: any[] }[];
+  /** Names typed for a new linked row that already exist: that row is used instead. */
+  reused?: { row: number; column: string; table: string; id: string | number; label: string }[];
   dropped?: { row: number; errors: Record<string, string> }[];
   problems?: string[];
   model?: string;

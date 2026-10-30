@@ -41,6 +41,12 @@ export interface SchemaColumn {
   is_unique: boolean;
   /** secret: never returned or written; pii: masked unless revealed (audited). */
   sensitivity?: "secret" | "pii" | "standard";
+  /** A status-like column offered as the values it uses (status, type, is_active ...). */
+  categorical?: boolean;
+  /** The owner's names for stored values ({"1": "Published"}). */
+  value_labels?: Record<string, string>;
+  /** The owner's link setting for this column: auto (what was found), link (set by the owner) or none. */
+  link_setting?: "auto" | "link" | "none";
 }
 
 export interface SchemaRelationship {
@@ -48,6 +54,14 @@ export interface SchemaRelationship {
   constrained_column?: string;
   referenced_table: string;
   referenced_column: string;
+  /** declared by the database (enforced), detected from the column name, or set by the owner. */
+  source?: "declared" | "detected" | "owner";
+  enforced?: boolean;
+  rule?: string;
+  /** Why the link exists, in plain words. */
+  reason?: string;
+  /** Other tables the column could point to. */
+  alternatives?: string[];
 }
 
 export interface SchemaTable {
@@ -68,6 +82,9 @@ export interface SchemaTable {
   data_class_default?: string | null;
   columns: SchemaColumn[];
   relationships: SchemaRelationship[];
+  /** The column that names this table's rows in every picker, and the owner's choice for it (null = automatic). */
+  label_column?: string | null;
+  display_column?: string | null;
   ai_suggestion?: {
     purpose?: string;
     concept?: string;

@@ -69,6 +69,8 @@ class SchemaController extends Controller
      */
     private function withProtection(DbConnection $connection, array $payload): array
     {
+        // Declared, detected and owner-set links, row labels and value names, the same as everywhere else.
+        $payload = app(\App\Services\Data\SchemaRelations::class)->decorateSnapshot($connection, $payload);
         $policy = app(DataAccessPolicy::class);
         foreach ($payload['tables'] ?? [] as $i => $table) {
             if (!is_array($table)) {

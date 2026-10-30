@@ -89,6 +89,9 @@ Route::middleware(['auth:sanctum', \App\Http\Middleware\EnsureCustomerActive::cl
         Route::get('/connections/{id}/tables', 'tables')->whereNumber('id');
         Route::get('/connections/{id}/tables/{table}/rows', 'rows')->whereNumber('id')->where('table', '[A-Za-z0-9_$\\-]+')->middleware('throttle:120,1');
         Route::get('/connections/{id}/tables/{table}/links/{column}', 'linkOptions')->whereNumber('id')->where(['table' => '[A-Za-z0-9_$\\-]+', 'column' => '[A-Za-z0-9_$\\-]+']);
+        Route::get('/connections/{id}/tables/{table}/values/{column}', 'values')->whereNumber('id')->where(['table' => '[A-Za-z0-9_$\\-]+', 'column' => '[A-Za-z0-9_$\\-]+']);
+        Route::get('/connections/{id}/tables/{table}/form', 'form')->whereNumber('id')->where('table', '[A-Za-z0-9_$\\-]+');
+        Route::post('/connections/{id}/tables/{table}/validate-row', 'validateRow')->whereNumber('id')->where('table', '[A-Za-z0-9_$\\-]+')->middleware('throttle:120,1');
         Route::get('/connections/{id}/tables/{table}/history', 'history')->whereNumber('id')->where('table', '[A-Za-z0-9_$\\-]+');
         Route::post('/connections/{id}/tables/{table}/preview-insert', 'previewInsert')->whereNumber('id')->where('table', '[A-Za-z0-9_$\\-]+')->middleware('throttle:60,1');
         Route::post('/connections/{id}/tables/{table}/preview-update', 'previewUpdate')->whereNumber('id')->where('table', '[A-Za-z0-9_$\\-]+')->middleware('throttle:60,1');
@@ -107,6 +110,18 @@ Route::middleware(['auth:sanctum', \App\Http\Middleware\EnsureCustomerActive::cl
     });
     Route::post('/connections/{id}/tables/{table}/annotate', [SchemaController::class, 'annotateTable'])->whereNumber('id')->where('table', '[A-Za-z0-9_$\\-]+');
     Route::put('/connections/{id}/tables/{table}/access', [SchemaController::class, 'setTableAccess'])->whereNumber('id')->where('table', '[A-Za-z0-9_$\\-]+');
+    // Links between tables and value names (Schema Explorer), and linked-row pickers for publishing and automations.
+    Route::controller(\App\Http\Controllers\Api\SchemaLinksController::class)->group(function () {
+        $t = ['table' => '[A-Za-z0-9_$\\-]+', 'column' => '[A-Za-z0-9_$\\-]+'];
+        Route::get('/connections/{id}/links/options', 'options')->whereNumber('id')->middleware('throttle:240,1');
+        Route::get('/connections/{id}/links/check', 'check')->whereNumber('id')->middleware('throttle:30,1');
+        Route::get('/connections/{id}/columns/values', 'values')->whereNumber('id')->middleware('throttle:120,1');
+        Route::get('/connections/{id}/tables/{table}/form', 'form')->whereNumber('id')->where($t);
+        Route::post('/connections/{id}/tables/{table}/validate-row', 'validateRow')->whereNumber('id')->where($t)->middleware('throttle:120,1');
+        Route::put('/connections/{id}/tables/{table}/columns/{column}/link', 'setLink')->whereNumber('id')->where($t);
+        Route::put('/connections/{id}/tables/{table}/columns/{column}/value-labels', 'setValueLabels')->whereNumber('id')->where($t);
+        Route::put('/connections/{id}/tables/{table}/display-column', 'setDisplayColumn')->whereNumber('id')->where($t);
+    });
 
     // AI Providers
     Route::get('/ai-providers', [AiProviderController::class, 'index']);

@@ -24,6 +24,8 @@ export interface Mapping {
 export interface RelationInfo {
   table: string;
   column: string;
+  /** declared by the database, detected from the column name, or set by the owner in the Schema Explorer. */
+  source?: "declared" | "detected" | "owner";
   label_column: string | null;
   entity: string;
   existing_count: number;
@@ -48,6 +50,12 @@ export interface PlanColumn {
   is_unique: boolean;
   is_secret: boolean;
   relation: RelationInfo | null;
+  /** integer, string, ... (portable type family). */
+  family?: string;
+  /** A status-like column: a fixed value is picked from the values it holds. */
+  categorical?: boolean;
+  /** The owner's names for stored values. */
+  value_labels?: Record<string, string>;
   suggested: Mapping;
 }
 
@@ -175,7 +183,7 @@ export function mappingFor(mode: Mode, col: PlanColumn, prev: Mapping | undefine
 
 const LENGTH_WORDS: Record<string, string> = { short: "about 350", medium: "about 750", long: "about 1,300" };
 
-export function explain(col: PlanColumn, m: Mapping | undefined, ctx: { titleColumn: string | null; length: string; format: string; manual: boolean }): string {
+export function explain(col: PlanColumn, m: Mapping | undefined, ctx: { titleColumn: string | null; length: string; format: string; manual: boolean; fixedLabel?: string | null }): string {
   const mode = modeOf(m, col);
   const r = col.relation;
   if (col.is_secret) return "Protected column: automations never read or write it.";
@@ -201,7 +209,7 @@ export function explain(col: PlanColumn, m: Mapping | undefined, ctx: { titleCol
       return `AI picks the closest of your ${r!.existing_count} existing ${r!.entity}${r!.existing_count === 1 ? "" : "s"}. New ${r!.entity}s are never created.${r!.create_blocked_reason ? ` (Creating is not possible: ${r!.create_blocked_reason}.)` : ""}`;
     case "FIXED_REL":
       return m?.fixed_value
-        ? `Every new row uses ${r!.entity} #${m.fixed_value}.`
+        ? `Every new row uses the ${r!.entity} “${ctx.fixedLabel || `#${m.fixed_value}`}”.`
         : `Choose which ${r!.entity} every new row should use.`;
     case "SLUG":
       return `Built from “${m?.source_field || ctx.titleColumn || "title"}” and made unique automatically (my-title, my-title-2, …).`;
@@ -214,7 +222,7 @@ export function explain(col: PlanColumn, m: Mapping | undefined, ctx: { titleCol
     default:
       return m?.fixed_value === "" || m?.fixed_value === null || m?.fixed_value === undefined
         ? (col.kind === "image" ? "Paste the image URL to use for every row." : "Enter the value to use for every row.")
-        : `Always “${String(m.fixed_value).slice(0, 60)}”.`;
+        : `Always “${(col.value_labels?.[String(m.fixed_value)] ?? String(m.fixed_value)).slice(0, 60)}”.`;
   }
 }
 

@@ -618,7 +618,7 @@ export const DataPage: React.FC = () => {
         {data && connectionId && (
           <div className="space-y-3">
             <FormAlert message={formAlert} onClose={() => setFormAlert(null)} />
-            <RowForm connectionId={connectionId} table={table} insert={editing === "add"} labels={data.labels}
+            <RowForm scope={{ connectionId, context: "data" }} table={table} insert={editing === "add"} labels={data.labels}
               columns={editing === "edit" && !data.revealed ? data.columns.filter((c) => !c.personal) : data.columns}
               values={formValues} errors={formErrors}
               onChange={(col, v) => { setFormValues((p) => ({ ...p, [col]: v })); setFormErrors((p) => { const n = { ...p }; delete n[col]; return n; }); }} />

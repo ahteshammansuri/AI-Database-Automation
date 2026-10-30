@@ -1,11 +1,16 @@
 import React, { useState } from "react";
-import { EyeOff, Key, Link as LinkIcon, Lock, Search } from "lucide-react";
+import { EyeOff, Key, Link as LinkIcon, ListFilter, Lock, PencilLine, Search } from "lucide-react";
 import type { SchemaTable } from "../../types";
 import { addRule, requiredColumns } from "./schemaFacts";
+import { LinkSourceBadge } from "./RelationshipMap";
 
 interface Props {
   table: SchemaTable;
   onOpenTable: (name: string) => void;
+  /** Change where a column points (not for keys the database declares). */
+  onEditLink: (column: string) => void;
+  /** Name the values of a status-like column. */
+  onNameValues: (column: string) => void;
 }
 
 const TONE: Record<string, string> = {
@@ -16,7 +21,7 @@ const TONE: Record<string, string> = {
 };
 
 /** Every column: its type, what adding a row needs, where it links, allowed values and protection. */
-export const ColumnsTable: React.FC<Props> = ({ table, onOpenTable }) => {
+export const ColumnsTable: React.FC<Props> = ({ table, onOpenTable, onEditLink, onNameValues }) => {
   const [filter, setFilter] = useState("");
   const columns = table.columns || [];
   const links = new Map((table.relationships || []).map((r) => [r.foreign_key || r.constrained_column || "", r]));
@@ -89,17 +94,38 @@ export const ColumnsTable: React.FC<Props> = ({ table, onOpenTable }) => {
                   </td>
                   <td>
                     {link ? (
-                      <button type="button" onClick={() => onOpenTable(link.referenced_table)} className="inline-flex items-center gap-1 font-mono text-[12px] font-semibold text-indigo-700 hover:underline" title={`Open ${link.referenced_table}`}>
-                        <LinkIcon className="h-3 w-3" /> {link.referenced_table}.{link.referenced_column}
-                      </button>
-                    ) : (
+                      <span className="flex flex-wrap items-center gap-1.5">
+                        <button type="button" onClick={() => onOpenTable(link.referenced_table)} className="inline-flex items-center gap-1 font-mono text-[12px] font-semibold text-indigo-700 hover:underline" title={`Open ${link.referenced_table}`}>
+                          <LinkIcon className="h-3 w-3" /> {link.referenced_table}.{link.referenced_column}
+                        </button>
+                        <LinkSourceBadge relation={link} compact />
+                        {link.source && link.source !== "declared" && (
+                          <button type="button" onClick={() => onEditLink(col.name)} className="da-icon-btn h-6 w-6" title={`Change where ${col.name} points`} aria-label={`Change where ${col.name} points`}>
+                            <PencilLine className="h-3 w-3" />
+                          </button>
+                        )}
+                      </span>
+                    ) : col.is_primary_key || col.sensitivity === "secret" ? (
                       <span className="text-slate-300">—</span>
+                    ) : (
+                      <button type="button" onClick={() => onEditLink(col.name)} className="text-[11.5px] text-slate-400 hover:text-indigo-700 hover:underline" title={`Say that ${col.name} points to another table`}>
+                        {col.link_setting === "none" ? "Not a link (set by you)" : "Set link"}
+                      </button>
                     )}
                   </td>
                   <td className="text-slate-500">
                     {col.enum_values && col.enum_values.length > 0 ? (
                       <span className="flex flex-wrap gap-1">
-                        {col.enum_values.map((v) => <span key={v} className="rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[11.5px] text-slate-700">{v}</span>)}
+                        {col.enum_values.map((v) => <span key={v} className="rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[11.5px] text-slate-700">{v}{col.value_labels?.[v] ? ` = ${col.value_labels[v]}` : ""}</span>)}
+                      </span>
+                    ) : col.categorical || Object.keys(col.value_labels ?? {}).length > 0 ? (
+                      <span className="flex flex-wrap items-center gap-1">
+                        {Object.entries(col.value_labels ?? {}).slice(0, 6).map(([v, l]) => (
+                          <span key={v} className="rounded-md bg-slate-100 px-1.5 py-0.5 text-[11.5px] text-slate-700"><span className="font-mono">{v}</span> = {l}</span>
+                        ))}
+                        <button type="button" onClick={() => onNameValues(col.name)} className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-1.5 py-0.5 text-[11px] font-medium text-slate-600 hover:border-indigo-300 hover:text-indigo-700">
+                          <ListFilter className="h-3 w-3" /> {Object.keys(col.value_labels ?? {}).length ? "Edit names" : "Name values"}
+                        </button>
                       </span>
                     ) : col.max_length ? (
                       <span>Up to {Number(col.max_length).toLocaleString()} characters</span>
