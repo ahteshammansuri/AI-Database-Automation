@@ -112,7 +112,7 @@ export const InlineAiFieldAssist: React.FC<InlineAiFieldAssistProps> = ({
   };
 
   return (
-    <div className="relative inline-block text-left" ref={containerRef}>
+    <div className={`relative inline-block text-left ${isOpen ? "z-50" : ""}`} ref={containerRef}>
       {/* Trigger Button */}
       <button
         type="button"
@@ -130,7 +130,7 @@ export const InlineAiFieldAssist: React.FC<InlineAiFieldAssistProps> = ({
 
       {/* Popover Card */}
       {isOpen && (
-        <div className="absolute right-0 top-full mt-1.5 w-80 sm:w-96 bg-white border border-slate-200 rounded-xl shadow-xl z-50 p-3.5 space-y-3 text-xs animate-in fade-in zoom-in-95 duration-100">
+        <div className="absolute right-0 top-full mt-1.5 w-80 sm:w-96 bg-white border border-slate-200 rounded-xl shadow-xl z-[100] p-3.5 space-y-3 text-xs animate-in fade-in zoom-in-95 duration-100">
           <div className="flex items-center justify-between pb-2 border-b border-slate-100">
             <div className="flex items-center gap-1.5 font-bold text-slate-800">
               <Wand2 className="w-3.5 h-3.5 text-indigo-600" />

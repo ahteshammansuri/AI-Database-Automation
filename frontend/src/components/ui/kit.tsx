@@ -51,7 +51,7 @@ export const PageHeader: React.FC<{
       initial={reduced ? false : { opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.55, ease: EASE }}
-      className={`mb-7 sm:mb-8 flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between ${className}`}
+      className={`mb-7 sm:mb-8 flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between relative z-20 ${className}`}
     >
       <div className="min-w-0">
         {eyebrow && (
@@ -63,7 +63,7 @@ export const PageHeader: React.FC<{
         <h1 className="mt-2 text-[26px] sm:text-[32px] font-extrabold leading-[1.1] tracking-[-0.035em] text-slate-950">{title}</h1>
         {description && <p className="mt-2.5 max-w-2xl text-[14.5px] leading-relaxed text-slate-600">{description}</p>}
       </div>
-      {actions && <div className="flex flex-wrap items-center gap-2 lg:shrink-0">{actions}</div>}
+      {actions && <div className="flex flex-wrap items-center gap-2 lg:shrink-0 relative z-30">{actions}</div>}
     </motion.header>
   );
 };

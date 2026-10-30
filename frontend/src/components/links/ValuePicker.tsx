@@ -61,7 +61,7 @@ export const ValuePicker: React.FC<Props> = ({ id, scope, table, column, value, 
   const shown = valueText(value, names);
 
   return (
-    <div className="relative" ref={dd.box}>
+    <div className={`relative ${dd.open ? "z-50" : ""}`} ref={dd.box}>
       <button type="button" id={id} onClick={() => dd.toggle()} aria-haspopup="listbox" aria-expanded={dd.open}
         aria-invalid={invalid || undefined} aria-describedby={describedBy}
         className={`da-input flex items-center justify-between gap-2 text-left${invalid ? " da-input-invalid" : ""}`}>
@@ -80,7 +80,7 @@ export const ValuePicker: React.FC<Props> = ({ id, scope, table, column, value, 
       </button>
 
       {dd.open && (
-        <div className={`absolute left-0 right-0 z-40 rounded-2xl border border-slate-200 bg-white p-2 shadow-lift ${dd.up ? "bottom-full mb-1.5" : "mt-1.5"}`}>
+        <div className={`absolute left-0 right-0 z-[100] rounded-2xl border border-slate-200 bg-white p-2 shadow-lift ${dd.up ? "bottom-full mb-1.5" : "mt-1.5"}`}>
           <div className="relative mb-1.5">
             <Search className="pointer-events-none absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-400" />
             <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} aria-label={`Find or type a value for ${column}`}

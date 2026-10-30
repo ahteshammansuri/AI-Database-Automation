@@ -194,7 +194,7 @@ export const LinkPicker: React.FC<Props> = ({ id, scope, table, column, value, o
   const missing = !!info && !loading && !blankValue(value) && !isNewLink(value) && !isNone && pickedLabel === "";
 
   return (
-    <div className="relative" ref={dd.box}>
+    <div className={`relative ${dd.open ? "z-50" : ""}`} ref={dd.box}>
       {isNewLink(value) ? (
         <div id={id} aria-invalid={invalid || undefined} aria-describedby={describedBy}
           className={`flex min-h-[2.6rem] items-center gap-2 rounded-xl border bg-indigo-50/50 px-3 py-1.5 text-[13px] ${invalid ? "border-rose-300" : "border-indigo-200"}`}>
@@ -236,7 +236,7 @@ export const LinkPicker: React.FC<Props> = ({ id, scope, table, column, value, o
       )}
 
       {dd.open && (
-        <div className={`absolute left-0 right-0 z-40 rounded-2xl border border-slate-200 bg-white p-2 shadow-lift ${dd.up ? "bottom-full mb-1.5" : "mt-1.5"}`}>
+        <div className={`absolute left-0 right-0 z-[100] rounded-2xl border border-slate-200 bg-white p-2 shadow-lift ${dd.up ? "bottom-full mb-1.5" : "mt-1.5"}`}>
           <div className="relative mb-1.5">
             <Search className="pointer-events-none absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-400" />
             <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={onKeyDown} aria-label={`Search ${ref}`}

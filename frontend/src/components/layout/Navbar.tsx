@@ -61,7 +61,7 @@ export const Navbar: React.FC<NavbarProps> = ({ onRefresh, isRefreshing = false,
     .toUpperCase();
 
   return (
-    <header className="relative z-20 flex h-16 shrink-0 items-center justify-between gap-2 border-b border-slate-200/70 bg-white/75 px-3 backdrop-blur-xl sm:px-6">
+    <header className="relative z-30 flex h-16 shrink-0 items-center justify-between gap-2 border-b border-slate-200/70 bg-white/75 px-3 backdrop-blur-xl sm:px-6">
       <div className="flex min-w-0 items-center gap-2 sm:gap-3">
         <button
           type="button"
@@ -124,7 +124,7 @@ export const Navbar: React.FC<NavbarProps> = ({ onRefresh, isRefreshing = false,
         </Link>
 
         {user && (
-          <div ref={accountRef} className="relative pl-1 sm:pl-2">
+          <div ref={accountRef} className={`relative pl-1 sm:pl-2 ${accountOpen ? "z-50" : ""}`}>
             <button
               type="button"
               onClick={() => setAccountOpen((o) => !o)}
@@ -146,7 +146,7 @@ export const Navbar: React.FC<NavbarProps> = ({ onRefresh, isRefreshing = false,
                   animate={{ opacity: 1, y: 0, scale: 1 }}
                   exit={{ opacity: 0, y: -6, scale: 0.98 }}
                   transition={{ duration: 0.18 }}
-                  className="absolute right-0 top-full mt-2 w-64 overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-lift"
+                  className="absolute right-0 top-full mt-2 w-64 overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-lift z-[100]"
                 >
                   <div className="border-b border-slate-100 px-4 py-3">
                     <div className="truncate text-[13.5px] font-semibold text-slate-900">{user.name}</div>

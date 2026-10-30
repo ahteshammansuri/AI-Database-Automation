@@ -55,7 +55,7 @@ export const DatePicker: React.FC<DatePickerProps> = ({
   }, [month, open]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-    <div className="relative" ref={rootRef}>
+    <div className={`relative ${open ? "z-50" : ""}`} ref={rootRef}>
       <button
         type="button"
         id={id}
@@ -98,7 +98,7 @@ export const DatePicker: React.FC<DatePickerProps> = ({
         <div
           role="dialog"
           aria-label={ariaLabel || placeholder}
-          className={`absolute z-50 ${panelPosition} w-[19.5rem] max-w-[calc(100vw-2rem)] rounded-2xl border border-slate-200 bg-white p-3 shadow-xl`}
+          className={`absolute z-[100] ${panelPosition} w-[19.5rem] max-w-[calc(100vw-2rem)] rounded-2xl border border-slate-200 bg-white p-3 shadow-xl`}
         >
           <CalendarMonth
             month={month}

@@ -246,7 +246,7 @@ export const Select2: React.FC<Select2Props> = ({
   return (
     <div
       ref={containerRef}
-      className={`relative inline-block w-full text-left ${className}`}
+      className={`relative inline-block w-full text-left ${isOpen ? "z-50" : ""} ${className}`}
       onKeyDown={handleKeyDown}
     >
       {/* Hidden input for form submission & automated testing */}
@@ -334,13 +334,13 @@ export const Select2: React.FC<Select2Props> = ({
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: openDirection === "up" ? 4 : -4, scale: 0.98 }}
             transition={{ duration: 0.14, ease: "easeOut" }}
-            className={`absolute z-60 left-0 right-0 ${
+            className={`absolute z-[100] left-0 right-0 ${
               openDirection === "up" ? "bottom-full mb-1.5" : "top-full mt-1.5"
-            } min-w-[140px] bg-white border border-slate-200 rounded-xl shadow-xl shadow-slate-900/10 overflow-hidden flex flex-col max-h-64 backdrop-blur-md ${menuClassName}`}
+            } min-w-[140px] bg-white border border-slate-200 rounded-xl shadow-xl shadow-slate-900/10 overflow-hidden flex flex-col max-h-64 ${menuClassName}`}
           >
             {/* Search Box */}
             {shouldShowSearch && (
-              <div className="p-2 border-b border-slate-100 bg-slate-50/60 sticky top-0 z-10">
+              <div className="p-2 border-b border-slate-100 bg-slate-50 sticky top-0 z-10">
                 <div className="relative">
                   <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
                   <input

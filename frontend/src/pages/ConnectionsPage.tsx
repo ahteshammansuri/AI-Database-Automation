@@ -915,7 +915,7 @@ export const ConnectionsPage: React.FC = () => {
             )}
 
             {/* Advanced */}
-            <div className="overflow-hidden rounded-2xl border border-slate-200">
+            <div className={`rounded-2xl border border-slate-200 ${showAdvanced ? "overflow-visible" : "overflow-hidden"}`}>
               <button type="button" onClick={() => setShowAdvanced(!showAdvanced)}
                 className="flex w-full items-center justify-between bg-slate-50/80 px-4 py-3 text-[13px] font-semibold text-slate-700 transition hover:bg-slate-100">
                 <span className="flex items-center gap-2"><ShieldCheck className="h-4 w-4 text-indigo-600" /> Advanced: TLS/SSL and timeout</span>
@@ -923,7 +923,7 @@ export const ConnectionsPage: React.FC = () => {
               </button>
               <AnimatePresence initial={false}>
                 {showAdvanced && (
-                  <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="overflow-hidden">
+                  <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1, transitionEnd: { overflow: "visible" } }} exit={{ height: 0, opacity: 0, overflow: "hidden" }} className="overflow-hidden">
                     <div className="space-y-3 border-t border-slate-200 bg-white p-4">
                       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                         <div>

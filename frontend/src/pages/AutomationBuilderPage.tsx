@@ -1429,7 +1429,7 @@ export const AutomationBuilderPage: React.FC = () => {
                       <button type="button" onClick={() => setShowDocUploadModal(true)} className="ml-1 font-semibold text-indigo-600 hover:underline">Upload one</button>
                     </div>
                   ) : (
-                    <div className="relative">
+                    <div className={`relative ${docDropdownOpen ? "z-50" : ""}`}>
                       <button type="button" onClick={() => setDocDropdownOpen((o) => !o)} aria-expanded={docDropdownOpen} className="da-input flex items-center justify-between text-left hover:border-slate-300">
                         <span className={aiConfig.document_ids.length ? "font-semibold text-slate-900" : "text-slate-500"}>
                           {aiConfig.document_ids.length ? `${aiConfig.document_ids.length} document${aiConfig.document_ids.length > 1 ? "s" : ""} selected` : "Choose documents…"}
@@ -1437,7 +1437,7 @@ export const AutomationBuilderPage: React.FC = () => {
                         {docDropdownOpen ? <ChevronUp className="h-4 w-4 text-slate-400" /> : <ChevronDown className="h-4 w-4 text-slate-400" />}
                       </button>
                       {docDropdownOpen && (
-                        <div className="absolute left-0 right-0 z-30 mt-2 space-y-2 rounded-2xl border border-slate-200 bg-white p-3 shadow-lift">
+                        <div className="absolute left-0 right-0 z-[100] mt-2 space-y-2 rounded-2xl border border-slate-200 bg-white p-3 shadow-lift">
                           <div className="relative">
                             <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-400" />
                             <input value={docSearchFilter} onChange={(e) => setDocSearchFilter(e.target.value)} placeholder="Search documents…" className="w-full rounded-lg border border-slate-200 bg-slate-50 py-1.5 pl-8 pr-3 text-xs focus:bg-white focus:outline-none focus:ring-1 focus:ring-indigo-500" />

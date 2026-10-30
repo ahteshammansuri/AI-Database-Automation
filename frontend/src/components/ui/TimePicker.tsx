@@ -57,7 +57,7 @@ export const TimePicker: React.FC<TimePickerProps> = ({ value, onChange, step = 
   };
 
   return (
-    <div className="relative" ref={rootRef}>
+    <div className={`relative ${open ? "z-50" : ""}`} ref={rootRef}>
       <button
         type="button"
         id={id}
@@ -75,7 +75,7 @@ export const TimePicker: React.FC<TimePickerProps> = ({ value, onChange, step = 
       </button>
 
       {open && (
-        <div role="dialog" aria-label={ariaLabel || "Choose a time"} className={`absolute z-50 ${panelPosition} w-72 max-w-[calc(100vw-2rem)] rounded-2xl border border-slate-200 bg-white p-3 shadow-xl`}>
+        <div role="dialog" aria-label={ariaLabel || "Choose a time"} className={`absolute z-[100] ${panelPosition} w-72 max-w-[calc(100vw-2rem)] rounded-2xl border border-slate-200 bg-white p-3 shadow-xl`}>
           {quickOptions && quickOptions.length > 0 && (
             <div className="mb-2 flex flex-wrap gap-1.5">
               {quickOptions.map((q) => (

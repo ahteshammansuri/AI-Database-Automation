@@ -481,6 +481,8 @@ export const WysiwygEditor: React.FC<WysiwygEditorProps> = ({
       } ${
         isFullscreen
           ? "fixed inset-4 z-50 rounded-2xl bg-white shadow-2xl overflow-hidden flex flex-col"
+          : linkPopoverOpen || imageModalOpen
+          ? "z-40"
           : ""
       } ${className}`}
     >
@@ -901,7 +903,7 @@ export const WysiwygEditor: React.FC<WysiwygEditorProps> = ({
 
       {/* Floating Link Insertion Popover */}
       {linkPopoverOpen && (
-        <div className="absolute top-12 left-4 z-50 w-80 rounded-2xl border border-slate-200 bg-white p-3.5 shadow-xl transition-all">
+        <div className="absolute top-12 left-4 z-[100] w-80 rounded-2xl border border-slate-200 bg-white p-3.5 shadow-xl transition-all">
           <div className="mb-2.5 flex items-center justify-between border-b border-slate-100 pb-2">
             <span className="flex items-center gap-1.5 text-xs font-bold text-slate-800">
               <Link2 className="h-3.5 w-3.5 text-indigo-600" />
@@ -978,7 +980,7 @@ export const WysiwygEditor: React.FC<WysiwygEditorProps> = ({
 
       {/* Floating Image Insertion Popover */}
       {imageModalOpen && (
-        <div className="absolute top-12 left-4 z-50 w-80 rounded-2xl border border-slate-200 bg-white p-3.5 shadow-xl transition-all">
+        <div className="absolute top-12 left-4 z-[100] w-80 rounded-2xl border border-slate-200 bg-white p-3.5 shadow-xl transition-all">
           <div className="mb-2.5 flex items-center justify-between border-b border-slate-100 pb-2">
             <span className="flex items-center gap-1.5 text-xs font-bold text-slate-800">
               <ImageIcon className="h-3.5 w-3.5 text-indigo-600" /> Insert Image
