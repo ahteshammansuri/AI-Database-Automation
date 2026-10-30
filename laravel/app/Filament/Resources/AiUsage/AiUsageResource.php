@@ -8,8 +8,12 @@ use App\Filament\Resources\Customers\CustomerResource;
 use App\Filament\Resources\Runs\RunResource;
 use App\Models\AiUsageEvent;
 use BackedEnum;
+use Filament\Actions\ViewAction;
 use Filament\Forms\Components\DatePicker;
+use Filament\Infolists\Components\TextEntry;
 use Filament\Resources\Resource;
+use Filament\Schemas\Components\Section;
+use Filament\Schemas\Schema;
 use Filament\Support\Icons\Heroicon;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Filters\Filter;
@@ -101,9 +105,35 @@ class AiUsageResource extends Resource
                         ->when($data['from'] ?? null, fn ($q, $d) => $q->whereDate('created_at', '>=', $d))
                         ->when($data['until'] ?? null, fn ($q, $d) => $q->whereDate('created_at', '<=', $d))),
             ])
-            ->recordActions([])
+            ->recordActions([
+                ViewAction::make()
+                    ->modalHeading('AI call details')
+                    ->modalWidth('4xl'),
+            ])
             ->emptyStateHeading('No AI calls yet')
             ->emptyStateDescription('Every call to a model (Orbit, automation writing, previews, sample data, images) is recorded here with its tokens.');
+    }
+
+    public static function infolist(Schema $schema): Schema
+    {
+        return $schema
+            ->columns(1)
+            ->components([
+                Section::make('AI Call Details')
+                    ->columns(3)
+                    ->components([
+                        TextEntry::make('purpose')->label('Used for')->formatStateUsing(fn (?string $state) => AiUsageEvent::purposeLabel($state))->badge()->color('gray'),
+                        TextEntry::make('model')->label('Model')->placeholder('unknown'),
+                        TextEntry::make('provider')->label('Provider')->formatStateUsing(fn ($state) => ucfirst((string) $state))->badge(),
+                        TextEntry::make('calls')->label('Calls made')->numeric(),
+                        TextEntry::make('prompt_tokens')->label('Prompt tokens sent')->numeric(),
+                        TextEntry::make('completion_tokens')->label('Completion tokens written')->numeric(),
+                        TextEntry::make('total')->label('Total tokens')->state(fn (AiUsageEvent $r) => (int) $r->prompt_tokens + (int) $r->completion_tokens)->numeric()->weight('bold'),
+                        TextEntry::make('subject')->label('Associated resource')->state(fn (AiUsageEvent $r) => $r->subject_type ? ((self::SUBJECTS[$r->subject_type] ?? (string) str($r->subject_type)->headline()) . ($r->subject_id ? " #{$r->subject_id}" : '')) : 'General / unlinked'),
+                        TextEntry::make('user.name')->label('Customer')->placeholder('—'),
+                        TextEntry::make('created_at')->label('When')->dateTime()->placeholder('—'),
+                    ]),
+            ]);
     }
 
     public static function getPages(): array

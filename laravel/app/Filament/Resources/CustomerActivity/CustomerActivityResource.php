@@ -92,7 +92,11 @@ class CustomerActivityResource extends Resource
                         ->when($data['from'] ?? null, fn ($q, $d) => $q->whereDate('created_at', '>=', $d))
                         ->when($data['until'] ?? null, fn ($q, $d) => $q->whereDate('created_at', '<=', $d))),
             ])
-            ->recordActions([ViewAction::make()->modalHeading(fn (AuditLog $record) => \App\Admin\AuditDescriber::describe($record))]);
+            ->recordActions([
+                ViewAction::make()
+                    ->modalHeading(fn (AuditLog $record) => \App\Admin\AuditDescriber::describe($record))
+                    ->modalWidth('4xl'),
+            ]);
     }
 
     public static function infolist(Schema $schema): Schema
@@ -100,18 +104,18 @@ class CustomerActivityResource extends Resource
         return $schema->components([
             TextEntry::make('created_at')->label('When')->dateTime(),
             TextEntry::make('user.name')->label('Customer')->placeholder('Deleted account'),
-            TextEntry::make('resource_type')->label('On')->formatStateUsing(fn ($state, AuditLog $record) => trim($state . ($record->resource_id ? " #{$record->resource_id}" : '')))->placeholder('—'),
+            TextEntry::make('resource_type')->label('On')->formatStateUsing(fn ($state, ?AuditLog $record = null) => trim($state . ($record?->resource_id ? " #{$record->resource_id}" : '')))->placeholder('—'),
             TextEntry::make('ip_address')->label('IP')->placeholder('—'),
-            TextEntry::make('what')->label('What happened')->state(fn (AuditLog $record) => \App\Admin\AuditDescriber::describe($record))->columnSpanFull(),
+            TextEntry::make('what')->label('What happened')->state(fn (?AuditLog $record = null) => $record ? \App\Admin\AuditDescriber::describe($record) : null)->columnSpanFull(),
             TextEntry::make('changes')
                 ->label('What changed')
-                ->state(fn (AuditLog $record) => \App\Admin\AuditDescriber::changes($record))
+                ->state(fn (?AuditLog $record = null) => $record ? \App\Admin\AuditDescriber::changes($record) : [])
                 ->listWithLineBreaks()
                 ->columnSpanFull()
-                ->visible(fn (AuditLog $record) => \App\Admin\AuditDescriber::changes($record) !== []),
+                ->visible(fn (?AuditLog $record = null) => $record && \App\Admin\AuditDescriber::changes($record) !== []),
             KeyValueEntry::make('metadata')
                 ->label('Details')
-                ->state(fn (AuditLog $record) => collect((array) $record->metadata)->except('changes')->map(fn ($v) => is_scalar($v) || $v === null ? (string) $v : json_encode($v))->all())
+                ->state(fn (?AuditLog $record = null) => $record ? collect((array) $record->metadata)->except('changes')->map(fn ($v) => is_scalar($v) || $v === null ? (string) $v : json_encode($v))->all() : [])
                 ->columnSpanFull(),
         ])->columns(2);
     }

@@ -8,6 +8,7 @@ use App\Filament\Resources\OrbitTasks\Pages\ListOrbitTasks;
 use App\Filament\Resources\OrbitTasks\Pages\ViewOrbitTask;
 use App\Models\AgentTask;
 use BackedEnum;
+use Filament\Actions\Action;
 use Filament\Actions\ViewAction;
 use Filament\Infolists\Components\RepeatableEntry;
 use Filament\Infolists\Components\TextEntry;
@@ -87,7 +88,17 @@ class OrbitTaskResource extends Resource
             ->filters([
                 SelectFilter::make('status')->multiple()->options(self::STATUSES),
             ])
-            ->recordActions([ViewAction::make()]);
+            ->recordActions([
+                ViewAction::make()
+                    ->modalWidth('5xl')
+                    ->extraModalFooterActions([
+                        Action::make('openFullPage')
+                            ->label('Open full page')
+                            ->icon('heroicon-o-arrow-top-right-on-square')
+                            ->color('gray')
+                            ->url(fn (AgentTask $record) => OrbitTaskResource::getUrl('view', ['record' => $record])),
+                    ]),
+            ]);
     }
 
     public static function infolist(Schema $schema): Schema

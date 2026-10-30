@@ -102,7 +102,15 @@ class ConnectionResource extends Resource
                 SelectFilter::make('status')->options(['connected' => 'Connected', 'unverified' => 'Not tested', 'connection_error' => 'Connection error']),
             ])
             ->recordActions([
-                ViewAction::make(),
+                ViewAction::make()
+                    ->modalWidth('5xl')
+                    ->extraModalFooterActions([
+                        Action::make('openFullPage')
+                            ->label('Open full page')
+                            ->icon('heroicon-o-arrow-top-right-on-square')
+                            ->color('gray')
+                            ->url(fn (DbConnection $record) => ConnectionResource::getUrl('view', ['record' => $record])),
+                    ]),
                 self::readOnlyAction(),
             ]);
     }

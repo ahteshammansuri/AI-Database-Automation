@@ -5,6 +5,7 @@ namespace App\Filament\Resources\Customers\RelationManagers;
 use App\Filament\Concerns\ReadOnlyRelationManager;
 use App\Filament\Resources\Connections\ConnectionResource;
 use App\Models\DbConnection;
+use Filament\Schemas\Schema;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Table;
 
@@ -19,5 +20,10 @@ class ConnectionsRelationManager extends ReadOnlyRelationManager
     public function table(Table $table): Table
     {
         return ConnectionResource::table($table)->recordUrl(fn (DbConnection $record) => ConnectionResource::getUrl('view', ['record' => $record]));
+    }
+
+    public function infolist(Schema $schema): Schema
+    {
+        return ConnectionResource::infolist($schema);
     }
 }

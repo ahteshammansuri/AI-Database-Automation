@@ -9,6 +9,7 @@ use App\Filament\Resources\Runs\Pages\ListRuns;
 use App\Filament\Resources\Runs\Pages\ViewRun;
 use App\Models\AutomationExecution;
 use BackedEnum;
+use Filament\Actions\Action;
 use Filament\Actions\ViewAction;
 use Filament\Forms\Components\DatePicker;
 use Filament\Infolists\Components\RepeatableEntry;
@@ -138,7 +139,17 @@ class RunResource extends Resource
                         ->when($data['from'] ?? null, fn ($q, $d) => $q->whereDate('created_at', '>=', $d))
                         ->when($data['until'] ?? null, fn ($q, $d) => $q->whereDate('created_at', '<=', $d))),
             ])
-            ->recordActions([ViewAction::make()]);
+            ->recordActions([
+                ViewAction::make()
+                    ->modalWidth('5xl')
+                    ->extraModalFooterActions([
+                        Action::make('openFullPage')
+                            ->label('Open full page')
+                            ->icon('heroicon-o-arrow-top-right-on-square')
+                            ->color('gray')
+                            ->url(fn (AutomationExecution $record) => RunResource::getUrl('view', ['record' => $record])),
+                    ]),
+            ]);
     }
 
     public static function infolist(Schema $schema): Schema

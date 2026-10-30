@@ -4,6 +4,7 @@ namespace App\Filament\Resources\Customers\RelationManagers;
 
 use App\Filament\Concerns\ReadOnlyRelationManager;
 use App\Filament\Resources\CustomerActivity\CustomerActivityResource;
+use Filament\Schemas\Schema;
 use Filament\Tables\Table;
 
 class ActivityRelationManager extends ReadOnlyRelationManager
@@ -17,5 +18,10 @@ class ActivityRelationManager extends ReadOnlyRelationManager
     public function table(Table $table): Table
     {
         return CustomerActivityResource::table($table);
+    }
+
+    public function infolist(Schema $schema): Schema
+    {
+        return CustomerActivityResource::infolist($schema);
     }
 }

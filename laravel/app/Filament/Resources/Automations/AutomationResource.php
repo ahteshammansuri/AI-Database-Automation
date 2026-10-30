@@ -115,7 +115,15 @@ class AutomationResource extends Resource
                 SelectFilter::make('schedule_type')->label('Schedule')->options(self::SCHEDULES),
             ])
             ->recordActions([
-                ViewAction::make(),
+                ViewAction::make()
+                    ->modalWidth('5xl')
+                    ->extraModalFooterActions([
+                        Action::make('openFullPage')
+                            ->label('Open full page')
+                            ->icon('heroicon-o-arrow-top-right-on-square')
+                            ->color('gray')
+                            ->url(fn (Automation $record) => AutomationResource::getUrl('view', ['record' => $record])),
+                    ]),
                 self::pauseAction(),
                 self::resumeAction(),
             ]);

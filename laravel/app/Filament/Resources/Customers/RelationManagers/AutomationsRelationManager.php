@@ -6,6 +6,7 @@ use App\Filament\Concerns\ReadOnlyRelationManager;
 use App\Filament\Resources\Automations\AutomationResource;
 use App\Models\Automation;
 use App\Services\Automation\ScheduleCalculator;
+use Filament\Schemas\Schema;
 use Filament\Tables\Table;
 
 class AutomationsRelationManager extends ReadOnlyRelationManager
@@ -21,5 +22,10 @@ class AutomationsRelationManager extends ReadOnlyRelationManager
         return AutomationResource::table($table)
             ->modifyQueryUsing(fn ($query) => $query->where('schedule_type', '!=', ScheduleCalculator::TYPE_NONE)->withCount(AutomationResource::runCounts()))
             ->recordUrl(fn (Automation $record) => AutomationResource::getUrl('view', ['record' => $record]));
+    }
+
+    public function infolist(Schema $schema): Schema
+    {
+        return AutomationResource::infolist($schema);
     }
 }
