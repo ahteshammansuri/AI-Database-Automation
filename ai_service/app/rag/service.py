@@ -79,6 +79,9 @@ class RAGService:
             user_index.index = faiss.IndexFlatIP(actual_dim)
             user_index.chunks_metadata = []
 
+        # Remove any existing chunks for this document to ensure idempotency and prevent duplicates
+        user_index.remove_document(document_id)
+
         user_index.add_chunks(chunks, vectors)
 
         logger.info(
@@ -87,9 +90,28 @@ class RAGService:
         )
         return len(chunks), user_index.index.ntotal
 
-    def query(self, user_id: int, query_text: str, top_k: int = 3) -> List[Dict[str, Any]]:
+    @staticmethod
+    def _lexical_similarity(query_text: str, chunk_text: str) -> float:
+        """Calculate word-level overlap ratio between query keywords and candidate chunk."""
+        words = re.findall(r"\b\w{3,}\b", query_text.lower())
+        if not words:
+            return 0.0
+        c_lower = chunk_text.lower()
+        matched = sum(1 for w in words if w in c_lower)
+        return matched / len(words)
+
+    def query(
+        self,
+        user_id: int,
+        query_text: str,
+        top_k: int = 3,
+        document_ids: Optional[List[int]] = None,
+        min_score: Optional[float] = None,
+        hybrid: bool = True
+    ) -> List[Dict[str, Any]]:
         """
-        Searches the tenant's isolated vector index.
+        Searches the tenant's isolated vector index with optional document filtering
+        and hybrid semantic + lexical keyword re-ranking.
         Returns results with source attribution for audit logging.
         """
         user_index = self._get_user_index(user_id)
@@ -106,25 +128,52 @@ class RAGService:
             )
             return []
 
-        raw_results = user_index.search(query_vec, top_k=top_k)
+        # If document_ids is specified, request more candidates to allow post-ranking
+        search_k = max(top_k * 3, 10) if (document_ids or hybrid) else top_k
+        raw_results = user_index.search(query_vec, top_k=search_k, document_ids=document_ids)
 
-        results = []
-        for chunk_meta, score in raw_results:
-            results.append({
+        scored_results = []
+        for chunk_meta, dense_score in raw_results:
+            txt = chunk_meta.get("text", "")
+            if hybrid:
+                lex_score = self._lexical_similarity(query_text, txt)
+                # Weighted hybrid: 75% dense vector cosine similarity + 25% lexical keyword boost
+                final_score = float(0.75 * dense_score + 0.25 * lex_score)
+            else:
+                final_score = float(dense_score)
+
+            if min_score is not None and final_score < min_score:
+                continue
+
+            scored_results.append({
                 "chunk_id": chunk_meta.get("chunk_id", ""),
                 "document_id": chunk_meta.get("document_id", 0),
-                "text": chunk_meta.get("text", ""),
-                "score": round(score, 4),
+                "text": txt,
+                "score": round(final_score, 4),
+                "dense_score": round(float(dense_score), 4),
                 "embedding_backend": self.embedder.backend,
             })
 
+        # Re-sort by hybrid score descending
+        scored_results.sort(key=lambda x: x["score"], reverse=True)
+        results = scored_results[:top_k]
+
         if results:
             logger.debug(
-                "RAG query '%s' (user=%s, backend=%s): %d results, top score=%.4f",
-                query_text[:60], user_id, self.embedder.backend, len(results),
+                "RAG query '%s' (user=%s, backend=%s, doc_filter=%s): %d results, top score=%.4f",
+                query_text[:60], user_id, self.embedder.backend, document_ids, len(results),
                 results[0]["score"] if results else 0.0
             )
         return results
+
+    def get_user_status(self, user_id: int) -> Dict[str, Any]:
+        """Return diagnostic metrics for user's vector index."""
+        user_index = self._get_user_index(user_id)
+        status = user_index.get_status()
+        status["user_id"] = user_id
+        status["backend"] = self.embedder.backend
+        status["healthy"] = status["total_vectors"] > 0
+        return status
 
     # ------------------------------------------------------------------
     # Global product knowledge (partition user_0), versioned by content hash

@@ -1,6 +1,6 @@
 import os
 import pickle
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 import numpy as np
 import faiss
 from ai_service.app.config import settings
@@ -32,7 +32,12 @@ class UserVectorIndex:
         self.chunks_metadata.extend(chunks)
         self._save()
 
-    def search(self, query_vector: np.ndarray, top_k: int = 3) -> List[Tuple[Dict[str, Any], float]]:
+    def search(
+        self,
+        query_vector: np.ndarray,
+        top_k: int = 3,
+        document_ids: Optional[List[int]] = None
+    ) -> List[Tuple[Dict[str, Any], float]]:
         if self.index.ntotal == 0:
             return []
 
@@ -41,15 +46,43 @@ class UserVectorIndex:
         if query_vector.dtype != np.float32:
             query_vector = query_vector.astype(np.float32)
 
-        k = min(top_k, self.index.ntotal)
-        scores, indices = self.index.search(query_vector, k)
+        target_doc_ids = set(int(d) for d in document_ids) if document_ids else None
+
+        # If filtering by specific document IDs, retrieve more candidates from FAISS to ensure
+        # matches from target documents are found
+        candidate_k = min(self.index.ntotal, max(top_k * 10, 200)) if target_doc_ids else min(top_k, self.index.ntotal)
+        scores, indices = self.index.search(query_vector, candidate_k)
 
         results = []
         for score, idx in zip(scores[0], indices[0]):
             if idx != -1 and idx < len(self.chunks_metadata):
-                results.append((self.chunks_metadata[idx], float(score)))
+                chunk = self.chunks_metadata[idx]
+                if target_doc_ids is not None:
+                    chunk_doc_id = chunk.get("document_id")
+                    if chunk_doc_id is None or int(chunk_doc_id) not in target_doc_ids:
+                        continue
+                results.append((chunk, float(score)))
+                if len(results) >= top_k:
+                    break
 
         return results
+
+    def get_status(self) -> Dict[str, Any]:
+        """Return diagnostic metrics about indexed documents and vectors."""
+        doc_ids = set()
+        chunk_counts: Dict[str, int] = {}
+        for chunk in self.chunks_metadata:
+            doc_id = chunk.get("document_id")
+            if doc_id is not None:
+                doc_ids.add(int(doc_id))
+                k = str(doc_id)
+                chunk_counts[k] = chunk_counts.get(k, 0) + 1
+        return {
+            "total_vectors": self.index.ntotal,
+            "dimension": self.dimension,
+            "document_ids": sorted(list(doc_ids)),
+            "chunk_counts": chunk_counts,
+        }
 
     def remove_document(self, document_id: int):
         new_meta = []

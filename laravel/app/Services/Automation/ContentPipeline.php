@@ -88,17 +88,44 @@ class ContentPipeline
         $data = [];
 
         if (!$isManual && !empty($aiText)) {
-            // 2. Knowledge passages
+            // 2. Knowledge passages (RAG retrieval with self-healing)
             $passages = [];
             if (!empty($automation->knowledge_document_ids)) {
+                $docIds = is_array($automation->knowledge_document_ids)
+                    ? array_values(array_unique(array_filter(array_map('intval', $automation->knowledge_document_ids))))
+                    : [];
                 $query = trim((string) ($automation->prompt_context ?: $automation->name));
                 try {
-                    foreach ($this->ai->queryKnowledge($automation->user_id, $query, 4) as $chunk) {
+                    $rawChunks = $this->ai->queryKnowledge($automation->user_id, $query, 4, $docIds);
+
+                    // Self-healing: if 0 chunks returned and user has selected documents, check and auto-restore FAISS index
+                    if (empty($rawChunks) && !empty($docIds)) {
+                        try {
+                            $indexer = app(\App\Services\Knowledge\KnowledgeIndexerService::class);
+                            if ($indexer->ensureDocumentsIndexed($automation->user_id, $docIds)) {
+                                $rawChunks = $this->ai->queryKnowledge($automation->user_id, $query, 4, $docIds);
+                            }
+                        } catch (\Throwable $healEx) {
+                            Log::warning("[ContentPipeline] RAG self-healing attempt failed: " . $healEx->getMessage());
+                        }
+                    }
+
+                    // Preload document titles for readable UI attribution
+                    $docTitles = !empty($docIds)
+                        ? \App\Models\KnowledgeDocument::where('user_id', $automation->user_id)
+                            ->whereIn('id', $docIds)
+                            ->pluck('title', 'id')
+                            ->toArray()
+                        : [];
+
+                    foreach ($rawChunks as $chunk) {
                         $txt = $chunk['text'] ?? $chunk['content'] ?? '';
                         if ($txt !== '') {
                             $passages[] = $txt;
+                            $docId = $chunk['document_id'] ?? null;
                             $meta['rag'][] = [
-                                'document_id' => $chunk['document_id'] ?? null,
+                                'document_id' => $docId,
+                                'document_title' => $docTitles[$docId] ?? ($docId ? "Document #{$docId}" : "Knowledge Base"),
                                 'chunk_id' => $chunk['chunk_id'] ?? null,
                                 'score' => isset($chunk['score']) ? (float) $chunk['score'] : null,
                                 'snippet' => Str::limit($txt, 300),
@@ -108,6 +135,7 @@ class ContentPipeline
                     $log('RAG_CONTEXT_RETRIEVED', 'Retrieved ' . count($passages) . " passage(s) from your knowledge base for '" . Str::limit($query, 80) . "'.", [
                         'query' => $query,
                         'chunks' => count($passages),
+                        'document_ids' => $docIds,
                         'retrieved_passages' => $meta['rag'],
                     ]);
                 } catch (\Throwable $e) {

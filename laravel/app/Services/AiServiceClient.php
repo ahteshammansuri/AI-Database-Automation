@@ -229,21 +229,54 @@ class AiServiceClient
     }
 
     /**
-     * Semantic search within tenant's documents.
+     * Semantic and hybrid search within tenant's documents with optional document filtering.
      */
-    public function queryKnowledge(int $userId, string $queryText, int $topK = 3): array
+    public function queryKnowledge(int $userId, string $queryText, int $topK = 4, array $documentIds = [], ?float $minScore = null): array
     {
-        $res = $this->client()->post("{$this->baseUrl}/v1/rag/query", [
+        $payload = [
             'user_id' => $userId,
             'query_text' => $queryText,
             'top_k' => $topK,
-        ]);
+            'hybrid' => true,
+        ];
+
+        if (!empty($documentIds)) {
+            $payload['document_ids'] = array_values(array_unique(array_filter(array_map('intval', $documentIds))));
+        }
+
+        if ($minScore !== null) {
+            $payload['min_score'] = (float) $minScore;
+        }
+
+        $res = $this->client()->post("{$this->baseUrl}/v1/rag/query", $payload);
 
         if (!$res->successful()) {
             return [];
         }
 
         return $res->json()['chunks'] ?? [];
+    }
+
+    /**
+     * Fetch RAG vector index diagnostics and health for a user/tenant.
+     */
+    public function getRagStatus(int $userId): array
+    {
+        $res = $this->client()->get("{$this->baseUrl}/v1/rag/status/{$userId}");
+
+        if (!$res->successful()) {
+            return [
+                'user_id' => $userId,
+                'total_vectors' => 0,
+                'dimension' => 0,
+                'backend' => 'unknown',
+                'document_ids' => [],
+                'chunk_counts' => [],
+                'healthy' => false,
+            ];
+        }
+
+        return $res->json();
     }
 
     /**

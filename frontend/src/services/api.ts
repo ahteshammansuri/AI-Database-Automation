@@ -484,6 +484,26 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ query, top_k: topK }),
     }),
+  reindexKnowledge: () =>
+    request<{ success: boolean; message: string; data: { reindexed: number; total_vectors: number } }>("/knowledge/reindex", {
+      method: "POST",
+    }),
+  getRagStatus: () =>
+    request<{
+      success: boolean;
+      total_vectors: number;
+      backend: string;
+      indexed_count: number;
+      documents_count: number;
+      healthy: boolean;
+      rag?: {
+        total_vectors: number;
+        dimension: number;
+        backend: string;
+        document_ids: number[];
+        chunk_counts: Record<string, number>;
+      };
+    }>("/knowledge/status"),
 
   // Automations
   listAutomations: () => request<any[]>("/automations"),

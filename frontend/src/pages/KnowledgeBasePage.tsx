@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { BookOpen, Upload, Trash2, Search, FileText, CheckCircle2, AlertCircle, FileCode, FileSpreadsheet, Layers, ArrowUpRight, HardDrive, HelpCircle, X } from "lucide-react";
+import { BookOpen, Upload, Trash2, Search, FileText, CheckCircle2, AlertCircle, FileCode, FileSpreadsheet, Layers, ArrowUpRight, HardDrive, HelpCircle, X, RefreshCw } from "lucide-react";
 import { useOrbitSurface } from "../hooks/useOrbitSurface";
 import { useRefreshAfterOrbit } from "../hooks/useRefreshAfterOrbit";
 import { useOrbitTarget } from "../hooks/useOrbitTarget";
@@ -25,6 +25,8 @@ export const KnowledgeBasePage: React.FC = () => {
   const [uploadTitle, setUploadTitle] = useState("");
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [isReindexing, setIsReindexing] = useState(false);
+  const [ragStatus, setRagStatus] = useState<any>(null);
   const [msg, setMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   // Messages under the title, file and search inputs.
@@ -36,11 +38,21 @@ export const KnowledgeBasePage: React.FC = () => {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const loadRagStatus = async () => {
+    try {
+      const res = await api.getRagStatus();
+      setRagStatus(res);
+    } catch {
+      // ignore
+    }
+  };
+
   const loadDocs = async () => {
     try {
       setLoading(true);
       const list = await api.listKnowledge();
       setDocs(Array.isArray(list) ? list : []);
+      loadRagStatus();
     } catch (err: any) {
       console.error(err);
       setMsg({ type: "error", text: `Failed to load documents: ${err.message}` });
@@ -49,10 +61,24 @@ export const KnowledgeBasePage: React.FC = () => {
     }
   };
 
+  const handleReindex = async () => {
+    try {
+      setIsReindexing(true);
+      const res = await api.reindexKnowledge();
+      toast.success(res.message || "Vector index synchronized successfully.");
+      await loadDocs();
+      await loadRagStatus();
+    } catch (err: any) {
+      toast.error(err.message || "Vector synchronization failed.");
+    } finally {
+      setIsReindexing(false);
+    }
+  };
+
   useEffect(() => {
     pageStateService.setRoute("/knowledge", "Knowledge Base");
     loadDocs();
-
+    loadRagStatus();
   }, []);
 
   // ---- Orbit surface (row = document id). The browser cannot pick a file for the user:
@@ -243,9 +269,26 @@ export const KnowledgeBasePage: React.FC = () => {
         title="Knowledge base"
         description="Upload your guides, product facts and brand voice. Drafts and Orbit's answers use the passages retrieved from your own documents."
         actions={
-          <span className="da-chip da-chip-indigo px-3 py-1.5 text-[12.5px]">
-            <HardDrive className="h-3.5 w-3.5" /> {docs.length} document{docs.length === 1 ? "" : "s"} indexed
-          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="da-chip da-chip-indigo px-3 py-1.5 text-[12.5px]">
+              <HardDrive className="h-3.5 w-3.5" /> {docs.length} document{docs.length === 1 ? "" : "s"}
+            </span>
+            {ragStatus && (
+              <span className="da-chip da-chip-emerald px-3 py-1.5 text-[12.5px]" title={`Vector store: ${ragStatus.backend || "Ollama"} (${ragStatus.rag?.dimension || 768}-dim)`}>
+                <Layers className="h-3.5 w-3.5" /> {ragStatus.total_vectors || 0} vectors
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={handleReindex}
+              disabled={isReindexing || docs.length === 0}
+              className="da-btn da-btn-secondary px-3 py-1.5 text-[12.5px] inline-flex items-center gap-1.5"
+              title="Synchronize and re-index all vector embeddings into FAISS"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${isReindexing ? "animate-spin text-indigo-600" : ""}`} />
+              {isReindexing ? "Syncing..." : "Sync Vectors"}
+            </button>
+          </div>
         }
       />
 

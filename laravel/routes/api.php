@@ -140,6 +140,8 @@ Route::middleware(['auth:sanctum', \App\Http\Middleware\EnsureCustomerActive::cl
     Route::post('/knowledge/upload', [KnowledgeController::class, 'upload']);
     Route::post('/knowledge/query', [KnowledgeController::class, 'query']);
     Route::post('/knowledge/suggest', [KnowledgeController::class, 'suggest'])->middleware('throttle:60,1');
+    Route::post('/knowledge/reindex', [KnowledgeController::class, 'reindex']);
+    Route::get('/knowledge/status', [KnowledgeController::class, 'status']);
     Route::delete('/knowledge/{id}', [KnowledgeController::class, 'destroy']);
 
     // Automations

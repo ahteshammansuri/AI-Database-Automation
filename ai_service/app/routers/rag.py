@@ -8,6 +8,7 @@ from ai_service.app.schemas.rag import (
     QueryRequest,
     QueryResponse,
     RetrievedChunk,
+    RagStatusResponse,
     FieldClassifyRequest,
     FieldClassifyResponse,
     FieldClassificationResult,
@@ -59,7 +60,10 @@ def query_knowledge(req: QueryRequest):
         raw_chunks = rag_service.query(
             user_id=req.user_id,
             query_text=req.query_text,
-            top_k=req.top_k
+            top_k=req.top_k,
+            document_ids=req.document_ids,
+            min_score=req.min_score,
+            hybrid=req.hybrid
         )
         chunks = [RetrievedChunk(**c) for c in raw_chunks]
         return QueryResponse(
@@ -69,6 +73,15 @@ def query_knowledge(req: QueryRequest):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
+
+
+@router.get("/status/{user_id}", response_model=RagStatusResponse)
+def get_user_rag_status(user_id: int):
+    try:
+        status_info = rag_service.get_user_status(user_id=user_id)
+        return RagStatusResponse(**status_info)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Status check failed: {str(e)}")
 
 
 @router.delete("/index/{user_id}/{document_id}")

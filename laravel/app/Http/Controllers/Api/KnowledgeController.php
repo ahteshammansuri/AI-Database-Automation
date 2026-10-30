@@ -245,4 +245,45 @@ class KnowledgeController extends Controller
             ], 500);
         }
     }
+
+    /**
+     * Re-index all knowledge documents for the authenticated user.
+     */
+    public function reindex(Request $request, \App\Services\Knowledge\KnowledgeIndexerService $indexer)
+    {
+        try {
+            $results = $indexer->reindexUser($request->user()->id);
+            return response()->json([
+                'success' => true,
+                'message' => "Successfully indexed {$results['reindexed']} document(s) with {$results['total_vectors']} total vectors.",
+                'data' => $results,
+            ]);
+        } catch (\Throwable $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Re-indexing failed: ' . $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Get RAG status and vector metrics for the authenticated user.
+     */
+    public function status(Request $request)
+    {
+        $userId = $request->user()->id;
+        $status = $this->aiClient->getRagStatus($userId);
+
+        $dbDocs = KnowledgeDocument::where('user_id', $userId)->get(['id', 'title', 'chunk_count', 'vector_count', 'status']);
+
+        return response()->json([
+            'success' => true,
+            'rag' => $status,
+            'documents_count' => $dbDocs->count(),
+            'indexed_count' => count($status['document_ids'] ?? []),
+            'total_vectors' => $status['total_vectors'] ?? 0,
+            'backend' => $status['backend'] ?? 'unknown',
+            'healthy' => ($status['healthy'] ?? false) || $dbDocs->isEmpty(),
+        ]);
+    }
 }

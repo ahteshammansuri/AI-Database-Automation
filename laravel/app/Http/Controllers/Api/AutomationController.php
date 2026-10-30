@@ -773,7 +773,10 @@ class AutomationController extends Controller
         $contextPassages = [];
         if (!empty($validated['context_document_ids'])) {
             try {
-                foreach ($aiClient->queryKnowledge($request->user()->id, $topic, 3) as $c) {
+                $docIds = is_array($validated['context_document_ids'])
+                    ? array_values(array_filter(array_map('intval', $validated['context_document_ids'])))
+                    : [];
+                foreach ($aiClient->queryKnowledge($request->user()->id, $topic, 3, $docIds) as $c) {
                     if (!empty($c['text'])) {
                         $contextPassages[] = $c['text'];
                     }

@@ -151,3 +151,60 @@ def test_published_guides_replace_the_previous_set_and_no_files_are_kept(tmp_pat
 
     bad = client.post("/v1/rag/product-guides", headers=AUTH_HEADERS, json={"guides": [{"name": "../etc", "content": "x"}]})
     assert bad.status_code == 422
+
+
+def test_rag_document_filtering_and_status():
+    user_id = 8888
+    doc_a = 201
+    doc_b = 202
+
+    text_a = "Staff permissions guide: Granting supervisor roles and operator access."
+    text_b = "SEO optimization and keywords for blog writing and content engagement."
+
+    # Index doc_a
+    res_a = client.post(
+        "/v1/rag/index",
+        json={"user_id": user_id, "document_id": doc_a, "title": "Staff Guide", "text_content": text_a, "file_type": "txt"},
+        headers=AUTH_HEADERS
+    )
+    assert res_a.status_code == 200
+
+    # Index doc_b
+    res_b = client.post(
+        "/v1/rag/index",
+        json={"user_id": user_id, "document_id": doc_b, "title": "SEO Guide", "text_content": text_b, "file_type": "txt"},
+        headers=AUTH_HEADERS
+    )
+    assert res_b.status_code == 200
+
+    # Check status endpoint
+    status_res = client.get(f"/v1/rag/status/{user_id}", headers=AUTH_HEADERS)
+    assert status_res.status_code == 200
+    status_data = status_res.json()
+    assert status_data["user_id"] == user_id
+    assert status_data["total_vectors"] >= 2
+    assert doc_a in status_data["document_ids"]
+    assert doc_b in status_data["document_ids"]
+    assert status_data["healthy"] is True
+
+    # Query with document_ids=[doc_a] filter
+    q_res = client.post(
+        "/v1/rag/query",
+        json={
+            "user_id": user_id,
+            "query_text": "staff permissions and supervisor roles",
+            "top_k": 3,
+            "document_ids": [doc_a]
+        },
+        headers=AUTH_HEADERS
+    )
+    assert q_res.status_code == 200
+    chunks = q_res.json()["chunks"]
+    assert len(chunks) > 0
+    # Every returned chunk MUST belong to doc_a
+    for c in chunks:
+        assert c["document_id"] == doc_a
+
+    # Clean up
+    client.delete(f"/v1/rag/index/{user_id}/{doc_a}", headers=AUTH_HEADERS)
+    client.delete(f"/v1/rag/index/{user_id}/{doc_b}", headers=AUTH_HEADERS)
