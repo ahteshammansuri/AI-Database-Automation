@@ -53,7 +53,16 @@ class FieldPlanBuilder
         }
 
         $titleCol = $this->firstOfKind($info, 'title');
-        $valueNames = app(\App\Services\Data\SchemaRelations::class)->settings($connection)['values'][strtolower($table)] ?? [];
+        $catalog = app(\App\Services\Data\LiveSchemaService::class)->getCatalog($connection);
+        $tableMeta = $catalog['tables'][$table] ?? [];
+        // The customer's model reads the table (and the media table its images are kept in) in the background.
+        $insights = app(\App\Services\Data\TableInsightService::class);
+        $insight = $tableMeta ? $insights->ensure($connection, $table, $tableMeta) : null;
+        foreach ($info['columns'] as $c) {
+            if (!empty($c['media']['table']) && isset($catalog['tables'][$c['media']['table']])) {
+                $insights->ensure($connection, $c['media']['table'], $catalog['tables'][$c['media']['table']]);
+            }
+        }
         $dialect = new \App\Services\Data\Dialects\MySqlDialect();
         $columns = [];
         foreach ($info['columns'] as $name => $c) {
@@ -78,8 +87,12 @@ class FieldPlanBuilder
                 'relation' => $relation,
                 'family' => $family,
                 // A status-like column: its fixed value is chosen from the values it already holds.
-                'categorical' => !$relation && !$c['enum_values'] && \App\Services\Data\RelationInference::isCategorical($name, ['family' => $family, 'max_length' => $c['max_length']]),
-                'value_labels' => (object) ($valueNames[strtolower($name)] ?? []),
+                'categorical' => !$relation && !$c['enum_values'] && !empty($tableMeta['columns'][$name]['categorical']),
+                'value_labels' => (object) ($tableMeta['columns'][$name]['value_labels'] ?? []),
+                'value_labels_source' => $tableMeta['columns'][$name]['value_labels_source'] ?? null,
+                'ai_role' => $c['ai_role'] ?? null,
+                'ai_meaning' => $c['ai_meaning'] ?? null,
+                'media' => $c['media'] ?? null,
                 'suggested' => $this->suggestMapping($c, $relation, $titleCol),
             ];
         }
@@ -89,6 +102,7 @@ class FieldPlanBuilder
             'primary_key' => $info['primary_key'],
             'title_column' => $titleCol,
             'columns' => $columns,
+            'insight' => $insight,
         ];
     }
 
@@ -169,6 +183,15 @@ class FieldPlanBuilder
                 }
             }
 
+            if ($source === 'ai_image' && !empty($c['media'])) {
+                $mediaTable = $c['media']['table'];
+                if ($this->accessPolicy->getTableClass($connection, $mediaTable) !== 'writable' || $this->safety->isTableSensitive($mediaTable)) {
+                    $issues[] = ['level' => 'error', 'column' => $column, 'message' => "`{$column}` keeps its images in `{$mediaTable}`, which is protected, so new images cannot be added there. Pick an existing one or leave it empty."];
+                    continue;
+                }
+                $field['media'] = $c['media'];
+            }
+
             if ($source === 'slug') {
                 $field['slug_source'] = $m['source_field'] && isset($info['columns'][$m['source_field']]) ? $m['source_field'] : $titleCol;
             }
@@ -226,6 +249,15 @@ class FieldPlanBuilder
 
     public static function resolveSource(string $mappingType, array $c): string
     {
+        // An image kept as a row of a media table: AI generates it (a new media row), or one existing row is used.
+        if (!empty($c['media'])) {
+            return match ($mappingType) {
+                'AI_GENERATED' => 'ai_image',
+                'LEAVE_EMPTY' => 'empty',
+                'DB_DEFAULT' => 'db_default',
+                default => 'fixed_relation',
+            };
+        }
         $isFk = (bool) $c['foreign_key'];
         return match ($mappingType) {
             'AI_GENERATED' => $isFk ? 'ai_relation' : match ($c['kind']) {
@@ -338,6 +370,9 @@ class FieldPlanBuilder
             return $base + ['mapping_type' => $c['nullable'] ? 'LEAVE_EMPTY' : 'DB_DEFAULT'];
         }
 
+        if (!empty($c['media'])) {
+            return $base + ['mapping_type' => 'AI_GENERATED', 'reason' => 'An image is generated and added to ' . $c['media']['table'] . '.'];
+        }
         if ($relation) {
             $aiCanPick = !$relation['protected'] && $relation['label_column'] && ($relation['can_create'] || $relation['existing_count'] > 0);
             if ($aiCanPick) {

@@ -122,7 +122,8 @@ export const RowForm: React.FC<Props> = ({ scope, table, columns, values, onChan
               </label>
               {input}
               <FieldError id={fieldId(c.name)} message={err} />
-              {!err && c.comment && <p className="da-help">{c.comment}</p>}
+              {!err && (c.comment || c.ai_meaning) && <p className="da-help">{c.comment || c.ai_meaning}</p>}
+              {!err && c.choices === "values" && c.value_labels_source === "ai" && <p className="da-help text-violet-600">Value names given by your AI model; edit them in the Schema Explorer.</p>}
             </div>
           );
         })}

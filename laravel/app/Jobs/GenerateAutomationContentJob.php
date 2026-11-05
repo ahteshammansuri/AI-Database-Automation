@@ -121,6 +121,8 @@ class GenerateAutomationContentJob implements ShouldQueue
                     'rejection_feedback' => $this->rejectionFeedback,
                     'recent_titles' => $contextPackageService->loadRecentTitles($automation, 50),
                     'publication_time' => $execution->publication_time,
+                    // A scheduled run may wait for the AI to read a media table its images go into.
+                    'wait_for_insights' => true,
                 ],
                 fn(string $stage, string $message, ?array $meta = null) => $execution->addTimelineEvent($stage, $message, $meta)
             );

@@ -229,38 +229,44 @@ class SchemaIntrospectionService
      */
     public function generateTableProfileMarkdown(DbConnection $connection, array $table): string
     {
-        $name = $table['name'] ?? 'unknown';
-        $tier = $table['tier'] ?? 'UNKNOWN';
-        $eligible = !empty($table['eligible']) ? 'Yes' : 'No';
+        $name = $table['name'] ?? ($table['table_name'] ?? 'unknown');
+        // Scanned tables (eligibility_tier, is_primary_key, relationships) and the shorter shape (tier, is_pk, fk_table).
+        $tier = $table['eligibility_tier'] ?? $table['category'] ?? $table['tier'] ?? 'UNKNOWN';
+        $eligible = !empty($table['eligible_for_automation'] ?? $table['eligible'] ?? false) ? 'Yes' : 'No';
         $approxRows = $table['approx_rows'] ?? 0;
-        $notes = $table['user_notes'] ?? 'None';
+        $notes = ($table['ai_suggestion']['user_notes'] ?? null) ?: (($table['user_notes'] ?? null) ?: 'None');
+        $summary = $table['ai']['summary'] ?? null;
 
         $pks = [];
-        $fks = [];
         $colLines = [];
-
         foreach ($table['columns'] ?? [] as $col) {
             $cName = $col['name'] ?? '';
-            $cType = $col['type'] ?? $col['data_type'] ?? 'varchar';
-            $nullable = !empty($col['nullable']) ? 'nullable' : 'NOT NULL';
-            $maxLen = !empty($col['max_length']) ? "max={$col['max_length']}" : null;
-            $enums = !empty($col['enum_values']) ? 'enum=[' . implode(', ', $col['enum_values']) . ']' : null;
-            $attrs = array_filter([$nullable, $maxLen, $enums]);
-            $attrStr = $attrs ? ' (' . implode(', ', $attrs) . ')' : '';
-
-            $colLines[] = "- `{$cName}`: `{$cType}`{$attrStr}";
-
-            if (!empty($col['is_pk'])) {
+            if ($cName === '' || ($col['sensitivity'] ?? null) === 'secret') {
+                continue;
+            }
+            $attrs = array_filter([
+                ($col['is_nullable'] ?? $col['nullable'] ?? true) ? 'nullable' : 'NOT NULL',
+                !empty($col['max_length']) ? "max={$col['max_length']}" : null,
+                !empty($col['enum_values']) ? 'enum=[' . implode(', ', $col['enum_values']) . ']' : null,
+                !empty($col['value_labels']) ? 'codes: ' . implode(', ', array_map(fn ($v, $l) => "{$v} = {$l}", array_keys($col['value_labels']), $col['value_labels'])) : null,
+            ]);
+            $meaning = !empty($col['ai_meaning']) ? " — {$col['ai_meaning']}" . (!empty($col['ai_role']) ? " ({$col['ai_role']})" : '') : '';
+            $colLines[] = "- `{$cName}`: `" . ($col['type'] ?? $col['data_type'] ?? 'varchar') . '`' . ($attrs ? ' (' . implode(', ', $attrs) . ')' : '') . $meaning;
+            if (!empty($col['is_primary_key']) || !empty($col['is_pk'])) {
                 $pks[] = $cName;
             }
-            if (!empty($col['fk_table'])) {
-                $fks[] = "`{$cName}` → `{$col['fk_table']}`";
+        }
+        $links = array_map(fn ($r) => "`{$r['foreign_key']}` → `{$r['referenced_table']}`" . (!empty($r['source']) && $r['source'] !== 'declared' ? " ({$r['source']})" : ''), $table['relationships'] ?? []);
+        foreach ($table['columns'] ?? [] as $col) {
+            if (!empty($col['fk_table']) && !in_array($col['name'], array_column($table['relationships'] ?? [], 'foreign_key'), true)) {
+                $links[] = "`{$col['name']}` → `{$col['fk_table']}`";
             }
         }
 
         $pkStr = $pks ? implode(', ', $pks) : 'None';
-        $fkStr = $fks ? implode('; ', $fks) : 'None';
+        $fkStr = $links ? implode('; ', $links) : 'None';
         $colsFormatted = implode("\n", $colLines);
+        $about = $summary ? "\n- **What a row is**: {$summary}" : '';
 
         $guidance = match ($tier) {
             'RECOMMENDED' => 'This is an approved editorial/content table. Safe for parameterized automated operations.',
@@ -275,8 +281,8 @@ class SchemaIntrospectionService
 - **Eligibility Tier**: {$tier} (Automation Eligible: {$eligible})
 - **Approximate Rows**: {$approxRows}
 - **Primary Key**: {$pkStr}
-- **Foreign Keys**: {$fkStr}
-- **Workspace Notes**: {$notes}
+- **Links to other tables**: {$fkStr}
+- **Workspace Notes**: {$notes}{$about}
 
 ## Columns & Constraints
 {$colsFormatted}
@@ -286,24 +292,43 @@ class SchemaIntrospectionService
 MD;
     }
 
+    /** Stable index id of a table's profile: one per connection and table, so profiles never overwrite each other. */
+    public static function profileDocumentId(DbConnection $connection, string $table): int
+    {
+        return 1_000_000_000 + (int) (sprintf('%u', crc32("{$connection->id}:{$table}")) % 1_000_000_000);
+    }
+
     /**
-     * Index Table Profiles into the Python AI RAG service for semantic retrieval.
+     * Index Table Profiles into the Python AI RAG service for semantic retrieval. Profiles carry the effective links,
+     * value names and the AI's reading of each column (SchemaRelations), so retrieval sees the current understanding.
      */
     public function indexTableProfilesIntoRag(DbConnection $connection, array $tables): int
     {
+        try {
+            $tables = app(\App\Services\Data\SchemaRelations::class)->decorateSnapshot($connection, ['tables' => array_values($tables)])['tables'];
+        } catch (\Throwable $e) {
+            Log::debug('[SchemaIntrospection] Profiles indexed without links/insights: ' . $e->getMessage());
+        }
+        // Profiles were once stored under ids that collided (100000 + connection*100 + position); remove those once.
+        if (\Illuminate\Support\Facades\Cache::add("table_profiles_legacy_removed:{$connection->id}", true, now()->addYears(5))) {
+            for ($i = 0; $i < 100; $i++) {
+                try {
+                    $this->aiClient->deleteDocument($connection->user_id, 100000 + ($connection->id * 100) + $i);
+                } catch (\Throwable) {
+                    break; // AI service not reachable: nothing to clean up now
+                }
+            }
+        }
         $indexed = 0;
-        foreach ($tables as $index => $table) {
+        foreach ($tables as $table) {
             $tableName = $table['name'] ?? '';
             try {
                 if (!$tableName) continue;
 
                 $profile = $this->generateTableProfileMarkdown($connection, $table);
-                // Unique document ID derived from connection and index
-                $docId = (int) (100000 + ($connection->id * 100) + ($index % 100));
-
                 $this->aiClient->indexDocument(
                     userId: $connection->user_id,
-                    docId: $docId,
+                    docId: self::profileDocumentId($connection, $tableName),
                     title: "Table Profile: {$tableName}",
                     textContent: $profile,
                     fileType: 'md'

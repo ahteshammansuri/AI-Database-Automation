@@ -490,3 +490,19 @@ All endpoints require `auth:sanctum` and act on the signed-in customer's own con
 | `GET .../values/{column}`, `GET .../form`, `POST .../validate-row` | As above, for the Data page. |
 | `POST .../preview-insert`, `.../preview-update` | A linked column may hold `{"$new": {name_column: "…", other: …}}`: the new parent is validated (errors also in `parent_errors`), a row with the same name is reused when only a name was typed (`reused[]`), otherwise it is listed in `new_parents[]` and added first on confirm, in the same transaction. Inserts return `labels` for linked ids; updates return `labels {column: {before, after}}`. |
 | `POST /api/data/changes/{id}/confirm`, `.../undo` | Confirm also reports `linked_rows_added`; Undo removes those rows again unless another row now uses them. |
+
+
+## AI table reading, parent decisions and media rows (2026-10-30)
+
+| Endpoint | Purpose |
+| :--- | :--- |
+| `GET /api/connections/{id}/tables/{table}/insights` | The customer's model's reading of the table: `{status: pending|ready|failed|unavailable, source: model|embeddings, model, summary, columns {name: {role, meaning, references_table, value_names, values}}, progress {read, total}, error}`. Starts the reading when there is none or the columns changed. |
+| `POST /api/connections/{id}/tables/{table}/insights` | Read the table again (throttled). |
+| `POST /api/automations/field-plan` | Adds `insight` (as above) and per column `ai_role`, `ai_meaning`, `media {table, column}` (an image kept as a row of a media table), `value_labels_source` (`owner`/`ai`). |
+| `GET /api/connections/{id}/schema`, `GET /api/data/.../rows` | Links may have `source: "ai"`; columns add `ai_role`, `ai_meaning`, `value_labels_source`; tables add `ai {status, source, summary}`; rows responses add `ai {status, progress}`. |
+| `GET .../links/{column}`, `GET /api/connections/{id}/links/options` | `media: true` for image-reference columns; `create.mode: "upload"` (allowed once the media table has been read). |
+| `POST .../preview-insert`, `.../preview-update`, `POST /api/automations/manual-publish` | A new media row from an uploaded image: Data page `{"$new": {"$media": {"asset_id": N, "name": "..."}}}`; manual publishing `relation_values.column = {"$media": {...}}` with `relation_policies.column = CREATE_IF_MISSING`. The asset must belong to the signed-in user. |
+| AI service `POST /v1/schema/interpret-table` | `{provider, model, api_key, user_id, table, columns[], other_tables[], focus[], budget_seconds}` -> `{source, columns, summary, hints, open_columns, media_tables, problems}`; each column `{role, meaning, references_table, value_names, meaning_role}` (`meaning_role`: the role closest to the model's own meaning, Laravel's fallback when a claimed link matches no stored value). `other_tables[]` items: `{name, description, key, columns[], media}`. |
+| AI service `POST /v1/schema/check-link` | `{provider, model, api_key, table, column, meaning, ref_table, rows[{value, label}], budget_seconds}` -> `{decision: link|code, reason, value_names, source, problems}`. Called by Laravel only for a claimed link whose meaning reads like a coded state; without a model the link stands. |
+| AI service `POST /v1/schema/choose-parent` | `{provider, model, api_key, entity, content {title, summary, topic, suggestion}, candidates[], allow_new}` -> `{decision: existing|new, label, reason, ranked[], source}`. |
+| AI service `POST /v1/rag/classify-fields` | **Removed** (rule-based classifier that nothing used). |

@@ -343,6 +343,9 @@ export const api = {
     request<{ labels: Record<string, string>; message: string }>(`/connections/${connectionId}/tables/${encodeURIComponent(table)}/columns/${encodeURIComponent(column)}/value-labels`, { method: "PUT", body: JSON.stringify({ labels }) }),
   setDisplayColumn: (connectionId: number, table: string, column: string | null) =>
     request<{ label_column: string | null; display_column: string | null; message: string }>(`/connections/${connectionId}/tables/${encodeURIComponent(table)}/display-column`, { method: "PUT", body: JSON.stringify({ column }) }),
+  /** What the customer's AI model has read about a table (starts the reading when needed; `again` reads it anew). */
+  tableInsights: (connectionId: number, table: string, again = false) =>
+    request<any>(`/connections/${connectionId}/tables/${encodeURIComponent(table)}/insights`, again ? { method: "POST" } : { forceRefresh: true }),
   /** How many sampled values of a column exist in each table (read-only, bounded). */
   checkLink: (connectionId: number, table: string, column: string, refTables: string[]) =>
     request<{ sampled: number; results: { ref_table: string; found: number; sampled: number; verdict: string; message: string }[] }>(

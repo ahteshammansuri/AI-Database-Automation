@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Check, ChevronDown, Link2, Loader2, Lock, PencilLine, Plus, Search, Sparkles, X } from "lucide-react";
+import { Check, ChevronDown, ImagePlus, Link2, Loader2, Lock, PencilLine, Plus, Search, Sparkles, X } from "lucide-react";
 import { api } from "../../services/api";
 import { NewRecordModal } from "./NewRecordModal";
-import { blankValue, isNewLink, linkSourceText, newLink, type LinkOption, type LinkOptions, type LinkScope } from "./linkValue";
+import { blankValue, isNewLink, linkSourceText, newLink, newUpload, type LinkOption, type LinkOptions, type LinkScope } from "./linkValue";
 import { useDropdown } from "./useDropdown";
 
 interface Props {
@@ -46,6 +46,9 @@ export const LinkPicker: React.FC<Props> = ({ id, scope, table, column, value, o
   const [known, setKnown] = useState<Record<string, string>>(() => (initialLabel && !blankValue(value) && !isNewLink(value) ? { [String(value)]: initialLabel } : {}));
   const [active, setActive] = useState(0);
   const [modal, setModal] = useState<{ prefill: Record<string, any> } | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
   const loadedFor = useRef<string | null>(null);
   const reportLoaded = useRef(onLoaded);
   useEffect(() => { reportLoaded.current = onLoaded; });
@@ -149,14 +152,22 @@ export const LinkPicker: React.FC<Props> = ({ id, scope, table, column, value, o
   }
   // The rows come first, then any message about them, then the ways to add a new row.
   const firstCreate = items.length;
-  if (canCreate && typed && !exact && !loading) {
+  const uploadMode = create?.mode === "upload";
+  if (canCreate && uploadMode) {
+    items.push({
+      key: "upload",
+      run: () => { dd.close(); fileInput.current?.click(); },
+      node: <span className="flex items-center gap-1.5 font-semibold text-indigo-700"><ImagePlus className="h-3.5 w-3.5" /> Upload a new image…</span>,
+    });
+  }
+  if (canCreate && !uploadMode && typed && !exact && !loading) {
     items.push({
       key: "new",
       run: () => addNew(typed),
       node: <span className="flex items-center gap-1.5 font-semibold text-indigo-700"><Plus className="h-3.5 w-3.5" /> Add “{typed}” as a new {thing}{create!.mode === "details" ? "…" : ""}</span>,
     });
   }
-  if (canCreate) {
+  if (canCreate && !uploadMode) {
     items.push({
       key: "details",
       run: () => { dd.close(); setModal({ prefill: create!.label_column && typed ? { [create!.label_column]: typed } : {} }); },
@@ -190,6 +201,21 @@ export const LinkPicker: React.FC<Props> = ({ id, scope, table, column, value, o
     </button>
   );
 
+  const upload = async (file: File | undefined) => {
+    if (!file) return;
+    setUploading(true);
+    setUploadError(null);
+    try {
+      const asset = await api.uploadMedia(file);
+      onChange(newUpload(asset, file.name));
+    } catch (e: any) {
+      setUploadError(e.message || "The image could not be uploaded.");
+    } finally {
+      setUploading(false);
+      if (fileInput.current) fileInput.current.value = "";
+    }
+  };
+
   const pickedLabel = !blankValue(value) && !isNewLink(value) ? known[String(value)] : undefined;
   const missing = !!info && !loading && !blankValue(value) && !isNewLink(value) && !isNone && pickedLabel === "";
 
@@ -198,13 +224,13 @@ export const LinkPicker: React.FC<Props> = ({ id, scope, table, column, value, o
       {isNewLink(value) ? (
         <div id={id} aria-invalid={invalid || undefined} aria-describedby={describedBy}
           className={`flex min-h-[2.6rem] items-center gap-2 rounded-xl border bg-indigo-50/50 px-3 py-1.5 text-[13px] ${invalid ? "border-rose-300" : "border-indigo-200"}`}>
-          <Sparkles className="h-3.5 w-3.5 shrink-0 text-indigo-500" />
+          {value.preview ? <img src={value.preview} alt="" className="h-8 w-12 shrink-0 rounded-md border border-indigo-100 object-cover" /> : <Sparkles className="h-3.5 w-3.5 shrink-0 text-indigo-500" />}
           <span className="min-w-0 flex-1 leading-tight">
             <span className="block truncate font-semibold text-slate-900">{value.label || `New ${thing}`}</span>
             <span className="block truncate text-[11px] font-medium text-indigo-700">New {thing} · added when you save</span>
           </span>
           <span className="flex shrink-0 items-center gap-0.5">
-            {create && (
+            {create && create.mode !== "upload" && (
               <button type="button" onClick={() => setModal({ prefill: value.$new })} className="da-icon-btn h-7 w-7" title={`Edit the new ${thing}`} aria-label={`Edit the new ${thing}`}><PencilLine className="h-3.5 w-3.5" /></button>
             )}
             <button type="button" onClick={() => onChange(info?.none.allowed ? info.none.value : null)} className="da-icon-btn h-7 w-7" title="Remove" aria-label={`Do not add the new ${thing}`}><X className="h-3.5 w-3.5" /></button>
@@ -266,6 +292,13 @@ export const LinkPicker: React.FC<Props> = ({ id, scope, table, column, value, o
           )}
         </div>
       )}
+
+      {canCreate && uploadMode && (
+        <input ref={fileInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif" className="hidden" aria-label={`Upload an image for ${column}`}
+          onChange={(e) => upload(e.target.files?.[0])} />
+      )}
+      {uploading && <p className="mt-1 flex items-center gap-1.5 text-[12px] text-slate-500"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Uploading the image…</p>}
+      {uploadError && <p className="mt-1 text-[12px] text-rose-600">{uploadError}</p>}
 
       {modal && info && (
         <NewRecordModal open scope={scope} table={info.ref_table} thing={thing} prefill={modal.prefill}

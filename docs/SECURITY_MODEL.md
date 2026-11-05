@@ -165,3 +165,12 @@ The backend enforces the access mode regardless of the database user's privilege
 | Personal data in pending changes | New linked rows are stored in `data_change_requests.linked_parents` with Laravel's encrypted cast; previews mask personal values; audit records keep only table and id. |
 | Reading customer rows | Value choices read at most 5,000 rows of one column; a link check reads at most 2,000 rows and 50 distinct values, then counts matching keys; both run in read-only transactions with the statement time limit, only when the owner asks. Detection itself reads metadata only. |
 | Cross-customer access | Every link, value and picker endpoint resolves the connection through the signed-in owner (`404` otherwise); owner settings are scoped by connection and user. |
+
+
+## AI table reading and media rows (2026-10-30, ADR-022)
+| Risk | Control |
+| :--- | :--- |
+| Customer data sent to a cloud model | The reading sends column names and types; stored value counts and up to three short examples per column only to a local model, or to a cloud model when the customer's `privacy_mode` is `cloud_with_results`. Secret and personal columns are never sampled or sent. The link check (`/v1/schema/check-link`) sends the names of the rows a column's values would point to under the same rule, and only for a claimed link whose meaning reads like a code. |
+| A wrong or invented AI answer driving writes | Answers are validated twice (AI service and Laravel): only existing columns, roles that fit the column type, references to real non-credential tables with a compatible key whose keys the column's stored values actually are (bounded sample read in Laravel), names only for values that are stored. Every write still passes the executor's checks and the preview. |
+| Media rows pointing at someone else's file | An uploaded image is referenced by asset id and must belong to the signed-in user; the server builds the media row from its own record (never from a URL sent by the browser). |
+| Background work starving publishing | Table readings run on the `insights` queue, served after `default`; one small batch per job; a failed reading is not retried on every page view (10-minute pause, or "Read again"). |

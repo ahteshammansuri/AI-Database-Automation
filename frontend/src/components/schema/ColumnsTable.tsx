@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { EyeOff, Key, Link as LinkIcon, ListFilter, Lock, PencilLine, Search } from "lucide-react";
+import { Brain, EyeOff, Key, Link as LinkIcon, ListFilter, Lock, PencilLine, Search } from "lucide-react";
 import type { SchemaTable } from "../../types";
 import { addRule, requiredColumns } from "./schemaFacts";
 import { LinkSourceBadge } from "./RelationshipMap";
@@ -85,6 +85,11 @@ export const ColumnsTable: React.FC<Props> = ({ table, onOpenTable, onEditLink, 
                         </span>
                       )}
                     </span>
+                    {col.ai_meaning && (
+                      <span className="mt-1 flex max-w-[16rem] items-start gap-1 text-[11px] leading-snug text-slate-500" title={`Read by your AI model${col.ai_role ? ` as ${col.ai_role.replace(/_/g, " ")}` : ""}`}>
+                        <Brain className="mt-0.5 h-3 w-3 shrink-0 text-violet-400" /> {col.ai_meaning}
+                      </span>
+                    )}
                   </td>
                   <td className="font-mono font-medium text-indigo-600">{col.type || col.data_type}</td>
                   <td>
@@ -121,10 +126,11 @@ export const ColumnsTable: React.FC<Props> = ({ table, onOpenTable, onEditLink, 
                     ) : col.categorical || Object.keys(col.value_labels ?? {}).length > 0 ? (
                       <span className="flex flex-wrap items-center gap-1">
                         {Object.entries(col.value_labels ?? {}).slice(0, 6).map(([v, l]) => (
-                          <span key={v} className="rounded-md bg-slate-100 px-1.5 py-0.5 text-[11.5px] text-slate-700"><span className="font-mono">{v}</span> = {l}</span>
+                          <span key={v} className={`rounded-md px-1.5 py-0.5 text-[11.5px] ${col.value_labels_source === "ai" ? "bg-violet-50 text-violet-800" : "bg-slate-100 text-slate-700"}`}><span className="font-mono">{v}</span> = {l}</span>
                         ))}
+                        {col.value_labels_source === "ai" && <span className="inline-flex items-center gap-0.5 text-[10.5px] text-violet-500" title="Named by your AI model from the stored values. Edit the names to make them yours."><Brain className="h-3 w-3" /> by AI</span>}
                         <button type="button" onClick={() => onNameValues(col.name)} className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-1.5 py-0.5 text-[11px] font-medium text-slate-600 hover:border-indigo-300 hover:text-indigo-700">
-                          <ListFilter className="h-3 w-3" /> {Object.keys(col.value_labels ?? {}).length ? "Edit names" : "Name values"}
+                          <ListFilter className="h-3 w-3" /> {Object.keys(col.value_labels ?? {}).length ? (col.value_labels_source === "ai" ? "Check names" : "Edit names") : "Name values"}
                         </button>
                       </span>
                     ) : col.max_length ? (

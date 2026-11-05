@@ -25,7 +25,7 @@ export interface RelationInfo {
   table: string;
   column: string;
   /** declared by the database, detected from the column name, or set by the owner in the Schema Explorer. */
-  source?: "declared" | "detected" | "owner";
+  source?: "declared" | "detected" | "owner" | "ai";
   label_column: string | null;
   entity: string;
   existing_count: number;
@@ -54,9 +54,26 @@ export interface PlanColumn {
   family?: string;
   /** A status-like column: a fixed value is picked from the values it holds. */
   categorical?: boolean;
-  /** The owner's names for stored values. */
+  /** The owner's names for stored values, or the names the customer's AI model gave them. */
   value_labels?: Record<string, string>;
+  value_labels_source?: "owner" | "ai" | null;
+  /** What the customer's AI model read the column as (role and plain meaning). */
+  ai_role?: string | null;
+  ai_meaning?: string | null;
+  /** An image kept as a row of a media table (generated images become a new row there). */
+  media?: { table: string; column: string } | null;
   suggested: Mapping;
+}
+
+/** The AI model's reading of the table (TableInsightService), shown above the columns. */
+export interface TableInsight {
+  status: "pending" | "ready" | "failed" | "unavailable";
+  source?: "model" | "embeddings" | null;
+  model?: string | null;
+  summary?: string | null;
+  progress?: { read: number; total: number } | null;
+  error?: string | null;
+  problems?: string[];
 }
 
 export interface FieldPlan {
@@ -65,6 +82,7 @@ export interface FieldPlan {
   title_column: string | null;
   columns: PlanColumn[];
   image_provider?: { provider: string; model: string | null; reason: string };
+  insight?: TableInsight | null;
 }
 
 /** UI-level choice; several map to the same mapping_type with different relation policies. */
@@ -74,6 +92,9 @@ const TEXT_KINDS = ["title", "summary", "body", "meta_title", "meta_description"
 
 export function modeOf(m: Mapping | undefined, col: PlanColumn): Mode {
   if (!m) return col.has_default ? "DEFAULT" : col.nullable ? "EMPTY" : "FIXED";
+  if (col.media) {
+    return m.mapping_type === "AI_GENERATED" ? "AI" : m.mapping_type === "LEAVE_EMPTY" ? "EMPTY" : m.mapping_type === "DB_DEFAULT" ? "DEFAULT" : "FIXED_REL";
+  }
   switch (m.mapping_type) {
     case "AI_GENERATED":
       if (col.relation) return m.relation_config?.creation_policy === "REUSE_EXISTING_ONLY" || !col.relation.can_create ? "AI_REUSE" : "AI_CREATE";
@@ -99,6 +120,13 @@ export function modeOptions(col: PlanColumn): { value: Mode; label: string }[] {
   const add = (value: Mode, label: string) => out.push({ value, label });
   if (col.is_secret) return out;
   const r = col.relation;
+  if (col.media) {
+    add("AI", `Generate an image (saved as a new row in ${col.media.table})`);
+    if (r) add("FIXED_REL", `Always the same image from ${col.media.table}`);
+    if (col.nullable) add("EMPTY", "Leave empty");
+    if (col.has_default) add("DEFAULT", "Database default");
+    return out;
+  }
   if (r) {
     if (!r.protected && r.label_column) {
       if (r.can_create) add("AI_CREATE", `AI chooses or creates a ${r.entity} (recommended)`);
@@ -189,6 +217,9 @@ export function explain(col: PlanColumn, m: Mapping | undefined, ctx: { titleCol
   if (col.is_secret) return "Protected column: automations never read or write it.";
   switch (mode) {
     case "AI":
+      if (col.media) {
+        return `An image is created from the generated title and summary, saved as a new row in “${col.media.table}” (address, name and size go where your AI model read they belong), and that row's id is stored here.`;
+      }
       if (col.kind === "image") {
         // Same name rules as the server (ImageFieldService::roleFor).
         const n = col.name.toLowerCase();
@@ -265,16 +296,28 @@ export function serializeMappings(plan: FieldPlan | null, mappings: Record<strin
     .map((c) => mappings[c.name]);
 }
 
+const CONTENT_KINDS = ["title", "summary", "body", "image", "slug", "meta_title", "meta_description", "keywords"];
+
+/**
+ * Sections of the field step, in the order people decide them: linked records first, then the content, then the
+ * other columns the table requires (never hidden), then optional columns. A column set to "Leave empty" moves to the
+ * end of the optional ones.
+ */
 export function groupColumns(plan: FieldPlan, mappings: Record<string, Mapping>) {
-  const content: PlanColumn[] = [];
   const relations: PlanColumn[] = [];
+  const content: PlanColumn[] = [];
+  const required: PlanColumn[] = [];
   const other: PlanColumn[] = [];
+  const empty: PlanColumn[] = [];
   const secret: PlanColumn[] = [];
   for (const c of plan.columns) {
+    const mode = modeOf(mappings[c.name], c);
     if (c.is_secret) secret.push(c);
-    else if (c.relation) relations.push(c);
-    else if (["title", "summary", "body", "image", "slug", "meta_title", "meta_description", "keywords"].includes(c.kind) || modeOf(mappings[c.name], c) === "AI") content.push(c);
+    else if (mode === "EMPTY") empty.push(c);
+    else if (c.relation && !c.media) relations.push(c);
+    else if (CONTENT_KINDS.includes(c.kind) || mode === "AI") content.push(c);
+    else if (!c.nullable) required.push(c);
     else other.push(c);
   }
-  return { content, relations, other, secret };
+  return { relations, content, required, other: [...other, ...empty], secret };
 }

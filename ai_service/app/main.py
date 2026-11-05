@@ -9,6 +9,7 @@ from ai_service.app.routers.agent import router as agent_router
 from ai_service.app.routers.sql import router as sql_router
 from ai_service.app.routers.data import router as data_router
 from ai_service.app.routers.media import router as media_router
+from ai_service.app.routers.schema import router as schema_router
 
 app = FastAPI(
     title="Dedicated AI & RAG Service",
@@ -65,6 +66,7 @@ app.include_router(agent_router)
 app.include_router(sql_router)
 app.include_router(data_router)
 app.include_router(media_router)
+app.include_router(schema_router)
 
 
 if __name__ == "__main__":

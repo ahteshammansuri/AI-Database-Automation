@@ -47,6 +47,11 @@ export interface SchemaColumn {
   value_labels?: Record<string, string>;
   /** The owner's link setting for this column: auto (what was found), link (set by the owner) or none. */
   link_setting?: "auto" | "link" | "none";
+  /** Who named the values: the owner, or the customer's AI model. */
+  value_labels_source?: "owner" | "ai" | null;
+  /** What the customer's AI model read the column as: its role and a plain meaning. */
+  ai_role?: string | null;
+  ai_meaning?: string | null;
 }
 
 export interface SchemaRelationship {
@@ -55,7 +60,7 @@ export interface SchemaRelationship {
   referenced_table: string;
   referenced_column: string;
   /** declared by the database (enforced), detected from the column name, or set by the owner. */
-  source?: "declared" | "detected" | "owner";
+  source?: "declared" | "detected" | "owner" | "ai";
   enforced?: boolean;
   rule?: string;
   /** Why the link exists, in plain words. */
@@ -85,6 +90,8 @@ export interface SchemaTable {
   /** The column that names this table's rows in every picker, and the owner's choice for it (null = automatic). */
   label_column?: string | null;
   display_column?: string | null;
+  /** The AI model's reading of the table. */
+  ai?: { status: string; source: string | null; summary: string | null; analyzed_at: string | null } | null;
   ai_suggestion?: {
     purpose?: string;
     concept?: string;

@@ -121,6 +121,8 @@ Route::middleware(['auth:sanctum', \App\Http\Middleware\EnsureCustomerActive::cl
         Route::put('/connections/{id}/tables/{table}/columns/{column}/link', 'setLink')->whereNumber('id')->where($t);
         Route::put('/connections/{id}/tables/{table}/columns/{column}/value-labels', 'setValueLabels')->whereNumber('id')->where($t);
         Route::put('/connections/{id}/tables/{table}/display-column', 'setDisplayColumn')->whereNumber('id')->where($t);
+        Route::get('/connections/{id}/tables/{table}/insights', 'insights')->whereNumber('id')->where($t)->middleware('throttle:240,1');
+        Route::post('/connections/{id}/tables/{table}/insights', 'insights')->whereNumber('id')->where($t)->middleware('throttle:20,1');
     });
 
     // AI Providers

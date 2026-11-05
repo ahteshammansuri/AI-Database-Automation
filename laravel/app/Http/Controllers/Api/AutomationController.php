@@ -577,11 +577,31 @@ class AutomationController extends Controller
                 $relationOptions[$col] = ['creation_policy' => $policy];
             }
         }
-        // Details entered for a new linked record ("add with details"), checked again by the executor.
+        // Details entered for a new linked record ("add with details"), checked again by the executor. An uploaded image
+        // for a media table ({"$media": {asset_id}}) becomes that table's new row, filled from the AI's reading of it.
         foreach ((array) ($validated['relation_values'] ?? []) as $col => $values) {
-            if (is_string($col) && isset($relationOptions[$col]) && $relationOptions[$col]['creation_policy'] === 'CREATE_IF_MISSING') {
-                $relationOptions[$col]['parent_values'] = array_filter((array) $values, fn ($v, $k) => is_string($k) && !is_array($v), ARRAY_FILTER_USE_BOTH);
+            if (!is_string($col) || !isset($relationOptions[$col]) || $relationOptions[$col]['creation_policy'] !== 'CREATE_IF_MISSING') {
+                continue;
             }
+            $values = (array) $values;
+            if (is_array($values['$media'] ?? null)) {
+                $link = collect(app(\App\Services\Data\LiveSchemaService::class)->getCatalog($connection)['tables'][$validated['target_table']]['foreign_keys'] ?? [])
+                    ->first(fn ($fk) => ($fk['columns'] ?? []) === [$col]);
+                $asset = \App\Models\MediaAsset::where('user_id', $request->user()->id)->find((int) ($values['$media']['asset_id'] ?? 0));
+                if (!$link || !$asset) {
+                    return response()->json(['message' => 'The uploaded image could not be used. Upload it again.', 'errors' => ["payload.{$col}" => ['Upload the image again.']]], 422);
+                }
+                try {
+                    $media = app(\App\Services\Data\MediaRowBuilder::class)->forAsset($connection, $link['ref_table'], $asset, (string) ($values['$media']['name'] ?? $asset->original_filename ?? 'image'));
+                } catch (\App\Services\Data\DataException $e) {
+                    return response()->json(['message' => $e->getMessage(), 'errors' => ["payload.{$col}" => [$e->getMessage()]]], 422);
+                }
+                $payload[$col] = $media['label'];
+                $relationOptions[$col] += ['referenced_table' => $link['ref_table'], 'referenced_column' => $link['ref_columns'][0], 'always_new' => true];
+                $relationOptions[$col]['parent_values'] = $media['values'];
+                continue;
+            }
+            $relationOptions[$col]['parent_values'] = array_filter($values, fn ($v, $k) => is_string($k) && !is_array($v), ARRAY_FILTER_USE_BOTH);
         }
 
         // Always plan first: nothing is written if the plan has errors.

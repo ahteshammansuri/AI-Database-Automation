@@ -175,10 +175,14 @@ class DataExplorerController extends Controller
             AuditLog::log($request->user()->id, 'data.pii_revealed', 'db_connections', (string) $connection->id, ['table' => $table, 'rows' => count($rows)]);
         }
 
+        // The customer's model reads the table in the background the first time it is opened (value names, images ...).
+        $ai = app(\App\Services\Data\TableInsightService::class)->ensure($connection, $table, $meta);
+
         return response()->json([
             'table' => $table,
             'primary_key' => $pk,
             'label_column' => $meta['label_column'] ?? null,
+            'ai' => ['status' => $ai['status'] ?? null, 'source' => $ai['source'] ?? null, 'progress' => $ai['progress'] ?? null],
             'columns' => $this->linked->columnsFor($meta, $names),
             'hidden_columns' => array_values(array_diff(array_keys($meta['columns']), $names)),
             'rows' => $rows,

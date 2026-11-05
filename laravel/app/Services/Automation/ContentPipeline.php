@@ -227,6 +227,12 @@ class ContentPipeline
                 case 'ai_relation':
                     $rel = $f['relation'];
                     $label = trim((string) ($data[$col] ?? ''));
+                    // A separate decision once the content exists: does an existing parent really fit it, or is a new one needed?
+                    $decided = $isManual ? null : $this->decideParent($automation, $col, $rel, $label, $data, $aiText, $log);
+                    $reason = $decided['reason'] ?? null;
+                    if ($decided) {
+                        $label = $decided['label'];
+                    }
                     if ($label === '') {
                         if ($c['nullable']) {
                             $payload[$col] = null;
@@ -259,6 +265,7 @@ class ContentPipeline
                         'label' => $final,
                         'decision' => $existing !== null ? 'reuse' : 'create',
                         'description' => $description !== '' ? $description : null,
+                        'reason' => $reason,
                     ];
                     // The image prompt and cover label prefer a category-like parent, else the first parent.
                     if (str_contains($col, 'categor')) {
@@ -326,7 +333,24 @@ class ContentPipeline
                 }
                 try {
                     $img = $this->images->generate($automation, $col, $f['meta'], $context, $log);
-                    $payload[$col] = $img['value'];
+                    if (!empty($f['media'])) {
+                        // The column keeps images as rows of a media table: the new image becomes such a row first.
+                        $row = $this->mediaRow($automation, $connection, $f['media'], $img['meta'], (string) ($context['title'] ?? $automation->name), !empty($options['wait_for_insights']), $log);
+                        $payload[$col] = $row['label'];
+                        $relationOptions[$col] = [
+                            'referenced_table' => $f['media']['table'],
+                            'referenced_column' => $f['media']['column'],
+                            'creation_policy' => 'CREATE_IF_MISSING',
+                            'parent_values' => $row['values'],
+                            'always_new' => true,
+                        ];
+                        $img['meta']['stored_as'] = "a new row in {$f['media']['table']}";
+                        foreach ($row['notes'] as $note) {
+                            $meta['issues'][] = ['level' => 'info', 'column' => $col, 'message' => $note];
+                        }
+                    } else {
+                        $payload[$col] = $img['value'];
+                    }
                     $meta['media'][] = $img['meta'];
                 } catch (\Throwable $e) {
                     if (!$f['meta']['nullable']) {
@@ -490,6 +514,84 @@ class ContentPipeline
             }
         }
         return null;
+    }
+
+    /**
+     * Where new content belongs: the customer's model compares the written content with the existing parents (ranked
+     * by meaning with embeddings) and either picks one that clearly fits or names a new one (only when creating is
+     * allowed). Returns null when no decision could be made (the suggestion from the writing call is used then).
+     *
+     * @return array{label: string, decision: string, reason: string}|null
+     */
+    private function decideParent(Automation $automation, string $col, array $rel, string $suggested, array $data, array $aiText, callable $log): ?array
+    {
+        $titleCol = $this->firstField($aiText, 'title');
+        $summaryCol = $this->firstField($aiText, 'summary') ?? $this->firstField($aiText, 'meta_description');
+        $bodyCol = $this->firstField($aiText, 'body');
+        $content = [
+            'title' => $titleCol ? (string) ($data[$titleCol] ?? '') : '',
+            'summary' => $summaryCol ? (string) ($data[$summaryCol] ?? '') : ($bodyCol ? Str::limit(strip_tags((string) ($data[$bodyCol] ?? '')), 500) : ''),
+            'topic' => (string) $automation->prompt_context,
+            'suggestion' => $suggested,
+        ];
+        if (trim($content['title'] . $content['summary'] . $content['topic'] . $suggested) === '') {
+            return null;
+        }
+        [$provider, $model, $apiKey] = $this->resolveTextProvider($automation);
+        try {
+            $res = $this->ai->chooseParent([
+                'provider' => $provider,
+                'model' => $model,
+                'api_key' => $apiKey,
+                'entity' => $rel['entity'],
+                'content' => $content,
+                'candidates' => array_values($rel['options']),
+                'allow_new' => (bool) $rel['allow_create'],
+                'budget_seconds' => 150,
+            ]);
+        } catch (\Throwable $e) {
+            $log('PARENT_DECISION_FAILED', "Could not decide the {$rel['entity']} for `{$col}` separately (" . Str::limit($e->getMessage(), 120) . '); using the writer\'s suggestion.');
+            return null;
+        }
+        $label = trim((string) ($res['label'] ?? ''));
+        if ($label === '' || !in_array($res['decision'] ?? null, ['existing', 'new'], true)) {
+            return null;
+        }
+        $existing = $this->matchOption($label, $rel['options']);
+        if ($res['decision'] === 'new' && $existing === null && !$rel['allow_create']) {
+            return null;
+        }
+        $decision = $existing !== null ? 'reuse' : 'create';
+        $reason = trim((string) ($res['reason'] ?? ''));
+        $log('PARENT_DECIDED', ($decision === 'reuse' ? "Uses the existing {$rel['entity']} '{$existing}'" : "No existing {$rel['entity']} fits; creates '{$label}'") . ($reason !== '' ? ": {$reason}" : '.'), [
+            'column' => $col,
+            'decision' => $decision,
+            'source' => $res['source'] ?? null,
+            'closest' => array_slice((array) ($res['ranked'] ?? []), 0, 3),
+        ]);
+        return ['label' => $existing ?? Str::limit($label, 80, ''), 'decision' => $decision, 'reason' => $reason];
+    }
+
+    /**
+     * The new media-table row for a generated image. When the customer's model has not read the media table yet, it
+     * reads it now (in background runs) so the image's address and details go to the right columns.
+     */
+    private function mediaRow(Automation $automation, DbConnection $connection, array $media, array $imageMeta, string $title, bool $wait, callable $log): array
+    {
+        $builder = app(\App\Services\Data\MediaRowBuilder::class);
+        if (!$builder->ready($connection, $media['table'])) {
+            if (!$wait) {
+                throw new Exception("your AI model is still reading `{$media['table']}`, so it is not known yet where the image goes. It is included once that is done");
+            }
+            $log('MEDIA_TABLE_READING', "Reading `{$media['table']}` with your AI model to know where the image goes.");
+            $insights = app(\App\Services\Data\TableInsightService::class);
+            $meta = app(\App\Services\Data\LiveSchemaService::class)->getCatalog($connection)['tables'][$media['table']] ?? [];
+            $insights->ensure($connection, $media['table'], $meta, true, false);
+            for ($i = 0; $i < 4 && $insights->analyze($connection, $media['table']); $i++) {
+            }
+        }
+        $asset = \App\Models\MediaAsset::where('user_id', $automation->user_id)->findOrFail($imageMeta['asset_id']);
+        return $builder->forAsset($connection, $media['table'], $asset, $title);
     }
 
     /** Small models often open the body with "# <title>"; the title already has its own column. */

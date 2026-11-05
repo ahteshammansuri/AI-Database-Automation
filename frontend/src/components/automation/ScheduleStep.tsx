@@ -10,7 +10,7 @@ import { ariaFor, invalid } from "../../lib/validation";
 import { usePlatform } from "../../context/PlatformContext";
 import {
   WEEKDAYS, addDays, addMinutesHHMM, daysBetween, formatDateShort, formatGap, formatInstant,
-  formatTime12, gapMinutes, isoWeekday, monthMatrix, publishesNextDay, relativeFromNow, runDates, todayIn,
+  formatTime12, gapMinutes, isoWeekday, monthMatrix, nowTimeIn, publishesNextDay, relativeFromNow, runDates, todayIn,
 } from "../../lib/schedule";
 
 export type Frequency = "ONE_TIME" | "DAILY" | "WEEKLY";
@@ -67,6 +67,16 @@ export const ScheduleStep: React.FC<Props> = ({
   const set = (patch: Partial<ScheduleConfig>) => {
     Object.keys(patch).forEach((k) => onFieldEdited?.(k));
     onScheduleChange({ ...s, ...patch });
+  };
+
+  // Times that are still the "now / now + 15 minutes" default follow a new timezone; times the person chose stay.
+  const changeTimezone = (tz: string) => {
+    const now = nowTimeIn(s.timezone);
+    const drift = gapMinutes(s.generation_time, now);
+    const isDefault = drift !== null && (drift <= 5 || drift >= 1435) && gapMinutes(s.generation_time, s.publication_time) === 15;
+    if (!isDefault) return set({ timezone: tz });
+    const fresh = nowTimeIn(tz);
+    set({ timezone: tz, generation_time: fresh, publication_time: addMinutesHHMM(fresh, 15), start_date: s.start_date === today ? todayIn(tz) : s.start_date });
   };
 
   const gap = gapMinutes(s.generation_time, s.publication_time);
@@ -202,7 +212,7 @@ export const ScheduleStep: React.FC<Props> = ({
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <div className="sm:col-span-2 lg:col-span-1">
           <label className="da-label">Timezone</label>
-          <TimezoneSelect value={s.timezone} onChange={(tz) => set({ timezone: tz })} />
+          <TimezoneSelect value={s.timezone} onChange={changeTimezone} />
           <FieldError id="schedule-timezone" message={errors.timezone} />
           {!errors.timezone && <p className="mt-1 text-[11px] text-slate-400">All dates and times below are in this timezone.</p>}
         </div>

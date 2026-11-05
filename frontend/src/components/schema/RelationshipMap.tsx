@@ -1,5 +1,5 @@
 import React from "react";
-import { ArrowLeft, ArrowRight, Link as LinkIcon, PencilLine, ShieldCheck, Sparkles, TableProperties, UserCheck } from "lucide-react";
+import { ArrowLeft, ArrowRight, Brain, Link as LinkIcon, PencilLine, ShieldCheck, Sparkles, TableProperties, UserCheck } from "lucide-react";
 import type { SchemaRelationship, SchemaTable } from "../../types";
 import { formatRows, incomingLinks, thingOf, unlinkedIdColumns } from "./schemaFacts";
 
@@ -18,6 +18,7 @@ export const LinkSourceBadge: React.FC<{ relation: SchemaRelationship; compact?:
     declared: { cls: "da-chip-emerald", icon: ShieldCheck, text: compact ? "Declared" : "Declared · enforced by the database" },
     detected: { cls: "da-chip-amber", icon: Sparkles, text: compact ? "Detected" : "Detected from the name" },
     owner: { cls: "da-chip-violet", icon: UserCheck, text: "Set by you" },
+    ai: { cls: "da-chip-indigo", icon: Brain, text: compact ? "Read by AI" : "Read by your AI model" },
   } as const;
   const b = map[src] ?? map.declared;
   return (
@@ -53,7 +54,7 @@ export const RelationshipMap: React.FC<Props> = ({ table, all, onOpen, onEditLin
   const outgoing = table.relationships || [];
   const incoming = incomingLinks(table, all);
   const unlinked = unlinkedIdColumns(table);
-  const counts = { declared: 0, detected: 0, owner: 0 };
+  const counts = { declared: 0, detected: 0, owner: 0, ai: 0 };
   for (const r of [...outgoing, ...incoming.map((i) => i.relation)]) counts[(r.source ?? "declared") as keyof typeof counts]++;
   const me = thingOf(table.name);
 
@@ -84,7 +85,7 @@ export const RelationshipMap: React.FC<Props> = ({ table, all, onOpen, onEditLin
         </h4>
         {outgoing.length + incoming.length > 0 && (
           <p className="text-[12px] text-slate-500">
-            {[counts.declared && `${counts.declared} declared by the database`, counts.detected && `${counts.detected} detected from column names`, counts.owner && `${counts.owner} set by you`].filter(Boolean).join(" · ")}
+            {[counts.declared && `${counts.declared} declared by the database`, counts.detected && `${counts.detected} detected from column names`, counts.ai && `${counts.ai} read by your AI model`, counts.owner && `${counts.owner} set by you`].filter(Boolean).join(" · ")}
           </p>
         )}
       </div>

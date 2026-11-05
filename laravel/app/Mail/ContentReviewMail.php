@@ -129,9 +129,10 @@ class ContentReviewMail extends Mailable
 
         $relations = [];
         foreach ($meta['relations'] ?? [] as $rel) {
+            $why = !empty($rel['reason']) ? ' Why: ' . rtrim((string) $rel['reason'], '.') . '.' : '';
             $relations[] = match ($rel['decision'] ?? '') {
-                'create' => "New {$rel['entity']} \"{$rel['label']}\" will be created in `{$rel['table']}` and linked.",
-                'reuse' => "Linked to the existing {$rel['entity']} \"{$rel['label']}\".",
+                'create' => "New {$rel['entity']} \"{$rel['label']}\" will be created in `{$rel['table']}` and linked.{$why}",
+                'reuse' => "Linked to the existing {$rel['entity']} \"{$rel['label']}\".{$why}",
                 default => "Linked to {$rel['entity']} {$rel['label']}.",
             };
         }

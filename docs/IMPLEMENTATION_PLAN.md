@@ -226,3 +226,22 @@ Task folder: `docs/tasks/2026-10-29_relations/` (PLAN.md and PROGRESS.md). Decis
 - Composite (multi-column) links are shown when declared but are not offered in pickers.
 - Status-like choices come from at most 5,000 rows; rarer values can still be typed.
 - Automation fields pick an existing parent for "always the same"; new parents there come from the AI choice (as before) or the Data page.
+
+
+## AI field understanding, parent decisions, builder order, schedule defaults (2026-10-30)
+Task folder: `docs/tasks/2026-10-30_ai-field-understanding/`. Decision: ADR-022.
+
+| # | Slice | Status |
+|---|---|---|
+| F1 | AI service `/v1/schema/interpret-table` (roles, meanings, references, value names; embeddings, FAISS retrieval, constrained JSON, small batches) and `/v1/schema/choose-parent`; `/v1/schema/check-link` for claimed links that read like codes; claimed links verified against stored values; rule-based `classify-fields` removed | DONE (verified, real model run) |
+| F2 | `TableInsightService`, `schema_table_insights`, `AnalyzeTableInsightsJob` (`insights` queue, one batch per job, media tables read next), privacy mode respected | DONE (verified) |
+| F3 | AI readings used by links, value names, kinds (automations, manual publishing, Data, Schema Explorer); table profiles fixed (unique ids, keys and links) and enriched | DONE (verified) |
+| F4 | Media references: generated or uploaded images become a new media row first (`MediaRowBuilder`, executor `always_new`) | DONE (verified) |
+| F5 | Parent decision step after writing; unbiased writing prompt | DONE (verified) |
+| F6 | Builder: linked records first, required columns always visible, left-empty columns last, AI reading banner with live refresh and "Read again"; schedule defaults now / now + 15 (start today, follows the timezone), templates no longer force times; manual "schedule for later" now + 15 | DONE (tsc, lint, unit tests, build, browser) |
+| F7 | Cleanup: unused `RelationshipResolverService`, `AutomationRequirementsService`, `CorrectionEngine` and their tests, the field classifier; temporary tests removed | DONE |
+
+**Known limitations**
+- On a loaded CPU-only machine a reading takes minutes (about 1.5 tokens/s were measured); the embedding pass is immediate and pages update when the model answers.
+- Small local models sometimes leave values unnamed or meanings vague; the owner can correct names in the Schema Explorer (owner names always win).
+- Only images are generated for media references; other files (documents, video) are linked to existing rows.

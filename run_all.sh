@@ -53,7 +53,7 @@ echo "[+] Starting Laravel Queue Worker (Supervised)..."
 (
     cd "$DIR/laravel"
     while true; do
-        php artisan queue:work --queue=default --sleep=2 --tries=3 --timeout=120
+        php artisan queue:work --queue=default,insights --sleep=2 --tries=3 --timeout=120
         sleep 2
     done
 ) &

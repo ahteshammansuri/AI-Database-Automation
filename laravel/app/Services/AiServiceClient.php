@@ -420,27 +420,45 @@ class AiServiceClient
     }
 
     /**
-     * Classify schema columns into semantic roles via the AI service field classifier.
-     * Returns an array of classification results per column, or empty array on failure.
+     * What each column of a table stores and what its coded values mean, read by the customer's model with embeddings
+     * and their knowledge index (/v1/schema/interpret-table). Throws when the AI service cannot be reached.
      */
-    public function classifyFields(array $columns): array
+    public function interpretTable(array $payload): array
     {
-        try {
-            $res = $this->client()->post("{$this->baseUrl}/v1/rag/classify-fields", [
-                'columns' => $columns,
-            ]);
-
-            if ($res->successful()) {
-                $data = $res->json();
-                if ($data['success'] ?? false) {
-                    return $data['classifications'] ?? [];
-                }
-            }
-        } catch (\Throwable $e) {
-            // Classification failure is non-fatal; caller proceeds with unknown roles
+        $budget = (int) ($payload['budget_seconds'] ?? 420);
+        $res = $this->agentClient($budget + 60)->post("{$this->baseUrl}/v1/schema/interpret-table", $payload);
+        if (!$res->successful()) {
+            throw new Exception('The AI service could not read the table (HTTP ' . $res->status() . ').');
         }
+        return $res->json() ?? [];
+    }
 
-        return [];
+    /**
+     * A link the model claimed for a column it also read as a coded state, judged against the rows the stored values
+     * would point to (/v1/schema/check-link): link or code, with names for the values. Throws when unreachable.
+     */
+    public function checkLink(array $payload): array
+    {
+        $budget = (int) ($payload['budget_seconds'] ?? 90);
+        $res = $this->agentClient($budget + 20)->post("{$this->baseUrl}/v1/schema/check-link", $payload);
+        if (!$res->successful()) {
+            throw new Exception('The AI service could not check the link (HTTP ' . $res->status() . ').');
+        }
+        return $res->json() ?? [];
+    }
+
+    /**
+     * Reuse an existing parent record for new content or name a new one (/v1/schema/choose-parent): embeddings rank
+     * the existing names, the customer's model decides. Throws when the AI service cannot be reached.
+     */
+    public function chooseParent(array $payload): array
+    {
+        $budget = (int) ($payload['budget_seconds'] ?? 120);
+        $res = $this->agentClient($budget + 30)->post("{$this->baseUrl}/v1/schema/choose-parent", $payload);
+        if (!$res->successful()) {
+            throw new Exception('The AI service could not choose the parent record (HTTP ' . $res->status() . ').');
+        }
+        return $res->json() ?? [];
     }
 
     /**

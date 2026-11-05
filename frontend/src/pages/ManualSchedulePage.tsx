@@ -19,6 +19,8 @@ import { InlineAiFieldAssist } from "../components/common/InlineAiFieldAssist";
 import { LinkPicker } from "../components/links/LinkPicker";
 import { ValuePicker } from "../components/links/ValuePicker";
 import { isNewLink, newLink, type LinkOptions } from "../components/links/linkValue";
+import { useTableInsight } from "../hooks/useTableInsight";
+import { InsightBanner } from "../components/schema/InsightBanner";
 import { isDatabaseNumbered } from "../components/schema/schemaFacts";
 import { useOrbitSurface } from "../hooks/useOrbitSurface";
 import { orbitTargets } from "../services/orbitTargets";
@@ -117,12 +119,11 @@ export const ManualSchedulePage: React.FC = () => {
   const [publishMode, setPublishMode] = useState<"NOW" | "SCHEDULED">("NOW");
   const [scheduleTz, setScheduleTz] = useState<string>(defaultTimeZone());
   // Default: one hour from now, rounded up to 5 minutes (tomorrow if that crosses midnight).
+  // Default: 15 minutes from now in the chosen timezone (tomorrow when that crosses midnight).
   const defaultSlot = (() => {
     const tz = defaultTimeZone();
     const now = nowTimeIn(tz);
-    const [h, m] = addMinutesHHMM(now, 60).split(":").map(Number);
-    const total = (Math.ceil((h * 60 + m) / 5) * 5) % 1440;
-    const clock = `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+    const clock = addMinutesHHMM(now, 15);
     return { date: clock < now ? todayIn(tz, new Date(Date.now() + 86400000)) : todayIn(tz), clock };
   })();
   const [scheduleDate, setScheduleDate] = useState<string>(defaultSlot.date);
@@ -324,13 +325,28 @@ export const ManualSchedulePage: React.FC = () => {
     formColumns.map((c) => [c.name, selectedTable ? refTableFor(c, selectedTable) : null]),
   );
   const groups: Record<"main" | "media" | "content" | "other", SchemaColumn[]> = { main: [], media: [], content: [], other: [] };
-  for (const c of formColumns) {
+  // What the AI model read a column as decides where it goes; names are only a fallback until it has read the table.
+  const isImage = (c: SchemaColumn) => (c.ai_role ? c.ai_role === "image" : MEDIA.test(c.name.toLowerCase()));
+  for (const c of [...formColumns.filter((x) => refTables[x.name]), ...formColumns.filter((x) => !refTables[x.name])]) {
     const n = c.name.toLowerCase();
-    if (refTables[c.name] || ["title", "name", "slug", "status"].includes(n)) groups.main.push(c);
-    else if (MEDIA.test(n)) groups.media.push(c);
+    if (refTables[c.name] || ["title", "slug", "summary"].includes(c.ai_role ?? "") || (!c.ai_role && ["title", "name", "slug"].includes(n)) || c.categorical && !c.nullable) groups.main.push(c);
+    else if (isImage(c)) groups.media.push(c);
     else if ((/text/i.test(c.data_type) || /content|excerpt|description|body|summary/.test(n)) && !n.includes("meta")) groups.content.push(c);
     else groups.other.push(c);
   }
+  // The AI model reads the table in the background; once it has, the form reloads with what it read (typed values stay).
+  const { insight, reread } = useTableInsight(selectedConnId, selectedTable?.name, async () => {
+    if (!selectedConnId || !selectedTable) return;
+    try {
+      const data = await api.getSchema(selectedConnId, true);
+      setSchema(data);
+      const again = (data?.tables || []).find((t: SchemaTable) => t.name === selectedTable.name);
+      if (again) setSelectedTable(again);
+    } catch {
+      // the form keeps working with what it has
+    }
+  });
+
   const thingFor = (col: SchemaColumn) => linkInfo[col.name]?.thing ?? labelFor(col.name).toLowerCase();
 
   /** The values sent: blanks of optional columns become empty (or the database default), never invented. */
@@ -905,6 +921,9 @@ export const ManualSchedulePage: React.FC = () => {
                   </h3>
                   <p className="mt-1.5 text-[13.5px] text-slate-500">Fields marked * are required by your database. Linked fields offer your real rows.</p>
                 </div>
+                {insight && insight.status !== "unavailable" && (insight.status !== "ready" || insight.source !== "model") && selectedTable && (
+                  <InsightBanner insight={insight} table={selectedTable.name} onReread={() => reread()} compact />
+                )}
 
                 {groups.main.length > 0 && (
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">

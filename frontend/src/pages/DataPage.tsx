@@ -173,6 +173,12 @@ export const DataPage: React.FC = () => {
     }
   }, [connectionId, table, page, perPage, sort, search, reveal]);
   useEffect(() => { if (tab === "rows") loadRows(); }, [loadRows, tab]);
+  // While the AI model reads the table (value names, images, links), the rows are reloaded so its results show.
+  useEffect(() => {
+    if (data?.ai?.status !== "pending" || tab !== "rows" || editing) return;
+    const t = setTimeout(() => loadRows(), 10000);
+    return () => clearTimeout(t);
+  }, [data, tab, editing, loadRows]);
 
   const loadHistory = useCallback(async () => {
     if (!connectionId || !table) return;
@@ -477,6 +483,11 @@ export const DataPage: React.FC = () => {
                       )}
                       <button type="button" onClick={loadRows} className="da-icon-btn" aria-label="Refresh rows" title="Refresh"><RefreshCw className={`h-4 w-4 ${rowsLoading ? "animate-spin" : ""}`} /></button>
                     </div>
+                    {data?.ai?.status === "pending" && (
+                      <p className="flex items-center gap-1.5 border-b border-slate-100 bg-violet-50/60 px-4 py-2 text-[12px] text-violet-800">
+                        <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" /> Your AI model is reading {table}{data.ai.progress?.total ? ` (${data.ai.progress.read} of ${data.ai.progress.total} columns)` : ""}: value names, images and links appear here when it is done.
+                      </p>
+                    )}
                     {perms && !perms.insert && !perms.update && perms.reason && (
                       <p className="flex items-center gap-1.5 border-b border-slate-100 bg-slate-50 px-4 py-2 text-[12px] text-slate-500"><ShieldAlert className="h-3.5 w-3.5 shrink-0" /> View only: {perms.reason}</p>
                     )}

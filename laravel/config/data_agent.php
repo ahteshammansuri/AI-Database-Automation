@@ -6,6 +6,8 @@ return [
     'statement_timeout_ms' => (int) env('DATA_AGENT_STATEMENT_TIMEOUT_MS', 8000),
     'write_statement_timeout_ms' => (int) env('DATA_AGENT_WRITE_TIMEOUT_MS', 15000),
     'schema_cache_seconds' => 60,
+    // The customer's model reads each table it fills in the background (TableInsightService).
+    'table_insights' => (bool) env('TABLE_INSIGHTS_ENABLED', true),
     'default_limit' => 50,
     'max_limit' => 500,
     'stored_result_rows' => 200,          // masked rows kept for re-display / paging (encrypted, TTL)

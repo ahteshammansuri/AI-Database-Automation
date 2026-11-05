@@ -5,6 +5,7 @@ namespace App\Services\Automation;
 use App\Models\DbConnection;
 use App\Services\Data\ColumnClassifier;
 use App\Services\Data\LiveSchemaService;
+use App\Services\Data\TableInsightService;
 use PDO;
 
 /**
@@ -138,6 +139,23 @@ class TargetTableInspector
         }
         if (!empty($meta['label_column']) && isset($info['columns'][$meta['label_column']])) {
             $info['label_column'] = $meta['label_column'];
+        }
+        // What the customer's model read each column as (TableInsightService): a kind that fits the column's type
+        // replaces the one guessed from the name, and an image kept in a media table becomes an image reference.
+        foreach ($meta['columns'] ?? [] as $col => $c) {
+            if (!isset($info['columns'][$col]) || empty($c['ai_role'])) {
+                continue;
+            }
+            $info['columns'][$col]['ai_role'] = $c['ai_role'];
+            $info['columns'][$col]['ai_meaning'] = $c['ai_meaning'] ?? null;
+            $kind = TableInsightService::kindFor($c['ai_role'], $c);
+            if (is_string($kind) && !$info['columns'][$col]['foreign_key']) {
+                $info['columns'][$col]['kind'] = $kind;
+            }
+            if ($c['ai_role'] === 'image_reference' && $info['columns'][$col]['foreign_key']) {
+                $info['columns'][$col]['kind'] = 'image';
+                $info['columns'][$col]['media'] = ['table' => $info['columns'][$col]['foreign_key']['table'], 'column' => $info['columns'][$col]['foreign_key']['column']];
+            }
         }
         return $this->cache[$key] = $info;
     }

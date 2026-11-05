@@ -53,9 +53,12 @@ class RelationInference
      * @param  list<array{table: string, columns: list<string>, ref_table: string, ref_columns: list<string>, name?: string, on_delete?: string}>  $declared
      * @param  array<string, array<string, array{mode: string, ref_table?: ?string, ref_column?: ?string}>>  $overrides
      *         lower-case table => lower-case column => owner setting: mode 'none' (not a link) or 'link' (to ref_table.ref_column)
+     * @param  array<string, array<string, array{ref_table: string, meaning?: string}>>  $aiLinks
+     *         lower-case table => lower-case column => the table the customer's model read the column as pointing to
+     *         (TableInsightService); used when the names match nothing, offered as an alternative otherwise
      * @return list<array{table: string, column: string, columns: list<string>, ref_table: string, ref_column: string, ref_columns: list<string>, source: string, enforced: bool, rule: string, reason: string, alternatives: list<string>, name?: string, on_delete: string, on_update?: string}>
      */
-    public static function resolve(array $tables, array $declared, array $overrides = []): array
+    public static function resolve(array $tables, array $declared, array $overrides = [], array $aiLinks = []): array
     {
         $lower = [];
         foreach ($tables as $name => $_) {
@@ -120,8 +123,20 @@ class RelationInference
                     continue; // the row's own id
                 }
                 $found = self::detect($table, $column, $col, $meta, $tables, $targets, $names);
+                $ai = $aiLinks[strtolower($table)][strtolower($column)] ?? null;
+                $aiRef = $ai ? ($names[strtolower((string) $ai['ref_table'])] ?? null) : null;
+                if ($aiRef !== null && self::keyFamily($tables[$aiRef]['columns'][$targets[$aiRef]['pk']]['family'] ?? '') !== self::keyFamily($col['family'] ?? '')) {
+                    $aiRef = null;
+                }
                 if ($found !== null) {
+                    if ($aiRef !== null && $aiRef !== $found['ref_table'] && !in_array($aiRef, $found['alternatives'], true)) {
+                        array_unshift($found['alternatives'], $aiRef);
+                    }
                     $out[] = $found;
+                } elseif ($aiRef !== null && $aiRef !== $table) {
+                    $meaning = trim((string) ($ai['meaning'] ?? ''));
+                    $out[] = self::detected($table, $column, $aiRef, $targets[$aiRef]['pk'], 'ai', 'ai',
+                        "Read by your AI model: {$column} holds the id of a row in {$aiRef}" . ($meaning !== '' ? " ({$meaning})" : '') . '. The database does not enforce this link, so every value is checked before it is saved.', []);
                 }
             }
         }

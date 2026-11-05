@@ -28,7 +28,8 @@ def test_contract_lists_every_field_with_limits_and_options():
     assert "Maximum 60 characters" in text
     assert "About 1300 words" in text
     assert "Databases; Cloud" in text
-    assert "propose a new, short category name" in text
+    assert "a short name (1-3 words, Title Case) that describes it well" in text
+    assert "Prefer one of these existing" not in text, "no bias towards reusing a parent; that is decided afterwards"
     assert '"draft", "published"' in text
     assert "never invent URLs" in text
 

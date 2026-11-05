@@ -492,8 +492,11 @@ class SafeDatabaseExecutor
             return $base + ['status' => 'error', 'action' => 'FAILED', 'details' => "Referenced table `{$refTable}` for `{$column}` was not found."];
         }
 
+        // A new image for a media table (or any row that must not reuse an existing one) is always its own row.
+        $alwaysNew = !empty($opts['always_new']) && $policy === 'CREATE_IF_MISSING';
+
         // 1. Explicit id (its name is reported so previews say "Fashion", not "#3")
-        if (is_int($val) || (is_string($val) && ctype_digit(trim($val)))) {
+        if (!$alwaysNew && (is_int($val) || (is_string($val) && ctype_digit(trim($val))))) {
             $id = (int) $val;
             $nameCol = TargetTableInspector::labelColumn($refInfo);
             $stmt = $pdo->prepare('SELECT ' . ($nameCol ? "`{$nameCol}`" : '1') . " FROM `{$refTable}` WHERE `{$refCol}` = :id LIMIT 1");
@@ -526,9 +529,12 @@ class SafeDatabaseExecutor
             $params['slug'] = $slug;
         }
         $select = "`{$refCol}` AS id" . ($labelCol ? ", `{$labelCol}` AS label" : '');
-        $stmt = $pdo->prepare("SELECT {$select} FROM `{$refTable}` WHERE " . implode(' OR ', $where) . " ORDER BY `{$refCol}` ASC LIMIT 5");
-        $stmt->execute($params);
-        $matches = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $matches = [];
+        if (!$alwaysNew) {
+            $stmt = $pdo->prepare("SELECT {$select} FROM `{$refTable}` WHERE " . implode(' OR ', $where) . " ORDER BY `{$refCol}` ASC LIMIT 5");
+            $stmt->execute($params);
+            $matches = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        }
         if (!empty($matches)) {
             $pick = $matches[0];
             foreach ($matches as $m) {

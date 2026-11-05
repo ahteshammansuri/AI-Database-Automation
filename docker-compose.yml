@@ -70,7 +70,7 @@ services:
       dockerfile: Dockerfile
     container_name: db_automation_queue
     restart: unless-stopped
-    command: php artisan queue:work --queue=default --sleep=2 --tries=3 --timeout=120
+    command: php artisan queue:work --queue=default,insights --sleep=2 --tries=3 --timeout=120
     environment:
       - APP_NAME=AI Database Automation
       - APP_ENV=local

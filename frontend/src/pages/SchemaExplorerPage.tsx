@@ -20,6 +20,8 @@ import { ColumnsTable } from "../components/schema/ColumnsTable";
 import { LinkEditor } from "../components/schema/LinkEditor";
 import { ValueNamesEditor } from "../components/schema/ValueNamesEditor";
 import { Select2 } from "../components/ui/Select2";
+import { InsightBanner } from "../components/schema/InsightBanner";
+import { useTableInsight } from "../hooks/useTableInsight";
 import { accessLabel, formatRows, incomingLinks } from "../components/schema/schemaFacts";
 import { TableAccessControl } from "../components/schema/TableAccessControl";
 
@@ -252,6 +254,9 @@ export const SchemaExplorerPage: React.FC = () => {
       setError(err.message || "The schema could not be read again.");
     }
   };
+
+  // The AI model reads the open table in the background; its results appear here once it is done.
+  const { insight, reread } = useTableInsight(selectedConnId, selectedTable?.name, () => reloadSchema());
 
   const changeDisplayColumn = async (column: string | null) => {
     if (!selectedConnId || !selectedTable) return;
@@ -684,6 +689,10 @@ export const SchemaExplorerPage: React.FC = () => {
                     <span className="flex items-center gap-1.5"><CheckCircle2 className="h-4 w-4 text-emerald-600" /> {linkNotice}</span>
                     <button type="button" onClick={() => setLinkNotice(null)} className="text-emerald-700 hover:text-emerald-900" aria-label="Dismiss">✕</button>
                   </p>
+                )}
+
+                {insight && insight.status !== "unavailable" && (
+                  <InsightBanner insight={insight} table={selectedTable.name} onReread={() => reread()} compact />
                 )}
 
                 <RelationshipMap table={selectedTable} all={schema.tables} onOpen={openTable} onEditLink={(c) => { setLinkNotice(null); setEditLink(c); }} />

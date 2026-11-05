@@ -34,7 +34,7 @@ export interface DataColumn {
   link: {
     table: string;
     column: string;
-    source?: "declared" | "detected" | "owner";
+    source?: "declared" | "detected" | "owner" | "ai";
     enforced?: boolean;
     reason?: string | null;
     /** The value meaning "not linked" (NULL, or 0 on a link the database does not enforce). */
@@ -42,8 +42,11 @@ export interface DataColumn {
   } | null;
   /** enum / boolean: fixed choices; values: a status-like column offered as the values it uses. */
   choices?: "enum" | "boolean" | "values" | null;
-  /** The owner's names for stored values ({"1": "Published"}). */
+  /** Names for stored values ({"1": "Published"}): the owner's, or the customer's AI model's. */
   value_labels?: Record<string, string>;
+  value_labels_source?: "owner" | "ai" | null;
+  /** What the customer's AI model read the column as. */
+  ai_meaning?: string | null;
   personal: boolean;
   comment: string;
 }
@@ -52,6 +55,8 @@ export interface RowsResponse {
   table: string;
   primary_key: string[];
   label_column?: string | null;
+  /** The AI model's reading of the table (pending while it reads). */
+  ai?: { status: string | null; source: string | null; progress: { read: number; total: number } | null };
   columns: DataColumn[];
   hidden_columns: string[];
   rows: Record<string, any>[];

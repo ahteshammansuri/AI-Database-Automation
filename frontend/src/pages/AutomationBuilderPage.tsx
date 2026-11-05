@@ -24,7 +24,7 @@ import { ScheduleStep, ScheduleConfig, ApprovalConfig } from "../components/auto
 import { ContentPreview } from "../components/content/ContentPreview";
 import { WorkProgress, type StepStatus, type WorkStep } from "../components/ui/WorkProgress";
 import type { ProgressEvent } from "../services/api";
-import { defaultTimeZone, gapMinutes, todayIn, addDays, formatTime12 } from "../lib/schedule";
+import { defaultTimeZone, gapMinutes, todayIn, addDays, formatTime12, nowTimeIn, addMinutesHHMM } from "../lib/schedule";
 import { bestTableFor, templateLabel, type TemplateKind } from "../lib/tableMatch";
 
 type Mode = "AI_GENERATED" | "MANUAL";
@@ -47,15 +47,19 @@ const TONES = [
   "Persuasive and benefit-focused",
 ];
 
-const defaultSchedule = (tz: string): ScheduleConfig => ({
-  frequency: "DAILY",
-  start_date: addDays(todayIn(tz), 1),
-  end_date: addDays(todayIn(tz), 7),
-  weekly_days: [],
-  timezone: tz,
-  generation_time: "08:30",
-  publication_time: "09:00",
-});
+/** Starts from now in the chosen timezone: generation at the current time, publication 15 minutes later. */
+const defaultSchedule = (tz: string): ScheduleConfig => {
+  const now = nowTimeIn(tz);
+  return {
+    frequency: "DAILY",
+    start_date: todayIn(tz),
+    end_date: addDays(todayIn(tz), 7),
+    weekly_days: [],
+    timezone: tz,
+    generation_time: now,
+    publication_time: addMinutesHHMM(now, 15),
+  };
+};
 
 /** Where each builder field lives: its input id and wizard step (for messages under the field). */
 const BUILDER_FIELD: Record<string, { id: string; step: number }> = {
@@ -185,7 +189,7 @@ export const AutomationBuilderPage: React.FC = () => {
     }
   }, [schema, pendingKind]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const applyTemplate = (id: string, cfg: { name: string; topic: string; tone: string; frequency: ScheduleConfig["frequency"]; gen: string; pub: string; approval: boolean; manual?: boolean; length?: GenerationOptions["length"]; kind?: TemplateKind }) => {
+  const applyTemplate = (id: string, cfg: { name: string; topic: string; tone: string; frequency: ScheduleConfig["frequency"]; approval: boolean; manual?: boolean; length?: GenerationOptions["length"]; kind?: TemplateKind }) => {
     setSelectedTemplateId(id);
     if (cfg.kind) {
       if (schema?.tables) pickTableFor(cfg.kind, schema.tables);
@@ -197,24 +201,25 @@ export const AutomationBuilderPage: React.FC = () => {
     setMode(cfg.manual ? "MANUAL" : "AI_GENERATED");
     setAiConfig((p) => ({ ...p, topic: cfg.topic }));
     setGenOptions((p) => ({ ...p, tone: cfg.tone, length: cfg.length ?? p.length }));
-    setSchedule((p) => ({ ...p, frequency: cfg.frequency, generation_time: cfg.gen, publication_time: cfg.pub, weekly_days: cfg.frequency === "WEEKLY" ? [1] : [] }));
+    // Times stay at "now" (the person adjusts from there); a template only sets how often it runs.
+    setSchedule((p) => ({ ...p, frequency: cfg.frequency, weekly_days: cfg.frequency === "WEEKLY" ? [1] : [] }));
     setApproval((p) => ({ ...p, require_approval: cfg.approval }));
     toast.success("Template applied", `${cfg.name} settings loaded. You can change anything.`);
   };
 
   const workflowTemplates = [
     { id: "daily_blog", title: "Daily blog post", description: "A new article every day with category, image and SEO fields", icon: FileText, badge: "Popular", color: "text-indigo-600 bg-indigo-50 border-indigo-200",
-      apply: () => applyTemplate("daily_blog", { name: "Daily blog post", topic: "Practical, original articles for our readers about our product area", tone: TONES[0], frequency: "DAILY", gen: "08:30", pub: "09:00", approval: true, kind: "blog" }) },
+      apply: () => applyTemplate("daily_blog", { name: "Daily blog post", topic: "Practical, original articles for our readers about our product area", tone: TONES[0], frequency: "DAILY", approval: true, kind: "blog" }) },
     { id: "weekly_deep_dive", title: "Weekly deep dive", description: "One long, detailed article each week, reviewed by email", icon: BookOpen, badge: "Long form", color: "text-violet-600 bg-violet-50 border-violet-200",
-      apply: () => applyTemplate("weekly_deep_dive", { name: "Weekly deep dive", topic: "In-depth guides with examples and step-by-step instructions", tone: TONES[1], frequency: "WEEKLY", gen: "09:00", pub: "11:00", approval: true, length: "long", kind: "longform" }) },
+      apply: () => applyTemplate("weekly_deep_dive", { name: "Weekly deep dive", topic: "In-depth guides with examples and step-by-step instructions", tone: TONES[1], frequency: "WEEKLY", approval: true, length: "long", kind: "longform" }) },
     { id: "news", title: "News and updates", description: "Short, timely news items published twice a day", icon: Zap, badge: "Short", color: "text-amber-600 bg-amber-50 border-amber-200",
-      apply: () => applyTemplate("news", { name: "News updates", topic: "Short news items and announcements relevant to our audience", tone: TONES[3], frequency: "DAILY", gen: "07:30", pub: "08:00", approval: true, length: "short", kind: "news" }) },
+      apply: () => applyTemplate("news", { name: "News updates", topic: "Short news items and announcements relevant to our audience", tone: TONES[3], frequency: "DAILY", approval: true, length: "short", kind: "news" }) },
     { id: "product_seo", title: "Product descriptions", description: "Benefit-led product copy with SEO fields", icon: Sparkles, badge: "E-commerce", color: "text-emerald-600 bg-emerald-50 border-emerald-200",
-      apply: () => applyTemplate("product_seo", { name: "Product descriptions", topic: "Product highlights, customer benefits and clear specifications", tone: TONES[5], frequency: "WEEKLY", gen: "09:00", pub: "09:30", approval: true, length: "short", kind: "product" }) },
+      apply: () => applyTemplate("product_seo", { name: "Product descriptions", topic: "Product highlights, customer benefits and clear specifications", tone: TONES[5], frequency: "WEEKLY", approval: true, length: "short", kind: "product" }) },
     { id: "faq", title: "FAQ entries", description: "Question-and-answer pairs grounded in your documents", icon: BookOpen, badge: "Knowledge", color: "text-sky-600 bg-sky-50 border-sky-200",
-      apply: () => applyTemplate("faq", { name: "FAQ entries", topic: "Frequently asked questions with direct, accurate answers", tone: TONES[3], frequency: "DAILY", gen: "10:00", pub: "10:30", approval: true, length: "short", kind: "faq" }) },
+      apply: () => applyTemplate("faq", { name: "FAQ entries", topic: "Frequently asked questions with direct, accurate answers", tone: TONES[3], frequency: "DAILY", approval: true, length: "short", kind: "faq" }) },
     { id: "manual_schedule", title: "Manual (no AI)", description: "Fixed values on a schedule; AI is never called", icon: Calendar, badge: "No AI", color: "text-slate-600 bg-slate-100 border-slate-300",
-      apply: () => applyTemplate("manual_schedule", { name: "Scheduled fixed content", topic: "", tone: TONES[0], frequency: "DAILY", gen: "08:30", pub: "09:00", approval: false, manual: true }) },
+      apply: () => applyTemplate("manual_schedule", { name: "Scheduled fixed content", topic: "", tone: TONES[0], frequency: "DAILY", approval: false, manual: true }) },
   ];
 
   // ---------------------------------------------------------------- draft persistence
@@ -395,14 +400,19 @@ export const AutomationBuilderPage: React.FC = () => {
     currentPlanKey.current = `${selectedConnId}:${targetTable}`;
   }, [selectedConnId, targetTable]);
 
-  const loadFieldPlan = useCallback(async () => {
+  const lastPlanRef = useRef<FieldPlan | null>(null);
+  const loadFieldPlan = useCallback(async (silent = false) => {
     if (!selectedConnId || !targetTable) return;
     const key = `${selectedConnId}:${targetTable}`;
-    setPlanLoading(true);
-    setPlanError(null);
+    if (!silent) {
+      setPlanLoading(true);
+      setPlanError(null);
+    }
     try {
       const plan: FieldPlan = await api.getFieldPlan(selectedConnId, targetTable, genOptions.image_provider);
       if (currentPlanKey.current !== key) return;
+      const before = lastPlanRef.current;
+      lastPlanRef.current = plan;
       setFieldPlan(plan);
       setMappings((prev) => {
         const keep = mappingsTableRef.current === key;
@@ -410,17 +420,40 @@ export const AutomationBuilderPage: React.FC = () => {
         const next: Record<string, Mapping> = {};
         for (const c of plan.columns) {
           if (c.is_secret) continue;
-          next[c.name] = keep && prev[c.name] ? prev[c.name] : (c.suggested as Mapping);
+          // A column still on the previous suggestion follows the new one (for example once the AI model has read
+          // the table); a column the person changed keeps their choice.
+          const oldSuggestion = before?.columns.find((x) => x.name === c.name)?.suggested;
+          const untouched = !!oldSuggestion && JSON.stringify(prev[c.name]) === JSON.stringify(oldSuggestion);
+          next[c.name] = keep && prev[c.name] && !untouched ? prev[c.name] : (c.suggested as Mapping);
         }
         return next;
       });
     } catch (e: any) {
-      setPlanError(e.message);
-      setFieldPlan(null);
+      if (!silent) {
+        setPlanError(e.message);
+        setFieldPlan(null);
+      }
     } finally {
-      setPlanLoading(false);
+      if (!silent) setPlanLoading(false);
     }
   }, [selectedConnId, targetTable, genOptions.image_provider]);
+
+  // While the AI model is reading the table, the plan is refreshed so its suggestions appear by themselves.
+  useEffect(() => {
+    if (fieldPlan?.insight?.status !== "pending") return;
+    const t = setTimeout(() => loadFieldPlan(true), 8000);
+    return () => clearTimeout(t);
+  }, [fieldPlan, loadFieldPlan]);
+
+  const rereadTable = async () => {
+    if (!selectedConnId || !targetTable) return;
+    try {
+      await api.tableInsights(selectedConnId, targetTable, true);
+      await loadFieldPlan(true);
+    } catch (e: any) {
+      toast.error("Could not start reading the table", e.message);
+    }
+  };
 
   useEffect(() => {
     if (hydrated) loadFieldPlan();
@@ -1257,7 +1290,7 @@ export const AutomationBuilderPage: React.FC = () => {
                 <h3 className="flex items-center gap-2.5 text-[18px] font-bold tracking-[-0.02em] text-slate-950"><TableProperties className="h-4 w-4 text-indigo-600" /> How each column of <code className="rounded bg-slate-100 px-1.5 text-indigo-700">{targetTable}</code> is filled</h3>
                 <p className="mt-1.5 text-[13.5px] leading-relaxed text-slate-500">Read from your live database. Safe choices are already selected; change only what you need.</p>
               </div>
-              <button type="button" onClick={loadFieldPlan} disabled={planLoading} className="da-btn da-btn-secondary da-btn-sm shrink-0 self-start">
+              <button type="button" onClick={() => loadFieldPlan()} disabled={planLoading} className="da-btn da-btn-secondary da-btn-sm shrink-0 self-start">
                 <RefreshCw className={`h-3.5 w-3.5 ${planLoading ? "animate-spin" : ""}`} /> Re-read table
               </button>
             </div>
@@ -1267,10 +1300,10 @@ export const AutomationBuilderPage: React.FC = () => {
               <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-xs text-rose-800">
                 <p className="font-semibold">Could not read this table.</p>
                 <p className="mt-1">{planError}</p>
-                <button type="button" onClick={loadFieldPlan} className="da-btn da-btn-danger da-btn-sm mt-3">Try again</button>
+                <button type="button" onClick={() => loadFieldPlan()} className="da-btn da-btn-danger da-btn-sm mt-3">Try again</button>
               </div>
             ) : fieldPlan && selectedConnId ? (
-              <FieldMappingStep plan={fieldPlan} mappings={mappings} onChange={(col, m) => setMappings((p) => ({ ...p, [col]: m }))} problems={problems} connectionId={selectedConnId} manual={manual} length={genOptions.length} format={genOptions.content_format} timezone={schedule.timezone} />
+              <FieldMappingStep plan={fieldPlan} mappings={mappings} onChange={(col, m) => setMappings((p) => ({ ...p, [col]: m }))} problems={problems} connectionId={selectedConnId} manual={manual} length={genOptions.length} format={genOptions.content_format} timezone={schedule.timezone} onReread={rereadTable} />
             ) : null}
             {navButtons(2, manual ? "Continue" : "Continue to AI settings")}
           </motion.div>

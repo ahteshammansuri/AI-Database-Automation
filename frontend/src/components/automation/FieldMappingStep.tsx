@@ -1,12 +1,14 @@
 import React, { useState } from "react";
+import { motion } from "framer-motion";
 import { LinkPicker } from "../links/LinkPicker";
 import { ValuePicker } from "../links/ValuePicker";
 import { linkSourceText } from "../links/linkValue";
-import { AlertCircle, ArrowRight, CheckCircle2, ChevronDown, ChevronUp, Cpu, GitBranch, Image as ImageIcon, KeyRound, Link2, Lock, PlusCircle, Settings2, Sparkles } from "lucide-react";
+import { AlertCircle, ArrowRight, Asterisk, Brain, CheckCircle2, ChevronDown, ChevronUp, Cpu, GitBranch, Image as ImageIcon, KeyRound, Link2, Lock, PlusCircle, Settings2, Sparkles } from "lucide-react";
 import { SearchableSelect } from "../common/SearchableSelect";
 import { DatePicker } from "../ui/DatePicker";
 import { TimePicker } from "../ui/TimePicker";
 import { FieldPlan, Mapping, Mode, PlanColumn, explain, groupColumns, mappingFor, modeOf, modeOptions } from "./fieldPlan";
+import { InsightBanner } from "../schema/InsightBanner";
 import { todayIn } from "../../lib/schedule";
 import { orbitTargets } from "../../services/orbitTargets";
 
@@ -20,6 +22,8 @@ interface Props {
   length: string;
   format: string;
   timezone: string;
+  /** Ask the AI model to read the table again. */
+  onReread?: () => void;
 }
 
 const KIND_LABEL: Record<string, string> = {
@@ -42,8 +46,10 @@ const ColumnRow: React.FC<{ col: PlanColumn; table: string } & Omit<Props, "plan
   const Icon = col.relation ? Link2 : col.kind === "image" ? ImageIcon : isAi ? Cpu : Settings2;
 
   return (
-    <div
-      ref={(el) => (el ? orbitTargets.register(`builder.col.${col.name}`, el) : orbitTargets.unregister(`builder.col.${col.name}`))}
+    <motion.div
+      layout="position"
+      transition={{ duration: 0.25 }}
+      ref={(el: HTMLDivElement | null) => (el ? orbitTargets.register(`builder.col.${col.name}`, el) : orbitTargets.unregister(`builder.col.${col.name}`))}
       data-invalid={problem ? "true" : undefined}
       className={`rounded-2xl border p-4 sm:p-5 transition-all ${problem ? "border-rose-300 bg-rose-50/40" : "border-slate-200 bg-white hover:border-indigo-200 hover:shadow-soft"}`}
     >
@@ -60,14 +66,19 @@ const ColumnRow: React.FC<{ col: PlanColumn; table: string } & Omit<Props, "plan
             {col.is_unique && <span className="rounded bg-violet-50 px-1.5 py-0.5 text-[10px] font-semibold text-violet-700">Unique</span>}
             {col.relation && (
               <span className="inline-flex items-center gap-0.5 rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700" title={linkSourceText(col.relation.source)}>
-                <GitBranch className="h-2.5 w-2.5" /> {col.relation.table}{col.relation.source && col.relation.source !== "declared" ? " · detected" : ""}
+                <GitBranch className="h-2.5 w-2.5" /> {col.relation.table}{col.relation.source === "ai" ? " · read by AI" : col.relation.source && col.relation.source !== "declared" ? " · detected" : ""}
               </span>
             )}
           </div>
+          {col.ai_meaning && (
+            <p className="mt-1.5 flex items-start gap-1 text-[11px] leading-snug text-slate-500" title="What your AI model read this column as">
+              <Brain className="mt-0.5 h-3 w-3 shrink-0 text-violet-400" /> <span>{col.ai_meaning}</span>
+            </p>
+          )}
         </div>
 
         <div className="min-w-0 space-y-2">
-          <div className={`grid gap-2 ${needsValueEditor(mode, col) ? "sm:grid-cols-2" : ""}`}>
+          <div className={`grid gap-2 ${needsValueEditor(mode) ? "sm:grid-cols-2" : ""}`}>
             <SearchableSelect
               value={mode}
               onChange={(v) => setMode(v as Mode)}
@@ -75,7 +86,7 @@ const ColumnRow: React.FC<{ col: PlanColumn; table: string } & Omit<Props, "plan
               showSearch={false}
               placeholder="How is it filled?"
             />
-            {needsValueEditor(mode, col) && (
+            {needsValueEditor(mode) && (
               <ValueEditor col={col} table={table} mode={mode} value={m?.fixed_value} onChange={setValue} connectionId={connectionId} timezone={timezone} onLabel={setFixedLabel} />
             )}
           </div>
@@ -86,7 +97,7 @@ const ColumnRow: React.FC<{ col: PlanColumn; table: string } & Omit<Props, "plan
           </p>
         </div>
       </div>
-    </div>
+    </motion.div>
   );
 };
 
@@ -110,7 +121,7 @@ const RelationFlow: React.FC<{ col: PlanColumn; create: boolean }> = ({ col, cre
   );
 };
 
-function needsValueEditor(mode: Mode, col: PlanColumn) {
+function needsValueEditor(mode: Mode) {
   return mode === "FIXED" || mode === "FIXED_REL";
 }
 
@@ -193,7 +204,7 @@ const ValueEditor: React.FC<{ col: PlanColumn; table: string; mode: Mode; value:
 export const FieldMappingStep: React.FC<Props> = (props) => {
   const { plan, mappings, problems } = props;
   const groups = groupColumns(plan, mappings);
-  const [showOther, setShowOther] = useState(Object.keys(problems).some((c) => groups.other.some((o) => o.name === c)));
+  const [showOther, setShowOther] = useState(false);
   const titleColumn = plan.title_column;
 
   const aiCount = plan.columns.filter((c) => ["AI", "AI_CREATE", "AI_REUSE"].includes(modeOf(mappings[c.name], c)) && !c.is_secret).length;
@@ -216,6 +227,7 @@ export const FieldMappingStep: React.FC<Props> = (props) => {
 
   return (
     <div className="space-y-5">
+      {plan.insight && plan.insight.status !== "unavailable" && <InsightBanner insight={plan.insight} table={plan.table} onReread={props.onReread} />}
       <div className={`rounded-2xl border p-4 ${problemCount ? "border-rose-200 bg-rose-50/40" : "border-emerald-200 bg-emerald-50/40"}`}>
         <p className={`flex items-center gap-2 text-[13.5px] font-bold ${problemCount ? "text-rose-800" : "text-emerald-800"}`}>
           {problemCount ? <AlertCircle className="h-4 w-4" /> : <CheckCircle2 className="h-4 w-4" />}
@@ -238,17 +250,10 @@ export const FieldMappingStep: React.FC<Props> = (props) => {
         {!problemCount && <p className="mt-3 text-[12px] text-slate-500">The suggested choices are safe. Change a column below only if you want something different.</p>}
       </div>
 
-      {groups.content.length > 0 && (
-        <section className="space-y-2">
-          <h4 className="text-xs font-bold text-slate-800">Content</h4>
-          {groups.content.map(row)}
-        </section>
-      )}
-
       {groups.relations.length > 0 && (
         <section className="space-y-2">
           <div>
-            <h4 className="text-xs font-bold text-slate-800">Linked records (foreign keys)</h4>
+            <h4 className="text-xs font-bold text-slate-800">Linked records · decide these first</h4>
             <p className="mt-0.5 text-[11px] text-slate-500">
               These columns point at rows in other tables. Each run fills them in the right order: any new parent row
               {parentCreates.length > 0 ? ` (${parentCreates.map((c) => c.relation!.table).join(", ")})` : ""} is created first, then the new {plan.table} row stores its id.
@@ -256,6 +261,23 @@ export const FieldMappingStep: React.FC<Props> = (props) => {
             </p>
           </div>
           {groups.relations.map(row)}
+        </section>
+      )}
+
+      {groups.content.length > 0 && (
+        <section className="space-y-2">
+          <h4 className="text-xs font-bold text-slate-800">Content</h4>
+          {groups.content.map(row)}
+        </section>
+      )}
+
+      {groups.required.length > 0 && (
+        <section className="space-y-2">
+          <div>
+            <h4 className="flex items-center gap-1 text-xs font-bold text-slate-800"><Asterisk className="h-3 w-3 text-amber-600" /> Required by your table</h4>
+            <p className="mt-0.5 text-[11px] text-slate-500">{plan.table} cannot store a row without these. Check the value each one gets{groups.required.some((c) => c.has_default) ? " (some already have a database default)" : ""}.</p>
+          </div>
+          {groups.required.map(row)}
         </section>
       )}
 
@@ -268,9 +290,9 @@ export const FieldMappingStep: React.FC<Props> = (props) => {
             className="flex w-full items-center justify-between rounded-xl border border-slate-200 bg-slate-50/70 px-3 py-2 text-left"
           >
             <span className="text-xs font-bold text-slate-800">
-              Other columns ({groups.other.length})
+              Optional columns ({groups.other.length})
               <span className="ml-1 font-normal text-slate-500">
-                {otherProblems > 0 ? `· ${otherProblems} need${otherProblems === 1 ? "s" : ""} attention` : "· filled automatically with safe defaults"}
+                {otherProblems > 0 ? `· ${otherProblems} need${otherProblems === 1 ? "s" : ""} attention` : "· optional, with safe choices; columns you leave empty are listed last"}
               </span>
             </span>
             {showOther ? <ChevronUp className="h-4 w-4 text-slate-500" /> : <ChevronDown className="h-4 w-4 text-slate-500" />}

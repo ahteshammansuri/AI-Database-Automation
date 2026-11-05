@@ -68,15 +68,13 @@ def build_field_contract(
             entity = _spec_value(spec, "entity") or "item"
             options = [str(o) for o in (_spec_value(spec, "options") or [])][:40]
             allow_new = bool(_spec_value(spec, "allow_new", True))
-            parts = [f"The {entity} this content belongs to."]
-            if options:
-                parts.append("Prefer one of these existing " + entity + " names, copied exactly: " + "; ".join(options) + ".")
-                if allow_new:
-                    parts.append(f"Only if none of them fits, propose a new, short {entity} name (1-3 words, Title Case).")
-                else:
-                    parts.append("You must choose one of them.")
+            if options and not allow_new:
+                parts = [f"The {entity} this content belongs to: one of these existing names, copied exactly: " + "; ".join(options) + "."]
             else:
-                parts.append(f"Propose a short {entity} name (1-3 words, Title Case).")
+                # The name that describes this content best; whether an existing one is reused is decided afterwards.
+                parts = [f"The {entity} this content belongs to: a short name (1-3 words, Title Case) that describes it well."]
+                if options:
+                    parts.append(f"Existing {entity} names, for reference (write one of them only if it is clearly right): " + "; ".join(options) + ".")
         instructions = _spec_value(spec, "instructions")
         if instructions:
             parts.append(str(instructions).strip())

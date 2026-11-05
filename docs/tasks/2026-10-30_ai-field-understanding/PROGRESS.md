@@ -1,0 +1,32 @@
+# Progress: AI field understanding, parent decisions, builder order, schedule defaults (2026-10-30)
+
+## Done
+| Slice | Files | Result |
+|---|---|---|
+| AI service | `services/schema_interpreter.py`, `routers/schema.py`, `content_contract.py` (no "prefer existing" bias), `main.py`; removed `field_classifier.py` and `/v1/rag/classify-fields` | Embedding hints per column, retrieval from the customer's FAISS index, compact constrained prompts in small batches (columns settled by type or a known link are not asked), a constrained follow-up that names stored codes, validation, parent decision with near-duplicate guard. |
+| Laravel reading | migration `2026_10_30_000001`, `SchemaTableInsight`, `TableInsightService`, `AnalyzeTableInsightsJob` (`insights` queue, one batch per job), `AiServiceClient` | Started on first use, redone when columns change, media tables read next, failures rest 10 minutes, privacy mode respected, profiles re-indexed. |
+| Use of the reading | `RelationInference` (AI links), `SchemaRelations` (value names, roles, coded columns, table state), `TargetTableInspector::describeFor` (kinds, media), `FieldPlanBuilder` (media modes, insight in the plan), `LinkedRecords` (upload mode, meanings) | Same reading on every page. |
+| Media rows | `MediaRowBuilder`, `SafeDatabaseExecutor` (`always_new`), `ContentPipeline`, `AutomationController::manualPublish`, `LinkedRecords::prepareParent` | Generated and uploaded images become a media row first; asset ownership checked. |
+| Parent decision | `ContentPipeline::decideParent`, `ContentReviewMail` (reason) | Separate model decision after writing; logged with the reason; shown to reviewers. |
+| Frontend | `FieldMappingStep`, `fieldPlan.ts`, `InsightBanner`, `useTableInsight`, `LinkPicker` (upload), `ScheduleStep`, `AutomationBuilderPage`, `ManualSchedulePage`, `SchemaExplorerPage`, `ColumnsTable`, `RelationshipMap`, `DataPage`, `RowForm`, types | Linked first, required visible, left-empty last; live AI state everywhere; schedule now / now + 15. |
+| Bugs fixed | `SchemaIntrospectionService` (profile ids collided; keys/links missing), two builder buttons passed the click event as a flag, the media table was only read on a second visit, fixed template times | |
+| Cleanup | removed `RelationshipResolverService`, `AutomationRequirementsService`, `CorrectionEngine` (used only by their own tests) and those tests; field classifier | |
+| Fixes from the real-model runs | `schema_interpreter.py` (`file_table`, `_reference_role`, `meaning_role`, value names as required keys, `judge_link`), `routers/schema.py` (`/v1/schema/check-link`), `TableInsightService` (`valuesMatch`, `judgeLink`, `failed` when nothing was answered, `key`/`columns` of other tables), `AiServiceClient::checkLink`, `AnalyzeTableInsightsJob::STEP_SECONDS` | See below. |
+
+## Verification
+Real model: Ollama `qwen2.5:3b` + `nomic-embed-text` on a 4-core CPU, demo database on the fixture MySQL (`items`: name, description, cover int, visibility int 1/2, collection_id; `media_files`: url, path, mime, kind, bytes, original_name; `collections`).
+
+| Run | What the model returned | Fix |
+|---|---|---|
+| 1 | `cover`: role `status`, meaning "ID of the cover image", references `media_files`; `visibility`: no value names (the naming question allowed an empty list, and the model sent `"values": []`) | An id column with a reference is a reference whatever word was used; value names asked with every stored value as a required key |
+| 2 | `items` stopped at the time limit behind other work in Ollama and was marked `ready` with nothing read | A step that answered nothing is `failed`, so it is retried after the 10-minute rest |
+| 3 | `media_files.bytes` "File size in bytes" claimed as a link to `items`; `url`/`path` as `text`; `mime` as `file_kind` | Claimed links checked against stored values (dropped: none of the sizes are item ids); catch-all and close roles follow the model's own meaning |
+| 4 | `visibility` claimed as a link to `collections` (values 1, 2 happen to be ids there) | Link vs code judged against the rows the values would point to (`check-link`) |
+| 5 | Judged a code, but named after the rows shown ("LivingRoom", "Office"); `name` as `seo_description` | Names asked in a separate question without those rows; content roles follow the meaning |
+| 6 (final) | `name` title, `description` summary, `cover` image_reference → `media_files`, `visibility` status 1 = Active, 2 = Hidden; `media_files`: url file_url, path file_path, mime file_mime, kind file_kind, bytes file_size, original_name file_name. 78-260 s per table depending on load. | |
+
+Field plan for `items` built from that reading: `collection_id` linked to `collections` (detected, "AI chooses or creates"), `cover` kind image with media `media_files.id` (AI generated), `visibility` value names Active/Hidden, required columns marked.
+
+Embedding checks (no model): file tables found by their own columns among synthetic tables (`media_files`, `uploads` yes; `categories`, `order_states`, `users` no). On the user's real schemas (names only, read-only) some product tables also read as file tables because their columns hold upload ids, which is why a reference becomes a picture or file only when the column's meaning also reads that way; 16 of 16 sample meanings were classified right (cover, banner, logo, thumbnail, photos, meta image → picture; PDF, video, file → file; product, category, user, attribute, package, author, status → link).
+
+Tests: AI service 129 passed (an earlier run under heavy load had 2 failures in tests that call the live embedding model; both pass on their own and in the re-run); frontend `npm test` 84 passed, `tsc` clean, build OK; Laravel full suite with the demo MySQL, both fixtures, the AI service and `ORBIT_LIVE_EVAL=1`: 295 passed, 0 failed, 0 skipped (live accuracy 16/16). Fixed on the way: `NoveltyCheckTest` (stale `handle()` arguments, a run that was not claimable, an empty approval mock), `PostPublicationAndStagedDiagnosticsTest` (edited a column the draft did not have; the refusal is now asserted), `test_ai_service_down_fails_honestly` (only one endpoint was faked, so a running AI service changed the outcome), `test_ast_read_gate_*` (skips with a message when the parser service is down; a new test checks the gate refuses meanwhile). Temporary test files used for this task were removed after the runs, with the demo account, its connection and database.

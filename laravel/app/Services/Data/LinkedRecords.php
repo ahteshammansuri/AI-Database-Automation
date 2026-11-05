@@ -95,6 +95,8 @@ class LinkedRecords
                 ] : null,
                 'choices' => !empty($c['enum']) ? 'enum' : (($c['family'] ?? '') === 'boolean' ? 'boolean' : (!empty($c['categorical']) || !empty($c['value_labels']) ? 'values' : null)),
                 'value_labels' => (object) ($c['value_labels'] ?? []),
+                'value_labels_source' => $c['value_labels_source'] ?? null,
+                'ai_meaning' => $c['ai_meaning'] ?? null,
                 'personal' => ColumnClassifier::isPii($name),
                 'comment' => $c['comment'] ?? '',
             ];
@@ -176,12 +178,21 @@ class LinkedRecords
 
         $shape = fn ($r) => ['id' => $r['id'], 'label' => isset($r['label']) && $r['label'] !== null && $r['label'] !== '' ? mb_substr((string) $r['label'], 0, 120) : null];
 
+        // An image kept as a row of a media table: a new one is an uploaded image, not a name.
+        $media = ($meta['columns'][$column]['ai_role'] ?? null) === 'image_reference';
+        $create = $this->createInfo($connection, $catalog, $refTable, $context);
+        if ($media && $create['allowed']) {
+            $ready = app(MediaRowBuilder::class)->ready($connection, $refTable);
+            $create = ['mode' => 'upload', 'allowed' => $ready, 'reason' => $ready ? null : "Your AI model is still reading {$refTable}, so it is not known yet where an uploaded image goes."] + $create;
+        }
+
         return $base + [
             'label_column' => $label,
             'options' => array_map($shape, $rows),
             'total' => $total,
             'selected' => $current ? $shape($current) : null,
-            'create' => $this->createInfo($connection, $catalog, $refTable, $context),
+            'create' => $create,
+            'media' => $media,
             'blocked' => false,
         ];
     }
@@ -284,6 +295,18 @@ class LinkedRecords
                 $values[$k] = is_string($v) ? trim($v) : $v;
             }
         }
+        // An image the customer uploaded for a media table: its columns are filled from the AI's reading of that table.
+        if (is_array($given['$media'] ?? null)) {
+            $asset = \App\Models\MediaAsset::where('user_id', $connection->user_id)->find((int) ($given['$media']['asset_id'] ?? 0));
+            if (!$asset) {
+                return ['values' => [], 'errors' => [$label ?? 'file' => 'The uploaded image was not found. Upload it again.'], 'label' => '', 'existing' => null, 'only_name' => false];
+            }
+            $media = app(MediaRowBuilder::class)->forAsset($connection, $refTable, $asset, (string) ($given['$media']['name'] ?? $asset->original_filename ?? 'image'));
+            $values = $media['values'] + $values;
+            if ($label) {
+                $values[$label] = $media['label'];
+            }
+        }
         $name = $label ? (string) ($values[$label] ?? '') : '';
         if ($label && $name === '') {
             return ['values' => [], 'errors' => [$label => 'Enter a name.'], 'label' => '', 'existing' => null, 'only_name' => true];
@@ -291,7 +314,7 @@ class LinkedRecords
 
         // Only a name was typed: a row with that name already exists, so that one is used. A filled-in form always
         // adds its own row (two people can share a name).
-        $onlyName = !array_filter($values, fn ($v, $k) => $k !== $label && $v !== '' && $v !== null, ARRAY_FILTER_USE_BOTH);
+        $onlyName = !isset($given['$media']) && !array_filter($values, fn ($v, $k) => $k !== $label && $v !== '' && $v !== null, ARRAY_FILTER_USE_BOTH);
         $existing = $label && $onlyName ? $this->findByLabel($connection, $refTable, $ref, $name) : null;
         if ($existing !== null) {
             return ['values' => [], 'errors' => [], 'label' => $name, 'existing' => $existing, 'only_name' => true];

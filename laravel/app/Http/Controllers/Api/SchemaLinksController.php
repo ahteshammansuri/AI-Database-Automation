@@ -249,6 +249,14 @@ class SchemaLinksController extends Controller
         return response()->json($this->linked->check($connection, $v['table'], $v['column'], $v['ref_tables']));
     }
 
+    /** What the customer's model has read about a table; starts the reading when there is none (or the columns changed). */
+    public function insights(Request $request, int $id, string $table): JsonResponse
+    {
+        $connection = $this->connection($request, $id);
+        $meta = $this->table($connection, $table);
+        return response()->json(app(\App\Services\Data\TableInsightService::class)->ensure($connection, $table, $meta, $request->isMethod('post')));
+    }
+
     private function currentLink(DbConnection $connection, string $table, string $column): ?array
     {
         foreach ($this->schema->getCatalog($connection)['tables'][$table]['foreign_keys'] ?? [] as $fk) {

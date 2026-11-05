@@ -48,8 +48,9 @@ class SchemaRelations
     public function decorateCatalog(DbConnection $connection, array $catalog): array
     {
         $settings = $this->settings($connection);
+        $insights = app(TableInsightService::class)->forConnection($connection);
         $declared = array_values(array_filter($catalog['foreign_keys'] ?? [], fn ($fk) => ($fk['source'] ?? 'declared') === 'declared'));
-        $links = RelationInference::resolve($catalog['tables'] ?? [], $declared, $settings['links']);
+        $links = RelationInference::resolve($catalog['tables'] ?? [], $declared, $settings['links'], self::aiLinks($insights));
 
         $byColumn = [];
         foreach ($catalog['tables'] as $name => $meta) {
@@ -70,13 +71,20 @@ class SchemaRelations
 
         foreach ($catalog['tables'] as $name => $meta) {
             $lt = strtolower($name);
+            $ai = $insights[$name] ?? null;
             $catalog['tables'][$name]['label_column'] = $this->displayColumn($settings['display'][$lt] ?? null, $meta['columns'] ?? [])
                 ?? RelationInference::labelColumn($name, $meta['columns'] ?? []);
+            $catalog['tables'][$name]['ai'] = self::tableAi($ai);
             foreach ($meta['columns'] ?? [] as $col => $c) {
                 $isPk = in_array($col, (array) ($meta['primary_key'] ?? []), true);
-                $catalog['tables'][$name]['columns'][$col]['value_labels'] = $settings['values'][$lt][strtolower($col)] ?? [];
-                $catalog['tables'][$name]['columns'][$col]['categorical'] = !$isPk && empty($byColumn[$name][$col])
-                    && empty($c['enum']) && RelationInference::isCategorical((string) $col, $c);
+                $read = $ai['columns'][$col] ?? null;
+                [$labels, $source] = self::valueLabels($settings['values'][$lt][strtolower($col)] ?? [], $read);
+                $catalog['tables'][$name]['columns'][$col]['value_labels'] = $labels;
+                $catalog['tables'][$name]['columns'][$col]['value_labels_source'] = $source;
+                $catalog['tables'][$name]['columns'][$col]['ai_role'] = $read['role'] ?? null;
+                $catalog['tables'][$name]['columns'][$col]['ai_meaning'] = $read['meaning'] ?? null;
+                $catalog['tables'][$name]['columns'][$col]['categorical'] = !$isPk && empty($byColumn[$name][$col]) && empty($c['enum'])
+                    && (RelationInference::isCategorical((string) $col, $c) || self::codedByAi($read, $c, (string) $col));
             }
         }
 
@@ -133,8 +141,9 @@ class SchemaRelations
             }
         }
 
+        $insights = app(TableInsightService::class)->forConnection($connection);
         $byTable = [];
-        foreach (RelationInference::resolve($tables, $declared, $settings['links']) as $l) {
+        foreach (RelationInference::resolve($tables, $declared, $settings['links'], self::aiLinks($insights)) as $l) {
             $byTable[$l['table']][] = $l;
         }
 
@@ -161,19 +170,63 @@ class SchemaRelations
             $payload['tables'][$i]['label_column'] = $this->displayColumn($settings['display'][$lt] ?? null, $tables[$name]['columns'])
                 ?? RelationInference::labelColumn($name, $tables[$name]['columns']);
             $payload['tables'][$i]['display_column'] = $settings['display'][$lt] ?? null;
+            $ai = $insights[$name] ?? null;
+            $payload['tables'][$i]['ai'] = self::tableAi($ai);
             foreach ($t['columns'] ?? [] as $j => $c) {
                 $col = $c['name'];
                 $meta = $tables[$name]['columns'][$col];
                 $link = $links[$col] ?? null;
+                $read = $ai['columns'][$col] ?? null;
+                [$labels, $source] = self::valueLabels($settings['values'][$lt][strtolower($col)] ?? [], $read);
                 $payload['tables'][$i]['columns'][$j]['is_foreign_key'] = $link !== null;
                 $payload['tables'][$i]['columns'][$j]['link_setting'] = $settings['links'][$lt][strtolower($col)]['mode'] ?? 'auto';
-                $payload['tables'][$i]['columns'][$j]['value_labels'] = $settings['values'][$lt][strtolower($col)] ?? [];
+                $payload['tables'][$i]['columns'][$j]['value_labels'] = $labels;
+                $payload['tables'][$i]['columns'][$j]['value_labels_source'] = $source;
+                $payload['tables'][$i]['columns'][$j]['ai_role'] = $read['role'] ?? null;
+                $payload['tables'][$i]['columns'][$j]['ai_meaning'] = $read['meaning'] ?? null;
                 $payload['tables'][$i]['columns'][$j]['categorical'] = $link === null && empty($c['is_primary_key']) && empty($meta['enum'])
-                    && RelationInference::isCategorical($col, $meta);
+                    && (RelationInference::isCategorical($col, $meta) || self::codedByAi($read, $meta, $col));
             }
         }
 
         return $payload;
+    }
+
+    /** Links the customer's model read (id columns that point to another table), in RelationInference's shape. */
+    private static function aiLinks(array $insights): array
+    {
+        $out = [];
+        foreach ($insights as $table => $i) {
+            foreach ((array) ($i['columns'] ?? []) as $col => $c) {
+                if (!empty($c['references_table'])) {
+                    $out[strtolower($table)][strtolower($col)] = ['ref_table' => $c['references_table'], 'meaning' => $c['meaning'] ?? '', 'role' => $c['role'] ?? null];
+                }
+            }
+        }
+        return $out;
+    }
+
+    /** Value names: the owner's, else those the model gave (and which they are). */
+    private static function valueLabels(array $owner, ?array $read): array
+    {
+        if ($owner) {
+            return [$owner, 'owner'];
+        }
+        $ai = (array) ($read['value_names'] ?? []);
+        return $ai ? [array_map('strval', $ai), 'ai'] : [[], null];
+    }
+
+    /** The model read the column as a coded state, kind or switch and saw a short list of values. */
+    private static function codedByAi(?array $read, array $c, string $column): bool
+    {
+        return $read && in_array($read['role'] ?? '', ['status', 'type', 'flag'], true) && !empty($read['values'])
+            && in_array($c['family'] ?? '', ['integer', 'string'], true) && ColumnClassifier::classify($column)['class'] === 'standard';
+    }
+
+    /** What the UI says about the model's reading of a table. */
+    private static function tableAi(?array $ai): ?array
+    {
+        return $ai ? ['status' => $ai['status'], 'source' => $ai['source'], 'summary' => $ai['summary'], 'analyzed_at' => $ai['analyzed_at']] : null;
     }
 
     /** The owner's display column when it still exists and may name rows (text, not secret, not personal). */
